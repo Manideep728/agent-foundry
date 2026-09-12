@@ -318,7 +318,7 @@ def test_a_float_measurement_is_rejected(repo: SqliteRunRepository) -> None:
                 score=a_score(),
                 outcome=AgentOutcome.CLEAN_PATCH,
                 patch_is_empty=False,
-                agent_ms=1100.5,  # type: ignore[arg-type]
+                agent_ms=1100.5,
             ),
             RunState.VALIDATING,
         )
