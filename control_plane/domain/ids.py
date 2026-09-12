@@ -69,6 +69,13 @@ class TaskId:
     def __str__(self) -> str:
         return self.value
 
+    def __format__(self, spec: str) -> str:
+        # Without this, `f"{task_id:<24}"` raises TypeError: a dataclass
+        # inherits object.__format__, which rejects any non-empty spec. These
+        # wrap a string and are printed in aligned columns, so they must format
+        # like the string they wrap.
+        return format(self.value, spec)
+
 
 @dataclass(frozen=True, slots=True)
 class RunId:
@@ -81,3 +88,6 @@ class RunId:
 
     def __str__(self) -> str:
         return self.value
+
+    def __format__(self, spec: str) -> str:
+        return format(self.value, spec)

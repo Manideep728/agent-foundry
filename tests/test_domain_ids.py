@@ -96,3 +96,19 @@ def test_task_and_run_ids_are_distinct_types() -> None:
     task: object = TaskId("shared")
     run: object = RunId("shared")
     assert task != run
+
+
+@pytest.mark.parametrize("id_type", ID_TYPES)
+def test_identifiers_support_format_specifications(
+    id_type: type[TaskId] | type[RunId],
+) -> None:
+    # Regression. A dataclass inherits object.__format__, which raises
+    # TypeError on any non-empty spec -- so `f"{run_id:<24}"` crashed `af
+    # list` while plain `f"{run_id}"` worked fine everywhere else, which is why
+    # it survived until something printed a column.
+    identifier = id_type("demo")
+
+    assert f"{identifier}" == "demo"
+    assert f"{identifier:<8}|" == "demo    |"
+    assert f"{identifier:>8}|" == "    demo|"
+    assert format(identifier, "") == "demo"
