@@ -14,9 +14,12 @@ run twice produces two comparable records.
 
 ## Status
 
-Phase 0. The decision record and project scaffolding exist. **No application
-code is implemented yet.** Sections describing behaviour, commands and
-measurements are added as that behaviour lands, not before.
+Phase 1, in progress. The decision record, the Python package skeleton and the
+build tooling exist. **The execution supervisor, the agent pipeline and the
+benchmark do not.** `af` currently exposes only `--version`.
+
+Sections describing behaviour, commands and measurements are added as that
+behaviour lands, not before.
 
 Design decisions made so far are in [docs/DECISIONS.md](docs/DECISIONS.md).
 
