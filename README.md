@@ -20,6 +20,21 @@ measurements are added as that behaviour lands, not before.
 
 Design decisions made so far are in [docs/DECISIONS.md](docs/DECISIONS.md).
 
+## Build and test
+
+Requires [uv](https://docs.astral.sh/uv/). The Python toolchain is pinned to
+3.12 by `.python-version`; uv fetches it if absent.
+
+```
+make sync     # create the virtualenv from pyproject.toml
+make check    # lint, typecheck, tests -- everything CI runs
+make test     # tests only
+make run ARGS=--version
+```
+
+`make help` lists the documented targets. Nothing in the project requires
+make; every target is a plain `uv` command.
+
 ## Scope
 
 In scope for the first release: a C++ execution supervisor, a Python control
