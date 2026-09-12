@@ -49,6 +49,19 @@ class FailureCategory(StrEnum):
     """Docker was unreachable, the image was missing, or the container was
     killed by the host -- exit 137 being the case that matters most here."""
 
+    VALIDATION_INCOMPLETE = "validation_incomplete"
+    """Validation ran but did not finish: the runner was aborted, or a command
+    was never run. A command that never ran cannot be said to have failed --
+    the patch was never given the chance."""
+
+    TASK_INVALID = "task_invalid"
+    """The task itself is broken. Includes the case where an empty patch scores
+    as resolved, which means the task cannot measure anything."""
+
+    INTERRUPTED = "interrupted"
+    """The control plane died mid-run. Found by the recovery scan at startup,
+    never set by a running process."""
+
 
 @unique
 class AgentOutcome(StrEnum):

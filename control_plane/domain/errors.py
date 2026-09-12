@@ -23,3 +23,7 @@ class InvalidTaskDefinition(DomainError):
 
 class InvalidValidationReport(DomainError):
     """A runner result violated the contract the two languages share."""
+
+
+class InvalidTransition(DomainError):
+    """A run was asked to move to a state it cannot reach from its current one."""
