@@ -1,0 +1,56 @@
+[project]
+name = "agentfoundry"
+description = "Reproducible execution and evaluation harness for AI coding agents"
+requires-python = ">=3.12"
+dynamic = ["version"]
+
+# Intentionally empty. The control plane targets the standard library for v1:
+# dataclasses, tomllib, sqlite3, argparse, subprocess. A provider SDK arrives
+# with the first real model adapter and not before.
+dependencies = []
+
+[project.scripts]
+af = "control_plane.interface.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# Single source of truth for the version. Reading it from the package means a
+# pyproject/package mismatch is not possible rather than merely tested for.
+[tool.hatch.version]
+path = "control_plane/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["control_plane"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.7",
+    "mypy>=1.13",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Markers for tests that need something the machine may not have. CI runs all
+# of them; a laptop without Docker can still run the rest.
+markers = [
+    "docker: requires a working Docker daemon",
+    "container: must run inside the validation container (asserts PID 1)",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+# The domain layer is pure logic; there is no excuse for an untyped def there,
+# and strict mode is enforced across the whole package rather than per-module.
+disallow_any_explicit = false
