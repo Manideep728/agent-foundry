@@ -1,0 +1,322 @@
+"""Driving one task from nothing to a measurement.
+
+Two rules shape the order of operations here.
+
+**Persist before acting.** Each state is written before the step it authorises
+begins. The one that matters most on a small Docker VM is VALIDATING: written
+after invoking the runner instead of before, a crash mid-validation leaves a
+container alive and a run recorded as AGENT_RUNNING, whose recovery action is
+`NOTHING` -- so nothing cleans the container up, and the symptom is the *next*
+run failing for an unrelated reason.
+
+**Never catch what you cannot classify.** `PreconditionViolated` means this
+code called a domain function wrongly; letting it escape as a crash is what
+stops a forgotten check from producing a plausible number. An unexpected
+exception is likewise not mapped to a category -- doing so would record an
+internal bug as an infrastructure failure forever. The run is left non-terminal
+and the recovery scan marks it INTERRUPTED.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from pathlib import Path
+
+from control_plane.adapters.diffing import diff_workspace
+from control_plane.adapters.fixtures import digest_tree
+from control_plane.adapters.sqlite_repo import SqliteRunRepository
+from control_plane.adapters.workspace import WorkspaceFactory
+from control_plane.domain.errors import DomainError
+from control_plane.domain.model import ModelInvocation, total_micros
+from control_plane.domain.outcomes import AgentOutcome, FailureCategory
+from control_plane.domain.patch import Patch
+from control_plane.domain.ports import Clock, IdGenerator
+from control_plane.domain.record import RunRecord
+from control_plane.domain.scoring import (
+    Score,
+    check_report_matches_task,
+    classify,
+    is_task_defect,
+    score,
+)
+from control_plane.domain.states import EvaluationRun, RunState
+from control_plane.domain.task import TaskDefinition
+from control_plane.domain.validation import ValidationReport
+from control_plane.services.errors import (
+    AgentError,
+    RunnerFailed,
+    RunnerUnavailable,
+)
+from control_plane.services.ports import AgentPort, ValidationRequest, ValidationRunner
+
+UNKNOWN_ARCH = "unknown"
+"""Recorded until a report supplies the real one.
+
+A run that never reached validation genuinely does not know what architecture
+it would have run on, and a benchmark table that filters on arch will exclude
+it -- which is correct, because it produced no measurement.
+"""
+
+
+class EvaluationService:
+    def __init__(
+        self,
+        *,
+        repository: SqliteRunRepository,
+        runner: ValidationRunner,
+        agent: AgentPort,
+        workspaces: WorkspaceFactory,
+        clock: Clock,
+        ids: IdGenerator,
+        fixtures_root: Path,
+    ) -> None:
+        self._repo = repository
+        self._runner = runner
+        self._agent = agent
+        self._workspaces = workspaces
+        self._clock = clock
+        self._ids = ids
+        self._fixtures_root = fixtures_root
+
+    def execute(self, task: TaskDefinition) -> RunRecord:
+        run = EvaluationRun.create(
+            self._ids.new_run_id(), task.task_id, self._clock.now_unix_ms()
+        )
+        base = self._base_record(run, task)
+        # Written before anything creates external state: a directory nothing
+        # knows about is invisible to the recovery scan, while a row with no
+        # directory is harmless.
+        self._repo.create(base)
+
+        workspace = None
+        try:
+            run = self._advance(run, RunState.PREPARING)
+
+            fixture_root = self._fixtures_root / task.fixture_id
+            try:
+                digest, entries = digest_tree(fixture_root)
+            except DomainError as error:
+                return self._fail(
+                    run, task, FailureCategory.WORKSPACE_SETUP_FAILED, str(error)
+                )
+            if digest != task.fixture_sha256:
+                return self._fail(
+                    run,
+                    task,
+                    FailureCategory.FIXTURE_HASH_MISMATCH,
+                    f"fixture is {digest}, task pins {task.fixture_sha256}",
+                )
+
+            try:
+                workspace = self._workspaces.create(run.run_id)
+                self._workspaces.copy_fixture(workspace, fixture_root)
+            except DomainError as error:
+                return self._fail(
+                    run, task, FailureCategory.WORKSPACE_SETUP_FAILED, str(error)
+                )
+
+            run = self._advance(run, RunState.AGENT_RUNNING)
+            agent_started = self._clock.monotonic_ms()
+            try:
+                invocation = self._agent.edit(workspace.repo, task)
+            except AgentError as error:
+                return self._fail(run, task, FailureCategory.AGENT_ERROR, str(error))
+            agent_ms = self._clock.monotonic_ms() - agent_started
+
+            # Captured before validation runs, so the test artefacts validation
+            # writes cannot reach the patch even if an exclusion rule slips.
+            patch = diff_workspace(entries, fixture_root, workspace.repo)
+            workspace.patch_path.write_text(patch.unified_diff, encoding="utf-8")
+
+            run = self._advance(run, RunState.VALIDATING)
+            validation_started = self._clock.monotonic_ms()
+            try:
+                report = self._runner.run(
+                    ValidationRequest(
+                        run_id=run.run_id,
+                        workdir=workspace.repo,
+                        output_dir=workspace.out,
+                        log_dir=workspace.logs,
+                        commands=task.command_file_lines(),
+                        per_command_timeout_ms=task.per_command_timeout_ms,
+                        total_timeout_ms=task.total_timeout_ms,
+                    )
+                )
+            except RunnerUnavailable as error:
+                return self._fail(
+                    run, task, FailureCategory.INFRASTRUCTURE_FAILED, str(error)
+                )
+            except RunnerFailed as error:
+                return self._fail(run, task, FailureCategory.RUNNER_FAILED, str(error))
+            validation_ms = self._clock.monotonic_ms() - validation_started
+
+            return self._score(
+                run,
+                task,
+                report,
+                patch,
+                invocation,
+                agent_ms,
+                validation_ms,
+                str(workspace.root),
+            )
+        except KeyboardInterrupt:
+            # An abort is expected operator behaviour, not a defect. Kept out
+            # of FAILED so harness reliability is not polluted by every ^C.
+            aborted = run.abort(self._clock.now_unix_ms())
+            self._repo.finish(self._base_record(aborted, task), expected=run.state)
+            raise
+        finally:
+            if workspace is not None and run.state is RunState.SCORED:
+                self._workspaces.discard_repo(workspace)
+
+    # --- steps ---------------------------------------------------------------
+
+    def _advance(self, run: EvaluationRun, state: RunState) -> EvaluationRun:
+        previous = run.state
+        moved = run.transition_to(state, self._clock.now_unix_ms())
+        self._repo.advance(moved, expected=previous)
+        return moved
+
+    def _score(
+        self,
+        run: EvaluationRun,
+        task: TaskDefinition,
+        report: ValidationReport,
+        patch: Patch,
+        invocation: ModelInvocation,
+        agent_ms: int,
+        validation_ms: int,
+        workspace_path: str,
+    ) -> RunRecord:
+        mismatch = check_report_matches_task(task, report)
+        if mismatch is not None:
+            # The mismatch carries its own category: a NOT_RUN command is
+            # VALIDATION_INCOMPLETE, a SPAWN_FAILED one is RUNNER_FAILED.
+            # Neither is an agent result.
+            return self._fail(
+                run,
+                task,
+                mismatch.category,
+                mismatch.reason,
+                report=report,
+                patch=patch,
+                invocation=invocation,
+                agent_ms=agent_ms,
+                validation_ms=validation_ms,
+                workspace_path=workspace_path,
+            )
+
+        result = score(task, report)
+        patch_is_empty = patch.is_empty
+
+        if is_task_defect(result, patch_is_empty=patch_is_empty):
+            # Evidence is kept: FAILED forbids an outcome but not a report or a
+            # score, and without them the defect is unactionable.
+            return self._fail(
+                run,
+                task,
+                FailureCategory.TASK_INVALID,
+                "an empty patch resolved the task, so it measures nothing",
+                report=report,
+                score_result=result,
+                patch=patch,
+                invocation=invocation,
+                agent_ms=agent_ms,
+                validation_ms=validation_ms,
+                workspace_path=workspace_path,
+                task_defect=True,
+            )
+
+        scored = run.transition_to(RunState.SCORED, self._clock.now_unix_ms())
+        record = self._base_record(
+            scored,
+            task,
+            report=report,
+            score_result=result,
+            outcome=classify(result, patch_is_empty=patch_is_empty),
+            patch=patch,
+            invocation=invocation,
+            agent_ms=agent_ms,
+            validation_ms=validation_ms,
+            workspace_path=workspace_path,
+        )
+        self._repo.finish(record, expected=RunState.VALIDATING)
+        return record
+
+    def _fail(
+        self,
+        run: EvaluationRun,
+        task: TaskDefinition,
+        kind: FailureCategory,
+        detail: str,
+        *,
+        report: ValidationReport | None = None,
+        score_result: Score | None = None,
+        patch: Patch | None = None,
+        invocation: ModelInvocation | None = None,
+        agent_ms: int | None = None,
+        validation_ms: int | None = None,
+        workspace_path: str | None = None,
+        task_defect: bool = False,
+    ) -> RunRecord:
+        expected = run.state
+        failed = run.fail(kind, self._clock.now_unix_ms(), detail)
+        record = self._base_record(
+            failed,
+            task,
+            report=report,
+            score_result=score_result,
+            patch=patch,
+            invocation=invocation,
+            agent_ms=agent_ms,
+            validation_ms=validation_ms,
+            workspace_path=workspace_path,
+            task_defect=task_defect,
+        )
+        self._repo.finish(record, expected=expected)
+        return record
+
+    def _base_record(
+        self,
+        run: EvaluationRun,
+        task: TaskDefinition,
+        *,
+        report: ValidationReport | None = None,
+        score_result: Score | None = None,
+        outcome: AgentOutcome | None = None,
+        patch: Patch | None = None,
+        invocation: ModelInvocation | None = None,
+        agent_ms: int | None = None,
+        validation_ms: int | None = None,
+        workspace_path: str | None = None,
+        task_defect: bool = False,
+    ) -> RunRecord:
+        invocations = (invocation,) if invocation is not None else ()
+        unified = patch.unified_diff if patch is not None else None
+
+        return RunRecord(
+            run=run,
+            suite=task.suite,
+            fixture_sha256=task.fixture_sha256,
+            runner_id=self._runner.runner_id,
+            runner_version=self._runner.runner_version,
+            arch=report.arch if report is not None else UNKNOWN_ARCH,
+            pid1=report.pid1 if report is not None else False,
+            report=report,
+            score=score_result,
+            outcome=outcome,
+            task_defect=task_defect,
+            patch_sha256=(
+                hashlib.sha256(unified.encode("utf-8")).hexdigest()
+                if unified is not None
+                else None
+            ),
+            patch_bytes=len(unified.encode("utf-8")) if unified is not None else 0,
+            patch_is_empty=patch.is_empty if patch is not None else None,
+            invocations=invocations,
+            total_cost_micros=total_micros(i.cost for i in invocations),
+            agent_ms=agent_ms,
+            validation_ms=validation_ms,
+            workspace_path=workspace_path,
+        )
