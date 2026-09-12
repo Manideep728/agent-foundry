@@ -188,8 +188,12 @@ def test_a_backgrounded_grandchild_does_not_hold_the_run_open(
 def test_exhausting_the_total_budget_leaves_later_commands_not_run(
     tmp_path: Path,
 ) -> None:
+    # total_ms equals per_command_ms so the first command alone exhausts the
+    # budget. An earlier version left 100ms spare, which `true` fitted inside
+    # -- so nothing was skipped and the test asserted against a run that had
+    # legitimately completed.
     request = request_for(
-        tmp_path, ("sleep 5", "true", "true"), per_command_ms=300, total_ms=400
+        tmp_path, ("sleep 5", "true", "true"), per_command_ms=300, total_ms=300
     )
     report = LocalRunner(RealClock()).run(request)
 
@@ -235,3 +239,30 @@ def test_every_report_satisfies_the_domain_invariants(
     # constructing these proves the runner fills the contract consistently.
     report = LocalRunner(RealClock()).run(request_for(tmp_path, (command,)))
     assert report.schema_version == 1
+
+
+def test_a_command_that_obeys_sigterm_is_still_a_timeout(tmp_path: Path) -> None:
+    # Regression. `sleep` dies on SIGTERM inside the grace period, so the
+    # runner never escalates to SIGKILL. An earlier version read "did not need
+    # SIGKILL" as "we did not kill it" and reported SIGNALED -- a command that
+    # blew its deadline looked like a spontaneous crash, and the timeout rate
+    # would have been silently zero.
+    request = request_for(tmp_path, ("sleep 30",), per_command_ms=300)
+    result = LocalRunner(RealClock()).run(request).commands[0]
+
+    assert result.outcome is CommandOutcome.TIMEOUT
+    assert result.deadline_signal_sent
+    assert not result.killed_after_grace  # SIGTERM was enough
+
+
+def test_a_command_that_ignores_sigterm_is_killed_after_the_grace_period(
+    tmp_path: Path,
+) -> None:
+    # The other side of the same distinction, and the reason the two facts are
+    # recorded separately.
+    request = request_for(tmp_path, ('trap "" TERM; sleep 30',), per_command_ms=300)
+    result = LocalRunner(RealClock()).run(request).commands[0]
+
+    assert result.outcome is CommandOutcome.TIMEOUT
+    assert result.deadline_signal_sent
+    assert result.killed_after_grace

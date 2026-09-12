@@ -55,7 +55,7 @@ GRACE_MS = 5_000
 
 
 def decide_outcome(
-    returncode: int, deadline_fired: bool, killed_by_us: bool
+    returncode: int, deadline_fired: bool, died_from_our_signal: bool
 ) -> tuple[CommandOutcome, int | None, int | None]:
     """Map a wait status onto the contract's outcome vocabulary.
 
@@ -63,15 +63,27 @@ def decide_outcome(
     what matters and it must be testable without racing a real process, while
     the race itself is only worth a smoke test.
 
-    The subtle case is `deadline_fired and not killed_by_us`: the child exited
-    on its own in the window between the deadline firing and the signal
+    `died_from_our_signal` means the command was still alive when its deadline
+    fired and died because of the signal we then sent. Whether that signal was
+    the SIGTERM or the escalated SIGKILL is a different question, recorded
+    separately as `killed_after_grace` -- conflating the two is what made a
+    command that obeyed SIGTERM look like a spontaneous crash.
+
+    The subtle case is `deadline_fired and not died_from_our_signal`: the child
+    exited on its own in the window between the deadline firing and the signal
     landing. The wait status is the authority for reporting, so that is an
     honest `EXITED` with its real exit code -- and the caller records
     `deadline_signal_sent`, which is what stops the scorer counting it as a
     pass.
     """
-    if killed_by_us:
-        return CommandOutcome.TIMEOUT, None, abs(returncode) or signal.SIGKILL
+    if died_from_our_signal:
+        # A signalled death reports a negative returncode; if the process was
+        # already reaped we fall back to SIGKILL, which is what we last sent.
+        return (
+            CommandOutcome.TIMEOUT,
+            None,
+            -returncode if returncode < 0 else int(signal.SIGKILL),
+        )
     if returncode < 0:
         return CommandOutcome.SIGNALED, None, -returncode
     return CommandOutcome.EXITED, returncode, None
@@ -113,18 +125,30 @@ def _capture(path: Path, cap: int = MAX_LOG_BYTES) -> StreamCapture:
     )
 
 
-def _terminate_group(process: subprocess.Popen[bytes], grace_ms: int) -> bool:
-    """SIGTERM the group, then SIGKILL it. Returns whether we killed it.
+def _terminate_group(
+    process: subprocess.Popen[bytes], grace_ms: int
+) -> tuple[bool, bool]:
+    """SIGTERM the group, then SIGKILL it.
+
+    Returns `(died_from_our_signal, killed_after_grace)`. These are two
+    different facts and must not be collapsed: a command that obeys SIGTERM
+    within the grace period still died because its deadline expired, and is a
+    timeout. Only the second flag says we had to escalate.
 
     The group, not the process. `sh -c 'pytest &'` leaves a grandchild that
     would otherwise survive and hold the run open. This is hygiene, not
     isolation -- on the host it cannot contain anything, it only stops a
     backgrounded process wedging the developer's machine.
     """
+    if process.poll() is not None:
+        # The race: it exited on its own between the deadline firing and us
+        # reaching for the signal. Nothing we did killed it.
+        return False, False
+
     try:
         group = os.getpgid(process.pid)
     except ProcessLookupError:
-        return False
+        return False, False
 
     for signal_number in (signal.SIGTERM, signal.SIGCONT):
         # SIGCONT because a stopped process cannot run to handle SIGTERM, and
@@ -132,23 +156,23 @@ def _terminate_group(process: subprocess.Popen[bytes], grace_ms: int) -> bool:
         try:
             os.killpg(group, signal_number)
         except ProcessLookupError:
-            return False
+            return False, False
 
     try:
         process.wait(timeout=grace_ms / 1000)
-        return False
+        return True, False
     except subprocess.TimeoutExpired:
         pass
 
     try:
         os.killpg(group, signal.SIGKILL)
     except ProcessLookupError:
-        return False
+        return True, False
     # A process in uninterruptible sleep does not die on SIGKILL. The real
     # runner reports that as group_escaped; here we simply stop waiting.
     with contextlib.suppress(subprocess.TimeoutExpired):
         process.wait(timeout=2)
-    return True
+    return True, True
 
 
 class LocalRunner:
@@ -240,7 +264,8 @@ class LocalRunner:
         started_at = self._clock.now_unix_ms()
         started = self._clock.monotonic_ms()
         deadline_fired = False
-        killed = False
+        died_from_signal = False
+        killed_after_grace = False
 
         # Redirected to files rather than pipes. A pipe would need draining to
         # avoid the 64 KiB deadlock, and solving that properly is the C++
@@ -261,12 +286,14 @@ class LocalRunner:
                 process.wait(timeout=budget_ms / 1000)
             except subprocess.TimeoutExpired:
                 deadline_fired = True
-                killed = _terminate_group(process, GRACE_MS)
+                died_from_signal, killed_after_grace = _terminate_group(
+                    process, GRACE_MS
+                )
 
         duration_ms = self._clock.monotonic_ms() - started
         returncode = process.returncode if process.returncode is not None else 0
         outcome, exit_code, signal_number = decide_outcome(
-            returncode, deadline_fired, killed
+            returncode, deadline_fired, died_from_signal
         )
 
         return CommandResult(
@@ -281,7 +308,7 @@ class LocalRunner:
             signal=signal_number,
             timed_out=outcome is CommandOutcome.TIMEOUT,
             deadline_signal_sent=deadline_fired,
-            killed_after_grace=killed,
+            killed_after_grace=killed_after_grace,
             group_escaped=False,
             drain_deadline_hit=False,
             orphans_reaped=0,
