@@ -29,6 +29,11 @@ MicroUsd = NewType("MicroUsd", int)
 MicroUsdPerMTok = NewType("MicroUsdPerMTok", int)
 """Millionths of a US dollar per million tokens."""
 
+ZERO_MICRO_USD = MicroUsd(0)
+"""A named zero, so dataclass defaults reference it rather than calling
+MicroUsd() -- a call evaluated once at class creation is a trap even when,
+as here, NewType makes it the identity function."""
+
 _TOKENS_PER_PRICE_UNIT = 1_000_000
 
 

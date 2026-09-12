@@ -34,3 +34,23 @@ class AgentError(ServiceError):
     A network error, an auth failure, an exhausted rate limit. The model's
     answer being poor is not this -- that is a measurement.
     """
+
+
+class RunAlreadyExists(ServiceError):
+    """A run id was recorded twice.
+
+    Raised rather than overwriting. `INSERT OR REPLACE` would silently destroy
+    a previous run's record, which for an evaluation harness is exactly the
+    data loss the project exists to prevent.
+    """
+
+
+class ConcurrentModification(ServiceError):
+    """A run's state changed underneath a write.
+
+    The scenario that matters: a recovery scan at startup decides a run is
+    orphaned and marks it interrupted, while the original process is in fact
+    alive and goes on to write a result. Without the compare-and-swap the run
+    would silently become SCORED, and a measurement from a process that was
+    declared dead would enter the benchmark.
+    """
