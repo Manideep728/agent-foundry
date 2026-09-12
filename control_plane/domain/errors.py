@@ -31,3 +31,7 @@ class InvalidTransition(DomainError):
 
 class PreconditionViolated(DomainError):
     """A pure function was called with input it had already declared invalid."""
+
+
+class InvalidFixture(DomainError):
+    """A fixture tree contains something that cannot be hashed reproducibly."""
