@@ -9,7 +9,10 @@ import pytest
 
 from control_plane.adapters.diffing import diff_workspace
 from control_plane.adapters.fixtures import digest_tree
+from control_plane.adapters.workspace import WorkspaceFactory
 from control_plane.domain.errors import PreconditionViolated
+from control_plane.domain.fixture import FixtureEntry
+from control_plane.domain.ids import RunId
 from control_plane.domain.patch import ChangeKind, FileChange, Patch
 
 REPO = Path(__file__).resolve().parent.parent
@@ -20,9 +23,22 @@ SHA_A = "a" * 64
 SHA_B = "b" * 64
 
 
-def prepared(tmp_path: Path) -> tuple[Path, tuple[object, ...]]:
+def prepared(tmp_path: Path) -> tuple[Path, tuple[FixtureEntry, ...]]:
+    """A workspace copied the way the real factory copies one.
+
+    The exclusion filter is not optional here. Running the fixture's tests --
+    which this project does, in tests/test_fixture_csv_quoted_fields.py --
+    leaves __pycache__ inside the fixture directory, and a raw copytree would
+    carry it into the workspace. The digest is unaffected either way because
+    __pycache__ is excluded from fixture identity, but the copy would no longer
+    match what WorkspaceFactory.copy_fixture produces, so these tests would be
+    exercising a workspace the harness never creates.
+    """
     workspace = tmp_path / "repo"
-    shutil.copytree(FIXTURE, workspace)
+    factory = WorkspaceFactory(tmp_path / "runs")
+    space = factory.create(RunId("run-diff"))
+    factory.copy_fixture(space, FIXTURE)
+    shutil.move(str(space.repo), str(workspace))
     _, entries = digest_tree(FIXTURE)
     return workspace, entries
 
@@ -93,7 +109,7 @@ def test_an_empty_patch_is_empty() -> None:
 
 def test_an_untouched_workspace_produces_an_empty_patch(tmp_path: Path) -> None:
     workspace, entries = prepared(tmp_path)
-    patch = diff_workspace(entries, FIXTURE, workspace)  # type: ignore[arg-type]
+    patch = diff_workspace(entries, FIXTURE, workspace)
 
     assert patch.is_empty
     assert patch.unified_diff == ""
@@ -110,14 +126,14 @@ def test_test_artefacts_do_not_count_as_agent_edits(tmp_path: Path) -> None:
     )
     (workspace / ".DS_Store").write_bytes(b"Bud1")
 
-    assert diff_workspace(entries, FIXTURE, workspace).is_empty  # type: ignore[arg-type]
+    assert diff_workspace(entries, FIXTURE, workspace).is_empty
 
 
 def test_the_real_solution_produces_the_expected_patch(tmp_path: Path) -> None:
     workspace, entries = prepared(tmp_path)
     shutil.copy2(SOLUTION / "csvkit" / "fields.py", workspace / "csvkit" / "fields.py")
 
-    patch = diff_workspace(entries, FIXTURE, workspace)  # type: ignore[arg-type]
+    patch = diff_workspace(entries, FIXTURE, workspace)
 
     assert not patch.is_empty
     assert patch.paths == ("csvkit/fields.py",)
@@ -132,7 +148,7 @@ def test_an_added_file_is_reported(tmp_path: Path) -> None:
     workspace, entries = prepared(tmp_path)
     (workspace / "csvkit" / "helper.py").write_text("VALUE = 1\n")
 
-    patch = diff_workspace(entries, FIXTURE, workspace)  # type: ignore[arg-type]
+    patch = diff_workspace(entries, FIXTURE, workspace)
 
     assert patch.paths == ("csvkit/helper.py",)
     assert patch.changes[0].kind is ChangeKind.ADDED
@@ -144,7 +160,7 @@ def test_a_deleted_file_is_reported(tmp_path: Path) -> None:
     workspace, entries = prepared(tmp_path)
     (workspace / "README.md").unlink()
 
-    patch = diff_workspace(entries, FIXTURE, workspace)  # type: ignore[arg-type]
+    patch = diff_workspace(entries, FIXTURE, workspace)
 
     assert patch.paths == ("README.md",)
     assert patch.changes[0].kind is ChangeKind.DELETED
@@ -155,7 +171,7 @@ def test_a_mode_change_alone_is_reported(tmp_path: Path) -> None:
     workspace, entries = prepared(tmp_path)
     (workspace / "README.md").chmod(0o755)
 
-    patch = diff_workspace(entries, FIXTURE, workspace)  # type: ignore[arg-type]
+    patch = diff_workspace(entries, FIXTURE, workspace)
 
     assert patch.changes[0].kind is ChangeKind.MODE_CHANGED
     assert "new mode 100755" in patch.unified_diff
@@ -165,7 +181,7 @@ def test_a_binary_change_is_recorded_without_garbage(tmp_path: Path) -> None:
     workspace, entries = prepared(tmp_path)
     (workspace / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00binary")
 
-    patch = diff_workspace(entries, FIXTURE, workspace)  # type: ignore[arg-type]
+    patch = diff_workspace(entries, FIXTURE, workspace)
 
     assert patch.changes[0].is_binary
     assert "Binary files a/logo.png and b/logo.png differ" in patch.unified_diff
@@ -180,7 +196,7 @@ def test_several_changes_come_back_in_path_order(tmp_path: Path) -> None:
     )
     (workspace / "aaa.py").write_text("first\n")
 
-    patch = diff_workspace(entries, FIXTURE, workspace)  # type: ignore[arg-type]
+    patch = diff_workspace(entries, FIXTURE, workspace)
 
     assert patch.paths == ("README.md", "aaa.py", "csvkit/fields.py")
 
@@ -190,6 +206,6 @@ def test_diffing_does_not_touch_the_fixture(tmp_path: Path) -> None:
     workspace, entries = prepared(tmp_path)
     (workspace / "csvkit" / "fields.py").write_text("# clobbered\n")
 
-    diff_workspace(entries, FIXTURE, workspace)  # type: ignore[arg-type]
+    diff_workspace(entries, FIXTURE, workspace)
 
     assert digest_tree(FIXTURE)[0] == before
