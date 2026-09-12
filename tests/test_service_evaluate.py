@@ -31,7 +31,7 @@ from control_plane.domain.validation import (
 from control_plane.services.errors import AgentError, RunnerFailed, RunnerUnavailable
 from control_plane.services.evaluate import EvaluationService
 from control_plane.services.ports import ValidationRequest
-from tests.fakes import FakeClock, FakeIdGenerator
+from tests.fakes import FakeIdGenerator
 
 REPO = Path(__file__).resolve().parent.parent
 FIXTURES = REPO / "tasks" / "fixtures"

@@ -89,6 +89,7 @@ class EvaluationService:
         self._repo.create(base)
 
         workspace = None
+        record: RunRecord | None = None
         try:
             run = self._advance(run, RunState.PREPARING)
 
@@ -96,31 +97,35 @@ class EvaluationService:
             try:
                 digest, entries = digest_tree(fixture_root)
             except DomainError as error:
-                return self._fail(
+                record = self._fail(
                     run, task, FailureCategory.WORKSPACE_SETUP_FAILED, str(error)
                 )
+                return record
             if digest != task.fixture_sha256:
-                return self._fail(
+                record = self._fail(
                     run,
                     task,
                     FailureCategory.FIXTURE_HASH_MISMATCH,
                     f"fixture is {digest}, task pins {task.fixture_sha256}",
                 )
+                return record
 
             try:
                 workspace = self._workspaces.create(run.run_id)
                 self._workspaces.copy_fixture(workspace, fixture_root)
             except DomainError as error:
-                return self._fail(
+                record = self._fail(
                     run, task, FailureCategory.WORKSPACE_SETUP_FAILED, str(error)
                 )
+                return record
 
             run = self._advance(run, RunState.AGENT_RUNNING)
             agent_started = self._clock.monotonic_ms()
             try:
                 invocation = self._agent.edit(workspace.repo, task)
             except AgentError as error:
-                return self._fail(run, task, FailureCategory.AGENT_ERROR, str(error))
+                record = self._fail(run, task, FailureCategory.AGENT_ERROR, str(error))
+                return record
             agent_ms = self._clock.monotonic_ms() - agent_started
 
             # Captured before validation runs, so the test artefacts validation
@@ -143,14 +148,18 @@ class EvaluationService:
                     )
                 )
             except RunnerUnavailable as error:
-                return self._fail(
+                record = self._fail(
                     run, task, FailureCategory.INFRASTRUCTURE_FAILED, str(error)
                 )
+                return record
             except RunnerFailed as error:
-                return self._fail(run, task, FailureCategory.RUNNER_FAILED, str(error))
+                record = self._fail(
+                    run, task, FailureCategory.RUNNER_FAILED, str(error)
+                )
+                return record
             validation_ms = self._clock.monotonic_ms() - validation_started
 
-            return self._score(
+            record = self._score(
                 run,
                 task,
                 report,
@@ -160,6 +169,7 @@ class EvaluationService:
                 validation_ms,
                 str(workspace.root),
             )
+            return record
         except KeyboardInterrupt:
             # An abort is expected operator behaviour, not a defect. Kept out
             # of FAILED so harness reliability is not polluted by every ^C.
@@ -167,7 +177,17 @@ class EvaluationService:
             self._repo.finish(self._base_record(aborted, task), expected=run.state)
             raise
         finally:
-            if workspace is not None and run.state is RunState.SCORED:
+            # Keyed off the record that was actually produced, not off `run`:
+            # the SCORED transition happens inside _score on its own value, so
+            # `run` is still VALIDATING here and the working copy would never
+            # be reclaimed. A failed run keeps everything, deliberately -- a
+            # harness failure is a bug to debug, and deleting the evidence is
+            # the worst available default.
+            if (
+                workspace is not None
+                and record is not None
+                and record.run.state is RunState.SCORED
+            ):
                 self._workspaces.discard_repo(workspace)
 
     # --- steps ---------------------------------------------------------------
