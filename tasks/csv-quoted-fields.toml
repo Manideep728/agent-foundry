@@ -1,0 +1,26 @@
+schema_version = 1
+
+[task]
+id = "csv-quoted-fields"
+suite = "synthetic"
+description = """
+csvkit.fields.split_fields must split a CSV record into fields, honouring double-quoted fields: a comma inside quotes belongs to the field, and a doubled quote inside a quoted field is a literal quote. It currently splits on every comma.
+"""
+
+[fixture]
+id = "csv-quoted-fields"
+sha256 = "96265f3e1e6ff2e3346ec618820b5f787b3d39052116d496703c953e6b0cc245"
+
+[timeouts]
+per_command_ms = 30000
+total_ms = 120000
+
+# Order is index order. The file never states indices: TaskDefinition.index_commands
+# is the only place they are assigned, and a second place would eventually disagree.
+[[commands]]
+role = "fail_to_pass"
+command = "python3 -m unittest tests.test_quoting"
+
+[[commands]]
+role = "pass_to_pass"
+command = "python3 -m unittest tests.test_basic"
