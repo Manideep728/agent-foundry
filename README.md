@@ -18,9 +18,6 @@ Phase 1, in progress. The decision record, the Python package skeleton and the
 build tooling exist. **The execution supervisor, the agent pipeline and the
 benchmark do not.** `af` currently exposes only `--version`.
 
-Sections describing behaviour, commands and measurements are added as that
-behaviour lands, not before.
-
 Design decisions made so far are in [docs/DECISIONS.md](docs/DECISIONS.md).
 
 ## Build and test
@@ -38,18 +35,16 @@ make run ARGS=--version
 `make help` lists the documented targets. Nothing in the project requires
 make; every target is a plain `uv` command.
 
-## Scope
+## Planned scope
 
-In scope for the first release: a C++ execution supervisor, a Python control
-plane and CLI, Docker-isolated execution, one model provider plus a fake
-adapter for offline tests, benchmark tasks with fixed fixtures, test-based
-scoring, SQLite storage behind a repository interface, and a generated report.
+The first release will include a C++ execution supervisor, a Python control
+plane and CLI, Docker-isolated execution, a model-provider adapter, benchmark
+tasks, test-based scoring, SQLite storage, and report generation.
 
-Out of scope: Kafka, AWS, Terraform, PostgreSQL, a web dashboard, multiple
-model providers, Kubernetes, distributed execution, automatic pull request
-creation, and user accounts.
+Distributed execution, automatic pull requests, and a web interface are outside
+the first release.
 
-## What this project will not claim
+## Limitations
 
 - **Safety against hostile code.** Docker reduces accidental host access. It is
   not a hardened boundary against a deliberately malicious workload.
