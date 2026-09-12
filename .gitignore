@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# C++ / CMake -- the runner is built out-of-source, and on macOS it is built
+# only inside Docker (Apple clang 12 cannot compile C++20).
+build/
+cmake-build-*/
+runner/build/
+*.o
+*.dSYM/
+
+# Run artifacts. Every evaluation run writes a workspace copy, captured logs,
+# a patch and a result.json; none of it is source and all of it is large.
+runs/
+artifacts/
+workspaces/
+
+# Generated reports. reports/ holds templates only -- rendered benchmark
+# output is a build product and is regenerated from the database.
+reports/out/
+*.report.html
+
+# Databases. SQLite is the MVP source of truth for completed runs, but the
+# file itself is local state, not source.
+*.db
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Secrets
+.env
+.env.*
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
