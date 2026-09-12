@@ -33,6 +33,10 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# A warning nobody reads is a bug nobody fixes. Deprecations in particular are
+# advance notice that something will break, and this project would rather take
+# the break now than during a benchmark run.
+filterwarnings = ["error"]
 # Markers for tests that need something the machine may not have. CI runs all
 # of them; a laptop without Docker can still run the rest.
 markers = [
