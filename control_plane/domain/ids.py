@@ -32,7 +32,13 @@ MAX_LENGTH = 64
 _ALLOWED = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 
 
-def _validate(value: str, kind: str) -> None:
+def validate_identifier(value: str, kind: str) -> None:
+    """Raise `InvalidIdentifier` unless `value` is safe to use as a path segment.
+
+    Public because other domain types hold identifier-shaped strings that reach
+    the filesystem -- a fixture directory name, for one -- and they must not
+    re-derive the rule.
+    """
     if not value:
         raise InvalidIdentifier(f"{kind} must not be empty")
     if len(value) > MAX_LENGTH:
@@ -58,7 +64,7 @@ class TaskId:
     value: str
 
     def __post_init__(self) -> None:
-        _validate(self.value, "TaskId")
+        validate_identifier(self.value, "TaskId")
 
     def __str__(self) -> str:
         return self.value
@@ -71,7 +77,7 @@ class RunId:
     value: str
 
     def __post_init__(self) -> None:
-        _validate(self.value, "RunId")
+        validate_identifier(self.value, "RunId")
 
     def __str__(self) -> str:
         return self.value

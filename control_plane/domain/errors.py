@@ -15,3 +15,7 @@ class DomainError(Exception):
 
 class InvalidIdentifier(DomainError):
     """An identifier was empty, too long, or contained disallowed characters."""
+
+
+class InvalidTaskDefinition(DomainError):
+    """A task definition violated an invariant the benchmark depends on."""
