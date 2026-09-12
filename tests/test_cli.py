@@ -34,3 +34,50 @@ def test_installed_version_matches_package_version() -> None:
     from importlib.metadata import version
 
     assert version("agentfoundry") == __version__
+
+
+def test_fixture_hash_prints_the_same_digest_the_verifier_computes(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The reason the command exists. A digest produced any other way -- a
+    # shasum of a tarball, say -- would surface much later as an unexplained
+    # FIXTURE_HASH_MISMATCH with nothing pointing at the cause.
+    from pathlib import Path
+
+    from control_plane.adapters.fixtures import digest_tree
+
+    fixture = (
+        Path(__file__).resolve().parent.parent
+        / "tasks"
+        / "fixtures"
+        / "csv-quoted-fields"
+    )
+    expected, _ = digest_tree(fixture)
+
+    assert main(["fixture-hash", str(fixture)]) == 0
+    assert capsys.readouterr().out.strip() == expected
+
+
+def test_fixture_hash_can_print_the_manifest_for_diffing(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from pathlib import Path
+
+    fixture = (
+        Path(__file__).resolve().parent.parent
+        / "tasks"
+        / "fixtures"
+        / "csv-quoted-fields"
+    )
+    assert main(["fixture-hash", "--manifest", str(fixture)]) == 0
+
+    out = capsys.readouterr().out
+    assert out.startswith("agentfoundry-fixture-v1\n")
+    assert "csvkit/fields.py" in out
+
+
+def test_fixture_hash_on_a_missing_directory_is_a_usage_error(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["fixture-hash", "/definitely/not/here"]) == 2
+    assert "not a directory" in capsys.readouterr().err

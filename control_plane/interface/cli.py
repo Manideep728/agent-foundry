@@ -11,10 +11,20 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 from control_plane import __version__
+from control_plane.adapters.fixtures import digest_tree
+from control_plane.domain.errors import DomainError
+from control_plane.domain.fixture import manifest_bytes
 
 PROGRAM = "af"
+
+EXIT_OK = 0
+EXIT_USAGE = 2
+"""Usage error. Matches the runner's own convention, where 2 is a usage error
+and 1 is left unused so a generic failure from a wrapper stays distinguishable.
+"""
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -23,14 +33,40 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run and evaluate AI coding agents against repository tasks.",
     )
     parser.add_argument(
-        "--version",
-        action="version",
-        version=f"{PROGRAM} {__version__}",
+        "--version", action="version", version=f"{PROGRAM} {__version__}"
     )
-    # `required=False` so that a bare `af` falls through to the usage path
-    # below and exits 2, rather than argparse raising its own error.
-    parser.add_subparsers(dest="command", metavar="<command>")
+    subcommands = parser.add_subparsers(dest="command", metavar="<command>")
+
+    fixture_hash = subcommands.add_parser(
+        "fixture-hash",
+        help="print the content digest of a fixture directory",
+        description=(
+            "Print the digest a task file should pin. Producing it with the "
+            "same code that verifies it is the point: a digest taken any other "
+            "way would surface later as an unexplained FIXTURE_HASH_MISMATCH."
+        ),
+    )
+    fixture_hash.add_argument("directory", type=Path)
+    fixture_hash.add_argument(
+        "--manifest",
+        action="store_true",
+        help="also print the canonical manifest, so two fixtures can be diffed",
+    )
+
     return parser
+
+
+def run_fixture_hash(directory: Path, show_manifest: bool) -> int:
+    try:
+        digest, entries = digest_tree(directory)
+    except DomainError as error:
+        print(f"{PROGRAM}: {error}", file=sys.stderr)
+        return EXIT_USAGE
+
+    if show_manifest:
+        sys.stdout.write(manifest_bytes(entries).decode("ascii"))
+    print(digest)
+    return EXIT_OK
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -42,12 +78,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command is None:
         parser.print_usage(sys.stderr)
         print(f"{PROGRAM}: no command given", file=sys.stderr)
-        return 2
+        return EXIT_USAGE
 
-    # Unreachable while no subcommands are registered; argparse rejects any
-    # unknown command before this point.
+    if args.command == "fixture-hash":
+        return run_fixture_hash(args.directory, args.manifest)
+
+    # Unreachable: argparse rejects an unknown command before this point.
     print(f"{PROGRAM}: unknown command {args.command!r}", file=sys.stderr)
-    return 2
+    return EXIT_USAGE
 
 
 if __name__ == "__main__":
