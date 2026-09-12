@@ -19,3 +19,7 @@ class InvalidIdentifier(DomainError):
 
 class InvalidTaskDefinition(DomainError):
     """A task definition violated an invariant the benchmark depends on."""
+
+
+class InvalidValidationReport(DomainError):
+    """A runner result violated the contract the two languages share."""
