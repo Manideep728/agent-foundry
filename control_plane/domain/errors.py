@@ -27,3 +27,7 @@ class InvalidValidationReport(DomainError):
 
 class InvalidTransition(DomainError):
     """A run was asked to move to a state it cannot reach from its current one."""
+
+
+class PreconditionViolated(DomainError):
+    """A pure function was called with input it had already declared invalid."""
