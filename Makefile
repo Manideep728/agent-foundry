@@ -7,9 +7,10 @@ PY_SRC      ?= control_plane tests
 
 RUNNER_SRC        ?= runner
 RUNNER_BUILD_TYPE ?= RelWithDebInfo
-# Out of the source tree on purpose. The repository is on a Windows drive that
-# WSL reaches over 9p, where the many small writes of a C++ build are slow.
-RUNNER_BUILD_DIR  ?= $(HOME)/.cache/afrunner/build
+# Inside the tree, and ignored. A build directory shared between two checkouts
+# fails the moment the second one configures, because CMake records the source
+# path in its cache. Override it for a checkout on a slow filesystem.
+RUNNER_BUILD_DIR  ?= $(RUNNER_SRC)/build
 
 .PHONY: help sync test lint fmt typecheck check run clean \
         runner-configure runner-build runner-test
