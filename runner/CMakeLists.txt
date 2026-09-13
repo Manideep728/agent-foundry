@@ -15,8 +15,15 @@ add_library(afrunner_flags INTERFACE)
 target_include_directories(afrunner_flags INTERFACE src)
 target_compile_options(afrunner_flags INTERFACE -Wall -Wextra -Werror)
 
+# Everything except main.cpp, so the test binary can link the same objects
+# without inheriting a second main().
+add_library(afrunner_core OBJECT
+    src/options.cpp
+)
+target_link_libraries(afrunner_core PUBLIC afrunner_flags)
+
 add_executable(afrunner src/main.cpp)
-target_link_libraries(afrunner PRIVATE afrunner_flags)
+target_link_libraries(afrunner PRIVATE afrunner_core)
 
 enable_testing()
 
@@ -39,8 +46,11 @@ if(AFRUNNER_BUILD_TESTS)
 
     include(GoogleTest)
 
-    add_executable(runner_tests tests/test_version.cpp)
-    target_link_libraries(runner_tests PRIVATE afrunner_flags GTest::gtest_main)
+    add_executable(runner_tests
+        tests/test_version.cpp
+        tests/test_options.cpp
+    )
+    target_link_libraries(runner_tests PRIVATE afrunner_core GTest::gtest_main)
 
     # Container-only cases carry the "container" label instead, so
     # `ctest -L native` is the suite that runs without Docker.
