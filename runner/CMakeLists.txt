@@ -21,6 +21,7 @@ add_library(afrunner_core OBJECT
     src/commands.cpp
     src/json.cpp
     src/options.cpp
+    src/outcome.cpp
     src/tail.cpp
 )
 target_link_libraries(afrunner_core PUBLIC afrunner_flags)
@@ -54,6 +55,7 @@ if(AFRUNNER_BUILD_TESTS)
         tests/test_commands.cpp
         tests/test_json.cpp
         tests/test_options.cpp
+        tests/test_outcome.cpp
         tests/test_tail.cpp
     )
     target_link_libraries(runner_tests PRIVATE afrunner_core GTest::gtest_main)
