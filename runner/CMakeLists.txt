@@ -18,12 +18,14 @@ target_compile_options(afrunner_flags INTERFACE -Wall -Wextra -Werror)
 # Everything except main.cpp, so the test binary can link the same objects
 # without inheriting a second main().
 add_library(afrunner_core OBJECT
+    src/clock.cpp
     src/commands.cpp
     src/json.cpp
     src/options.cpp
     src/outcome.cpp
     src/report.cpp
     src/resultfile.cpp
+    src/sysinfo.cpp
     src/tail.cpp
 )
 target_link_libraries(afrunner_core PUBLIC afrunner_flags)
@@ -60,6 +62,7 @@ if(AFRUNNER_BUILD_TESTS)
         tests/test_outcome.cpp
         tests/test_report.cpp
         tests/test_resultfile.cpp
+        tests/test_sysinfo.cpp
         tests/test_tail.cpp
     )
     target_link_libraries(runner_tests PRIVATE afrunner_core GTest::gtest_main)
