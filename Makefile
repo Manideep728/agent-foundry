@@ -5,7 +5,14 @@
 PYTEST_ARGS ?=
 PY_SRC      ?= control_plane tests
 
-.PHONY: help sync test lint fmt typecheck check run clean
+RUNNER_SRC        ?= runner
+RUNNER_BUILD_TYPE ?= RelWithDebInfo
+# Out of the source tree on purpose. The repository is on a Windows drive that
+# WSL reaches over 9p, where the many small writes of a C++ build are slow.
+RUNNER_BUILD_DIR  ?= $(HOME)/.cache/afrunner/build
+
+.PHONY: help sync test lint fmt typecheck check run clean \
+        runner-configure runner-build runner-test
 
 ## help: list the documented targets
 help:
@@ -32,6 +39,18 @@ fmt:
 ## typecheck: run mypy in strict mode
 typecheck:
 	uv run mypy $(PY_SRC)
+
+## runner-configure: generate the build system for the C++ runner
+runner-configure:
+	cmake -S $(RUNNER_SRC) -B $(RUNNER_BUILD_DIR) -DCMAKE_BUILD_TYPE=$(RUNNER_BUILD_TYPE)
+
+## runner-build: compile the C++ runner
+runner-build: runner-configure
+	cmake --build $(RUNNER_BUILD_DIR) -j
+
+## runner-test: run the runner tests that need no container
+runner-test: runner-build
+	ctest --test-dir $(RUNNER_BUILD_DIR) -L native --output-on-failure
 
 ## check: everything CI runs
 check: lint typecheck test
