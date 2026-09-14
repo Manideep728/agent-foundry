@@ -33,10 +33,12 @@ group, it records a fork refused by `--pids-limit` as `spawn_failed`, it
 writes a partial result and exits 7 on `docker stop`, and it reports a command
 killed by the memory limit. The suite also runs under `docker run --init`.
 
-`make runner-image` packages `afrunner` as a container entrypoint. **The
-control plane does not start that container yet.** Validation runs through
-`LocalRunner`, which executes
-commands directly on the host with no isolation, no resource limits and no
+`make runner-image` packages `afrunner` as a container entrypoint.
+`DockerRunner` starts that container with no network, no capabilities, a
+read-only command file, and fixed memory, CPU and process limits. A test runs
+the benchmark task end to end through it. **`af run` does not use it yet.**
+The CLI validates through `LocalRunner`, which executes commands directly on
+the host with no isolation, no resource limits and no
 network restriction -- development only. Every run it produces records
 `pid1=false` and a runner version naming it, so those rows are identifiable in
 the data rather than only in this paragraph.

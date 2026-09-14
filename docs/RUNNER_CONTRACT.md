@@ -32,9 +32,9 @@ afrunner --commands    /in/commands.txt
 Flags are `--name value`, or bare for booleans. No clustering, no `=` form, no positional
 arguments.
 
-Everything is passed on the command line rather than through the environment. The control plane
-stores the full `docker run` argv in the run record, so the command line is the run's provenance:
-one artifact to read when reproducing a run weeks later.
+Everything is passed on the command line rather than through the environment, so the command line
+is the run's provenance: one artifact to read when reproducing a run weeks later. The run record
+does not store the `docker run` command line yet.
 
 ## Mounts
 
@@ -254,7 +254,7 @@ aid, not a benchmark mode.
 
 | Implementation | Isolation | Status |
 |---|---|---|
-| `afrunner` (C++20, in a container) | process groups, resource limits, no network | built; image from `make runner-image`; not yet invoked by the control plane |
+| `afrunner` (C++20, in a container) | process groups, resource limits, no network | image from `make runner-image`; started by `DockerRunner`, which `af run` does not use yet |
 | `LocalRunner` (Python, `subprocess`) | **none** | development only |
 
 The image's entrypoint is `afrunner` in exec form, so it is PID 1 and receives the flags given to

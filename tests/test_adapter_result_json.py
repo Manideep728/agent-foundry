@@ -7,7 +7,6 @@ a hostile file as a crash in the harness.
 
 from __future__ import annotations
 
-import json
 from dataclasses import fields
 from typing import Any
 
@@ -22,62 +21,11 @@ from control_plane.domain.validation import (
     StreamCapture,
     ValidationReport,
 )
-
-
-def _stream() -> dict[str, Any]:
-    return {
-        "bytes_total": 6,
-        "bytes_written": 6,
-        "truncated": False,
-        "path": "cmd-000.stdout.log",
-        "tail": "hello\n",
-    }
-
-
-def _command() -> dict[str, Any]:
-    return {
-        "index": 0,
-        "command": "echo hello",
-        "started_at_unix_ms": 1_757_900_000_000,
-        "duration_ms": 3,
-        "outcome": "exited",
-        "exit_code": 0,
-        "signal": None,
-        "timed_out": False,
-        "deadline_signal_sent": False,
-        "killed_after_grace": False,
-        "group_escaped": False,
-        "drain_deadline_hit": False,
-        "orphans_reaped": 0,
-        "spawn_error": None,
-        "stdout": _stream(),
-        "stderr": _stream() | {"bytes_total": 0, "bytes_written": 0, "tail": ""},
-    }
-
-
-def _report() -> dict[str, Any]:
-    return {
-        "schema_version": 1,
-        "runner_version": "afrunner 0.1.0",
-        "arch": "x86_64",
-        "pid1": True,
-        "shell": "/usr/bin/dash",
-        "workdir": "/work",
-        "started_at_unix_ms": 1_757_900_000_000,
-        "wall_ms": 5,
-        "exit_reason": "completed",
-        "aborted": False,
-        "orphans_reaped_total": 0,
-        "commands": [_command()],
-    }
-
-
-def _encode(raw: Any) -> bytes:
-    return json.dumps(raw).encode("utf-8")
+from tests.result_samples import encode, sample_report
 
 
 def test_a_valid_report_decodes_into_domain_types() -> None:
-    report = decode_report(_encode(_report()))
+    report = decode_report(encode(sample_report()))
 
     assert report.pid1 is True
     assert report.exit_reason is ExitReason.COMPLETED
@@ -96,7 +44,7 @@ def test_the_type_tables_cover_exactly_the_dataclass_fields() -> None:
 
 
 def _with_command(**changes: Any) -> dict[str, Any]:
-    raw = _report()
+    raw = sample_report()
     raw["commands"][0].update(changes)
     return raw
 
@@ -107,26 +55,34 @@ def _with_command(**changes: Any) -> dict[str, Any]:
         pytest.param(b"\xff\xfe", id="not-utf8"),
         pytest.param(b'{"schema_version": 1', id="truncated-json"),
         pytest.param(b"", id="empty-file"),
-        pytest.param(_encode([_report()]), id="top-level-array"),
-        pytest.param(_encode(_report() | {"commands": {}}), id="commands-not-a-list"),
+        pytest.param(encode([sample_report()]), id="top-level-array"),
         pytest.param(
-            _encode(_report() | {"commands": [7]}), id="command-not-an-object"
+            encode(sample_report() | {"commands": {}}), id="commands-not-a-list"
         ),
-        pytest.param(_encode(_report() | {"extra": 1}), id="unknown-report-key"),
         pytest.param(
-            _encode({k: v for k, v in _report().items() if k != "arch"}),
+            encode(sample_report() | {"commands": [7]}), id="command-not-an-object"
+        ),
+        pytest.param(encode(sample_report() | {"extra": 1}), id="unknown-report-key"),
+        pytest.param(
+            encode({k: v for k, v in sample_report().items() if k != "arch"}),
             id="missing-report-key",
         ),
-        pytest.param(_encode(_report() | {"pid1": 1}), id="int-for-bool"),
-        pytest.param(_encode(_with_command(exit_code=True)), id="bool-for-int"),
-        pytest.param(_encode(_with_command(signal="9")), id="string-for-int"),
-        pytest.param(_encode(_report() | {"wall_ms": 5.0}), id="float-measurement"),
-        pytest.param(_encode(_with_command(outcome="crashed")), id="unknown-outcome"),
-        pytest.param(_encode(_report() | {"exit_reason": "?"}), id="unknown-reason"),
-        pytest.param(_encode(_with_command(stdout=[])), id="stream-not-an-object"),
-        pytest.param(_encode(_report() | {"schema_version": 2}), id="future-schema"),
-        pytest.param(_encode(_report() | {"commands": []}), id="no-commands"),
-        pytest.param(_encode(_with_command(exit_code=None)), id="broken-invariant"),
+        pytest.param(encode(sample_report() | {"pid1": 1}), id="int-for-bool"),
+        pytest.param(encode(_with_command(exit_code=True)), id="bool-for-int"),
+        pytest.param(encode(_with_command(signal="9")), id="string-for-int"),
+        pytest.param(
+            encode(sample_report() | {"wall_ms": 5.0}), id="float-measurement"
+        ),
+        pytest.param(encode(_with_command(outcome="crashed")), id="unknown-outcome"),
+        pytest.param(
+            encode(sample_report() | {"exit_reason": "?"}), id="unknown-reason"
+        ),
+        pytest.param(encode(_with_command(stdout=[])), id="stream-not-an-object"),
+        pytest.param(
+            encode(sample_report() | {"schema_version": 2}), id="future-schema"
+        ),
+        pytest.param(encode(sample_report() | {"commands": []}), id="no-commands"),
+        pytest.param(encode(_with_command(exit_code=None)), id="broken-invariant"),
     ],
 )
 def test_every_defect_is_a_malformed_result(data: bytes) -> None:

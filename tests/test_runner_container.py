@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import os
 import platform
-import shutil
 import subprocess
 import time
 import uuid
@@ -29,27 +28,11 @@ from control_plane.domain.validation import (
     ExitReason,
     ValidationReport,
 )
+from tests.docker_support import IMAGE, requires_image
 
-IMAGE = os.environ.get("RUNNER_IMAGE", "afrunner:local")
 WITH_INIT = os.environ.get("AF_DOCKER_INIT") == "1"
 
-
-def _image_available() -> bool:
-    if shutil.which("docker") is None:
-        return False
-    probe = subprocess.run(
-        ["docker", "image", "inspect", IMAGE], capture_output=True, check=False
-    )
-    return probe.returncode == 0
-
-
-pytestmark = [
-    pytest.mark.docker,
-    pytest.mark.skipif(
-        not _image_available(),
-        reason=f"docker or the {IMAGE} image is unavailable; run `make runner-image`",
-    ),
-]
+pytestmark = [pytest.mark.docker, requires_image]
 
 
 class Container:
