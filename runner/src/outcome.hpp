@@ -56,4 +56,14 @@ inline bool timed_out(const Verdict& verdict) {
     return verdict.outcome == Outcome::Timeout;
 }
 
+// Whether this command is evidence of success, which is not simply exit 0. A
+// command that exits 0 after its deadline fired blew its budget, and counting
+// it as a pass would inflate every success rate in the benchmark. Mirrors
+// CommandResult.succeeded on the Python side, and defines what
+// --stop-on-failure stops on.
+inline bool succeeded(const Verdict& verdict) {
+    return verdict.outcome == Outcome::Exited && verdict.exit_code == 0 &&
+           !verdict.deadline_signal_sent;
+}
+
 }  // namespace afrunner

@@ -2,18 +2,16 @@
 
 #include <iostream>
 #include <string>
-#include <string_view>
 #include <variant>
 
-#include "clock.hpp"
 #include "commands.hpp"
 #include "exit_codes.hpp"
 #include "options.hpp"
-#include "outcome.hpp"
 #include "report.hpp"
 #include "result.hpp"
 #include "resultfile.hpp"
-#include "sysinfo.hpp"
+#include "signals.hpp"
+#include "supervisor.hpp"
 #include "version.hpp"
 
 namespace af = afrunner;
@@ -44,7 +42,10 @@ int main(int argc, char** argv) {
     }
     const af::Options& options = std::get<af::Options>(parsed);
 
-    const long long started_monotonic = af::monotonic_ms();
+    // Before any fork, so every orphaned descendant reparents here and can be
+    // reaped. Inside the container the process is already PID 1 and this
+    // changes nothing.
+    af::become_subreaper();
 
     if (!is_directory(options.workdir)) {
         return fail("workdir is missing or not a directory: " + options.workdir,
@@ -62,44 +63,28 @@ int main(int argc, char** argv) {
         return fail(problem, af::exit_codes::output);
     }
 
-    af::Report report;
-    report.runner_version = std::string(af::runner_version);
-    report.arch = af::arch();
-    report.pid1 = af::is_pid1();
-    report.shell = af::shell_path();
-    report.workdir = options.workdir;
-    report.started_at_unix_ms = af::unix_ms();
-
-    // Every command in the file gets an entry before any of them runs. The
-    // reader requires indices 0..n-1 exactly, so a result that stops early is
-    // unparseable unless the unreached entries are already there. Each is
-    // overwritten in place as its command completes.
-    report.commands.reserve(lines.size());
-    for (std::size_t i = 0; i < lines.size(); ++i) {
-        af::CommandResult command;
-        command.index = static_cast<int>(i);
-        command.command = lines[i];
-        command.started_at_unix_ms = report.started_at_unix_ms;
-        command.verdict = af::not_run();
-        report.commands.push_back(std::move(command));
+    af::RunAll all = af::run_all(options, lines);
+    if (!all.fatal.empty()) {
+        return fail(all.fatal, af::exit_codes::output);
     }
 
-    // Commands do not execute yet. The supervisor fills these entries in; until
-    // then every one of them is honestly reported as not_run, which the control
-    // plane reads as an incomplete validation rather than as failing tests.
-
-    report.wall_ms = af::monotonic_ms() - started_monotonic;
-
-    if (const std::string problem = af::check_invariants(report); !problem.empty()) {
+    // The same rules the control plane enforces when it reads the file.
+    // Failing here turns "the result was silently refused three weeks later"
+    // into an error that names the field.
+    if (const std::string problem = af::check_invariants(all.report);
+        !problem.empty()) {
         return fail("the report violates its own contract: " + problem,
                     af::exit_codes::internal);
     }
 
     if (const std::string problem =
-            af::write_atomically(options.result, af::serialise(report));
+            af::write_atomically(options.result, af::serialise(all.report));
         !problem.empty()) {
         return fail(problem, af::exit_codes::output);
     }
 
+    // The exit code describes the runner, not the commands. A run in which
+    // every command failed still exits 0, because the measurement is
+    // trustworthy; whether validation passed is inside result.json.
     return af::exit_codes::ok;
 }

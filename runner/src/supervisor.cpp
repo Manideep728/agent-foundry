@@ -16,6 +16,8 @@
 #include "outcome.hpp"
 #include "signals.hpp"
 #include "sink.hpp"
+#include "sysinfo.hpp"
+#include "version.hpp"
 
 namespace afrunner {
 namespace {
@@ -248,6 +250,67 @@ CommandRun run_command(const Options& options, int index, const std::string& com
     result.err = err.capture();
     result.duration_ms = monotonic_ms() - started;
     return run;
+}
+
+RunAll run_all(const Options& options, const std::vector<std::string>& commands) {
+    RunAll all;
+    Report& report = all.report;
+
+    report.runner_version = std::string(runner_version);
+    report.arch = arch();
+    report.pid1 = is_pid1();
+    report.shell = shell_path();
+    report.workdir = options.workdir;
+    report.started_at_unix_ms = unix_ms();
+
+    const long long started = monotonic_ms();
+    const long long total_deadline = started + options.total_timeout_ms;
+
+    // Every command gets an entry before any of them runs. The reader requires
+    // indices 0..n-1 exactly, so a run that stops early is unparseable unless
+    // the unreached entries are already there. Each is overwritten in place.
+    report.commands.reserve(commands.size());
+    for (std::size_t i = 0; i < commands.size(); ++i) {
+        CommandResult placeholder;
+        placeholder.index = static_cast<int>(i);
+        placeholder.command = commands[i];
+        placeholder.started_at_unix_ms = report.started_at_unix_ms;
+        placeholder.verdict = not_run();
+        report.commands.push_back(std::move(placeholder));
+    }
+
+    for (std::size_t i = 0; i < commands.size(); ++i) {
+        const long long remaining = total_deadline - monotonic_ms();
+        if (remaining <= 0) {
+            // Ten commands at a ten-minute deadline would otherwise hold a
+            // container for over an hour. The rest stay not_run.
+            report.exit_reason = ExitReason::TotalTimeout;
+            break;
+        }
+
+        // Folding the total budget into the per-command deadline means the loop
+        // only ever tracks one deadline, and the total expiring mid-command is
+        // an ordinary timeout with the ordinary escalation.
+        Options budgeted = options;
+        budgeted.timeout_ms = std::min(options.timeout_ms, remaining);
+
+        CommandRun run = run_command(budgeted, static_cast<int>(i), commands[i]);
+        report.orphans_reaped_total += run.result.orphans_reaped;
+        report.commands[i] = std::move(run.result);
+        if (!run.fatal.empty()) {
+            all.fatal = run.fatal;
+            return all;
+        }
+
+        if (options.stop_on_failure && !succeeded(report.commands[i].verdict)) {
+            // A truncation the caller asked for is not the runner being cut
+            // short, so exit_reason stays completed and aborted stays false.
+            break;
+        }
+    }
+
+    report.wall_ms = monotonic_ms() - started;
+    return all;
 }
 
 }  // namespace afrunner

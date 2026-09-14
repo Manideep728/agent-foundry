@@ -13,6 +13,7 @@
 
 #include "options.hpp"
 #include "outcome.hpp"
+#include "report.hpp"
 #include "resultfile.hpp"
 #include "signals.hpp"
 #include "temp_dir.hpp"
@@ -290,6 +291,81 @@ TEST(Supervisor, ACommandFinishingInTimeIsNotATimeout) {
     EXPECT_EQ(run.result.verdict.outcome, Outcome::Exited);
     EXPECT_FALSE(run.result.verdict.deadline_signal_sent);
     EXPECT_FALSE(run.result.verdict.killed_after_grace);
+}
+
+TEST(RunAll, RunsEveryCommandInOrder) {
+    const TempDir dir;
+    Options options = options_for(dir);
+    ASSERT_EQ(afrunner::ensure_directory(options.log_dir), "");
+
+    const afrunner::RunAll all =
+        afrunner::run_all(options, {"echo one", "echo two", "exit 5"});
+
+    ASSERT_EQ(all.report.commands.size(), 3U);
+    EXPECT_EQ(all.report.exit_reason, afrunner::ExitReason::Completed);
+    EXPECT_EQ(all.report.commands[0].out.tail, "one\n");
+    EXPECT_EQ(all.report.commands[1].out.tail, "two\n");
+    EXPECT_EQ(all.report.commands[2].verdict.exit_code, 5);
+    EXPECT_EQ(afrunner::check_invariants(all.report), "");
+}
+
+// BUGS.md's second lesson from Phase 3: leaving slack in the total budget let
+// the next command fit inside it, so the assertion ran against a run that had
+// legitimately completed. total == per-command guarantees nothing fits after.
+TEST(RunAll, ExhaustingTheTotalBudgetLeavesLaterCommandsNotRun) {
+    const TempDir dir;
+    Options options = options_for(dir);
+    options.timeout_ms = 300;
+    options.total_timeout_ms = 300;
+    options.grace_ms = 200;
+    ASSERT_EQ(afrunner::ensure_directory(options.log_dir), "");
+
+    const afrunner::RunAll all =
+        afrunner::run_all(options, {"sleep 300 & wait", "echo never"});
+
+    ASSERT_EQ(all.report.commands.size(), 2U);
+    EXPECT_EQ(all.report.commands[0].verdict.outcome, Outcome::Timeout);
+    EXPECT_EQ(all.report.commands[1].verdict.outcome, Outcome::NotRun);
+    EXPECT_EQ(all.report.exit_reason, afrunner::ExitReason::TotalTimeout);
+    EXPECT_EQ(afrunner::check_invariants(all.report), "");
+}
+
+TEST(RunAll, StopOnFailureSkipsTheRest) {
+    const TempDir dir;
+    Options options = options_for(dir);
+    options.stop_on_failure = true;
+    ASSERT_EQ(afrunner::ensure_directory(options.log_dir), "");
+
+    const afrunner::RunAll all =
+        afrunner::run_all(options, {"true", "exit 1", "echo never"});
+
+    EXPECT_EQ(all.report.commands[0].verdict.exit_code, 0);
+    EXPECT_EQ(all.report.commands[1].verdict.exit_code, 1);
+    EXPECT_EQ(all.report.commands[2].verdict.outcome, Outcome::NotRun);
+    // A truncation the caller asked for is not the runner being cut short.
+    EXPECT_EQ(all.report.exit_reason, afrunner::ExitReason::Completed);
+}
+
+TEST(RunAll, WithoutStopOnFailureAFailureDoesNotStopTheRun) {
+    const TempDir dir;
+    Options options = options_for(dir);
+    ASSERT_EQ(afrunner::ensure_directory(options.log_dir), "");
+
+    const afrunner::RunAll all = afrunner::run_all(options, {"exit 1", "echo after"});
+
+    EXPECT_EQ(all.report.commands[1].out.tail, "after\n");
+}
+
+TEST(RunAll, CountsOrphansAcrossEveryCommand) {
+    afrunner::become_subreaper();
+    const TempDir dir;
+    Options options = options_for(dir);
+    ASSERT_EQ(afrunner::ensure_directory(options.log_dir), "");
+
+    const afrunner::RunAll all = afrunner::run_all(
+        options, {"( sleep 0.1 ) & exit 0", "( sleep 0.1 ) & exit 0"});
+
+    EXPECT_GE(all.report.orphans_reaped_total, 2);
 }
 
 TEST(Supervisor, ReportsACommandKilledByASignal) {
