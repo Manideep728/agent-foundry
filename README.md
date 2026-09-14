@@ -14,17 +14,25 @@ run twice produces two comparable records.
 
 ## Status
 
-Phase 3. One task runs end to end: the harness verifies a fixture against its
+Phase 4. One task runs end to end: the harness verifies a fixture against its
 pinned content hash, copies it to an isolated workspace, invokes an agent,
 captures the patch, executes the repository's own tests, scores the result and
 stores it.
 
-**The C++ execution supervisor and Docker isolation do not exist yet.**
-Validation runs through `LocalRunner`, which executes commands directly on the
-host with no isolation, no resource limits and no network restriction --
-development only. Every run it produces records `pid1=false` and a runner
-version naming it, so those rows are identifiable in the data rather than only
-in this paragraph.
+The C++ execution supervisor, `afrunner`, now exists. It reads a command file,
+runs each line under `/bin/sh -c` in its own process group, captures both
+streams to capped log files, enforces a per-command and a total deadline,
+escalates from `SIGTERM` to `SIGKILL` after a grace period, reaps orphaned
+descendants, and writes a `result.json` the control plane parses. A conformance
+test runs the real binary and reads its output back through the Python types,
+so the two languages cannot drift apart silently.
+
+**Docker isolation does not exist yet, and the control plane does not call
+`afrunner`.** Validation still runs through `LocalRunner`, which executes
+commands directly on the host with no isolation, no resource limits and no
+network restriction -- development only. Every run it produces records
+`pid1=false` and a runner version naming it, so those rows are identifiable in
+the data rather than only in this paragraph.
 
 One benchmark task exists. No benchmark results are published.
 

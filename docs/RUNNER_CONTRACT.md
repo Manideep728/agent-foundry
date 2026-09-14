@@ -117,15 +117,27 @@ ambiguous; a missing file is not.
 | `bytes_total` | int | What the process produced. |
 | `bytes_written` | int | What reached disk. Never exceeds `bytes_total`. |
 | `truncated` | bool | Equals `bytes_written < bytes_total`. |
-| `path` | string | Relative to `--log-dir`, e.g. `logs/000.stdout`. |
+| `path` | string | A bare name inside `--log-dir`, such as `cmd-000.stdout.log`. Empty when the command never ran. |
 | `tail` | string | The last `--tail-bytes`, ASCII-only. |
 
 Output is capped, not cut off: on reaching `--max-log-bytes` the runner keeps reading and discards
 the excess. Stopping the read would block the child on a full pipe and turn a chatty test into a
 false timeout.
 
+The log file therefore holds the **front** of the output while the tail holds the **end**, so the
+tail cannot be read back out of the file. It comes from a ring buffer fed by every byte the runner
+reads, which is why a truncated stream still reports the summary line rather than the collection
+noise. A stream has a `path` if and only if the command actually ran, which is how "produced no
+output" stays distinguishable from "never started".
+
 The tail is the **end** of the output, because test runners put their summaries there. Bytes
-outside printable ASCII are replaced, so a broken byte from a test cannot produce invalid JSON.
+outside printable ASCII are replaced with `?`, so a broken byte from a test cannot produce invalid
+JSON. Newline and tab survive, because the summary is line-structured; carriage return does not,
+because a progress bar that overwrites its own line would otherwise hide the summary behind its
+last frame. One byte is replaced by one byte, so the tail never exceeds `--tail-bytes`.
+
+`orphans_reaped_total` is at least the sum of the per-command counts and can exceed it. Orphans are
+also collected between commands and during shutdown, when there is no command to attribute them to.
 
 ## Exit codes
 
@@ -136,7 +148,7 @@ outside printable ASCII are replaced, so a broken byte from a test cannot produc
 |---|---|
 | 0 | The runner finished and wrote a valid result. Commands may have failed. |
 | 2 | Usage error: unknown flag, missing flag, unparseable number. |
-| 3 | Command file unreadable or empty. |
+| 3 | Command file unreadable, not a regular file, malformed, or holding no commands. |
 | 4 | `--workdir` missing or not a directory. |
 | 5 | Could not write the result file or log directory. |
 | 6 | Internal error: `fork`, `pipe2`, `poll` or `signalfd` failed. |
@@ -144,6 +156,11 @@ outside printable ASCII are replaced, so a broken byte from a test cannot produc
 
 `1` is deliberately unused, so a generic `1` from a wrapper script is distinguishable from a real
 runner failure. `125`, `126` and `127` are unusable because Docker owns them.
+
+A file of only blank lines and comments is exit 3 rather than a run of zero commands, because a
+report with an empty `commands` array cannot be represented: the reader refuses it. Exhausting
+`--total-timeout-ms` is **not** an error code. The runner finished and wrote a trustworthy result,
+so it exits 0 and says `total_timeout` in the file.
 
 **`137` must never be read as "the command failed."** It is `128 + 9` — `SIGKILL` — and the usual
 cause is the container hitting its memory limit. Mapping it to a test failure would record the
@@ -199,7 +216,28 @@ is set and the run continues: `SIGKILL` cannot kill a process in uninterruptible
 has to be reported rather than waited on forever.
 
 `--total-timeout-ms` bounds the whole run. Ten commands at a ten-minute per-command timeout would
-otherwise hold a container for over an hour.
+otherwise hold a container for over an hour. The per-command budget is clamped to whatever remains
+of it, so the total expiring inside a command is an ordinary deadline with the ordinary escalation.
+
+Cleanup deliberately outlives the total budget. The worst case is
+`--total-timeout-ms` plus `--grace-ms` plus the bounded kill confirmation plus
+`--drain-after-exit-ms`, so nothing may assert that `wall_ms` fits inside the total.
+
+## Stopping the runner
+
+`SIGTERM` or `SIGINT` stops the run: the group is signalled, the commands not yet reached stay
+`not_run`, a partial result is written, and the runner exits 7. A second signal skips the grace
+period. The whole path has to fit inside the stop grace period of whatever started the container,
+which is ten seconds by default, so `--grace-ms` must be set well below that.
+
+**An abort is not a deadline.** The command in flight has no deadline to report, so it is described
+from its wait status, `deadline_signal_sent` stays false, and `killed_after_grace` stays false even
+though the runner escalated. The reader refuses a command that sets `killed_after_grace` without
+`deadline_signal_sent`, so the two are not interchangeable.
+
+`--stop-on-failure` leaves every command after the first failure `not_run`, and the control plane
+treats a `not_run` command as an incomplete validation rather than a low score. It is a debugging
+aid, not a benchmark mode.
 
 ## What this contract does not provide
 

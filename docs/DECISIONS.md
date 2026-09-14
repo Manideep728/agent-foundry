@@ -248,3 +248,42 @@ monotonic clock cannot be set and is meaningless as an absolute time, so both
 are needed for different purposes.
 
 Host timestamps order runs; in-container monotonic deltas measure latency.
+
+
+## D13 — The contract's unstated behaviour, settled before the supervisor was written
+
+**Context.** `docs/RUNNER_CONTRACT.md` fixes the field names, the outcome
+vocabulary and the exit codes, and a conformance test holds both languages to
+them. It does not state ten behaviours an implementer must still choose, and a
+silent choice on either side becomes a wrong measurement rather than an error.
+
+**Decision.** Each is now written into the contract. The load-bearing ones:
+
+- `path` is a bare name inside `--log-dir`. The document's own example
+  contradicted its rule, and the reader resolves `log_dir / path`.
+- The tail comes from a ring buffer over the whole stream, never from the log
+  file. The file keeps the front, because it stops at `--max-log-bytes`, and
+  the tail must be the end.
+- A tail byte outside printable ASCII becomes one `?`. Newline and tab survive;
+  carriage return does not. One byte for one byte keeps the tail inside
+  `--tail-bytes`.
+- A command file yielding no commands is exit 3, because a report with an empty
+  `commands` array cannot be represented.
+- The per-command budget is clamped to what remains of the total, so the total
+  expiring inside a command is an ordinary deadline.
+- `aborted` equals `exit_reason != completed`, and `orphans_reaped_total` is at
+  least the sum of the per-command counts.
+- Every write of the result names every command in the file, including the
+  partial result written on exit 7.
+
+**Consequence.** Two of these are load-bearing in a way that is easy to miss.
+
+`killed_after_grace` is `escalated && deadline_fired`, never `escalated` alone.
+An abort escalates to `SIGKILL` without any deadline having fired, and the
+reader refuses a command that sets the flag without `deadline_signal_sent`. The
+natural implementation wires one boolean to the field and produces a result the
+control plane cannot parse, which surfaces weeks later as a missing measurement.
+
+The command interrupted by an abort cannot be a timeout, so it is reported from
+its wait status. `aborted` on the report is what tells the control plane to
+refuse the whole run, not the outcome of that one command.
