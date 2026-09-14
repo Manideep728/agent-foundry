@@ -40,8 +40,7 @@ filterwarnings = ["error"]
 # Markers for tests that need something the machine may not have. CI runs all
 # of them; a laptop without Docker can still run the rest.
 markers = [
-    "docker: requires a working Docker daemon",
-    "container: must run inside the validation container (asserts PID 1)",
+    "docker: requires a working Docker daemon and the runner image",
 ]
 
 [tool.ruff]

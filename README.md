@@ -27,6 +27,12 @@ descendants, and writes a `result.json` the control plane parses. A conformance
 test runs the real binary and reads its output back through the Python types,
 so the two languages cannot drift apart silently.
 
+A container suite runs the image and checks the behaviour that exists only
+when `afrunner` is PID 1: it reaps orphans that left the command's process
+group, it records a fork refused by `--pids-limit` as `spawn_failed`, it
+writes a partial result and exits 7 on `docker stop`, and it reports a command
+killed by the memory limit. The suite also runs under `docker run --init`.
+
 `make runner-image` packages `afrunner` as a container entrypoint. **The
 control plane does not start that container yet.** Validation runs through
 `LocalRunner`, which executes

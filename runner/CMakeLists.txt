@@ -74,7 +74,8 @@ if(AFRUNNER_BUILD_TESTS)
     )
     target_link_libraries(runner_tests PRIVATE afrunner_core GTest::gtest_main)
 
-    # Container-only cases carry the "container" label instead, so
-    # `ctest -L native` is the suite that runs without Docker.
+    # Every gtest case runs without Docker. The behaviour that needs a real
+    # container, PID 1 above all, is tested from outside it in
+    # tests/test_runner_container.py.
     gtest_discover_tests(runner_tests PROPERTIES LABELS native TIMEOUT 60)
 endif()
