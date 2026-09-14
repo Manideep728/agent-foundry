@@ -26,6 +26,8 @@ add_library(afrunner_core OBJECT
     src/outcome.cpp
     src/report.cpp
     src/resultfile.cpp
+    src/sink.cpp
+    src/supervisor.cpp
     src/sysinfo.cpp
     src/tail.cpp
 )
@@ -63,6 +65,7 @@ if(AFRUNNER_BUILD_TESTS)
         tests/test_options.cpp
         tests/test_outcome.cpp
         tests/test_report.cpp
+        tests/test_supervisor.cpp
         tests/test_resultfile.cpp
         tests/test_sysinfo.cpp
         tests/test_tail.cpp
@@ -71,5 +74,5 @@ if(AFRUNNER_BUILD_TESTS)
 
     # Container-only cases carry the "container" label instead, so
     # `ctest -L native` is the suite that runs without Docker.
-    gtest_discover_tests(runner_tests PROPERTIES LABELS native)
+    gtest_discover_tests(runner_tests PROPERTIES LABELS native TIMEOUT 60)
 endif()
