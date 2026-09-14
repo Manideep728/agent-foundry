@@ -11,9 +11,11 @@ RUNNER_BUILD_TYPE ?= RelWithDebInfo
 # fails the moment the second one configures, because CMake records the source
 # path in its cache. Override it for a checkout on a slow filesystem.
 RUNNER_BUILD_DIR  ?= $(RUNNER_SRC)/build
+RUNNER_IMAGE      ?= afrunner:local
+RUNNER_JOBS       ?= $(shell nproc 2>/dev/null || echo 2)
 
 .PHONY: help sync test lint fmt typecheck check run clean \
-        runner-configure runner-build runner-test
+        runner-configure runner-build runner-test runner-image
 
 ## help: list the documented targets
 help:
@@ -52,6 +54,12 @@ runner-build: runner-configure
 ## runner-test: run the runner tests that need no container
 runner-test: runner-build
 	ctest --test-dir $(RUNNER_BUILD_DIR) -L native --output-on-failure
+
+## runner-image: build the validation image, with afrunner as its entrypoint
+runner-image:
+	docker build --target runtime \
+		--build-arg BUILD_TYPE=$(RUNNER_BUILD_TYPE) --build-arg JOBS=$(RUNNER_JOBS) \
+		-t $(RUNNER_IMAGE) $(RUNNER_SRC)
 
 ## check: everything CI runs
 check: lint typecheck test

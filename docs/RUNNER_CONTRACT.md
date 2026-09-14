@@ -254,10 +254,14 @@ aid, not a benchmark mode.
 
 | Implementation | Isolation | Status |
 |---|---|---|
-| `afrunner` (C++20, in a container) | process groups, resource limits, no network | not yet built |
+| `afrunner` (C++20, in a container) | process groups, resource limits, no network | built; image from `make runner-image`; not yet invoked by the control plane |
 | `LocalRunner` (Python, `subprocess`) | **none** | development only |
 
-`LocalRunner` satisfies the reading half of this contract so the pipeline can be exercised before
-the supervisor exists. It runs commands directly on the host with no isolation, no resource limits
-and no process-group cleanup, and it reports `pid1: false`. It is not a security boundary and must
-never be pointed at a fixture whose contents are not already trusted.
+The image's entrypoint is `afrunner` in exec form, so it is PID 1 and receives the flags given to
+`docker run` as its argv. The runtime base is `python:3.12-slim-bookworm`, because the validation
+commands need the task's toolchain as well as the runner.
+
+`LocalRunner` satisfies the reading half of this contract, so the pipeline runs without Docker. It runs commands directly on the host with no isolation, no resource limits and no network
+restriction, and it reports `pid1: false`. It signals the process group on a deadline, but that is
+hygiene, not containment. It is not a security boundary and must never be pointed at a fixture
+whose contents are not already trusted.

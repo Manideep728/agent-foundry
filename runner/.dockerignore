@@ -1,0 +1,4 @@
+# Build trees are large and machine-specific, and a copied CMakeCache.txt would
+# point at this checkout's paths.
+build/
+cmake-build-*/

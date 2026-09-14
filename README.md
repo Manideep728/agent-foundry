@@ -27,8 +27,9 @@ descendants, and writes a `result.json` the control plane parses. A conformance
 test runs the real binary and reads its output back through the Python types,
 so the two languages cannot drift apart silently.
 
-**Docker isolation does not exist yet, and the control plane does not call
-`afrunner`.** Validation still runs through `LocalRunner`, which executes
+`make runner-image` packages `afrunner` as a container entrypoint. **The
+control plane does not start that container yet.** Validation runs through
+`LocalRunner`, which executes
 commands directly on the host with no isolation, no resource limits and no
 network restriction -- development only. Every run it produces records
 `pid1=false` and a runner version naming it, so those rows are identifiable in
@@ -52,7 +53,22 @@ make test     # tests only
 ```
 
 `make help` lists the documented targets. Nothing in the project requires
-make; every target is a plain `uv` command.
+make; every target is a plain `uv`, `cmake` or `docker` command.
+
+The C++ supervisor needs Linux, CMake 3.20+ and a C++20 compiler. The image
+needs Docker.
+
+```
+make runner-test   # build afrunner and run its native test suite
+make runner-image  # build the validation image, afrunner:local
+```
+
+The image's entrypoint is `afrunner`, so it runs as PID 1 in the container:
+
+```
+$ docker run --rm afrunner:local --version
+afrunner 0.1.0
+```
 
 ## Run a task
 
