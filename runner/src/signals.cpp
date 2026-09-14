@@ -41,6 +41,27 @@ void become_subreaper() {
     ::prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0);
 }
 
+void AbortWatch::consume() {
+    if (fd_ < 0) {
+        return;
+    }
+    while (true) {
+        signalfd_siginfo info{};
+        const ssize_t got = ::read(fd_, &info, sizeof info);
+        if (got != static_cast<ssize_t>(sizeof info)) {
+            if (got < 0 && errno == EINTR) {
+                continue;
+            }
+            return;
+        }
+        // SIGCHLD is watched only so the loop wakes promptly when a child
+        // exits. It is not a request to stop.
+        if (info.ssi_signo == SIGTERM || info.ssi_signo == SIGINT) {
+            ++stop_requests_;
+        }
+    }
+}
+
 Reaped reap(pid_t child) {
     Reaped reaped;
 

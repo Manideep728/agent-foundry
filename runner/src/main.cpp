@@ -42,10 +42,20 @@ int main(int argc, char** argv) {
     }
     const af::Options& options = std::get<af::Options>(parsed);
 
-    // Before any fork, so every orphaned descendant reparents here and can be
-    // reaped. Inside the container the process is already PID 1 and this
-    // changes nothing.
+    // Both before any fork. The blocked mask is inherited, and every orphaned
+    // descendant must reparent here so it can be reaped. Inside the container
+    // the process is already PID 1, where become_subreaper changes nothing and
+    // blocking is the only way a signal is heard at all: PID 1 discards a
+    // signal whose disposition is still SIG_DFL.
     af::become_subreaper();
+    if (const std::string problem = af::block_signals(); !problem.empty()) {
+        return fail(problem, af::exit_codes::internal);
+    }
+    const int signal_fd = af::make_signalfd();
+    if (signal_fd < 0) {
+        return fail("cannot watch for signals", af::exit_codes::internal);
+    }
+    af::AbortWatch watch(signal_fd);
 
     if (!is_directory(options.workdir)) {
         return fail("workdir is missing or not a directory: " + options.workdir,
@@ -63,7 +73,7 @@ int main(int argc, char** argv) {
         return fail(problem, af::exit_codes::output);
     }
 
-    af::RunAll all = af::run_all(options, lines);
+    af::RunAll all = af::run_all(options, lines, watch);
     if (!all.fatal.empty()) {
         return fail(all.fatal, af::exit_codes::output);
     }
@@ -77,6 +87,9 @@ int main(int argc, char** argv) {
                     af::exit_codes::internal);
     }
 
+    // Written even when the run was cut short. A partial result names every
+    // command in the file, with the unreached ones not_run, because the reader
+    // requires indices 0..n-1 and would refuse anything shorter.
     if (const std::string problem =
             af::write_atomically(options.result, af::serialise(all.report));
         !problem.empty()) {
@@ -86,5 +99,8 @@ int main(int argc, char** argv) {
     // The exit code describes the runner, not the commands. A run in which
     // every command failed still exits 0, because the measurement is
     // trustworthy; whether validation passed is inside result.json.
+    if (all.report.exit_reason == af::ExitReason::Signal) {
+        return af::exit_codes::aborted;
+    }
     return af::exit_codes::ok;
 }

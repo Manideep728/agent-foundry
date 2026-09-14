@@ -73,6 +73,12 @@ struct Stream {
 }  // namespace
 
 CommandRun run_command(const Options& options, int index, const std::string& command) {
+    AbortWatch never(-1);
+    return run_command(options, index, command, never);
+}
+
+CommandRun run_command(const Options& options, int index, const std::string& command,
+                       AbortWatch& watch) {
     CommandRun run;
     CommandResult& result = run.result;
     result.index = index;
@@ -136,8 +142,8 @@ CommandRun run_command(const Options& options, int index, const std::string& com
         const int timeout =
             static_cast<int>(std::clamp<long long>(due, 0, poll_slice_ms));
 
-        std::array<pollfd, 2> fds{};
-        std::array<Stream*, 2> watched{};
+        std::array<pollfd, 3> fds{};
+        std::array<Stream*, 3> watched{};
         nfds_t count = 0;
         for (Stream& stream : streams) {
             if (stream.fd < 0) {
@@ -145,6 +151,11 @@ CommandRun run_command(const Options& options, int index, const std::string& com
             }
             fds[count] = pollfd{stream.fd, POLLIN, 0};
             watched[count] = &stream;
+            ++count;
+        }
+        if (watch.fd() >= 0) {
+            fds[count] = pollfd{watch.fd(), POLLIN, 0};
+            watched[count] = nullptr;
             ++count;
         }
 
@@ -160,6 +171,10 @@ CommandRun run_command(const Options& options, int index, const std::string& com
         if (ready > 0) {
             for (nfds_t i = 0; i < count; ++i) {
                 if (fds[i].revents == 0) {
+                    continue;
+                }
+                if (watched[i] == nullptr) {
+                    watch.consume();
                     continue;
                 }
                 if (!drain_ready(watched[i]->fd, *watched[i]->sink)) {
@@ -185,16 +200,20 @@ CommandRun run_command(const Options& options, int index, const std::string& com
         // A command reaped in this same pass finished, whatever the clock says.
         // Firing the deadline on it would let a coarse poll slice turn a
         // command that completed in time into a timeout.
-        if (phase == Phase::Running && !child_reaped && now >= deadline) {
-            deadline_fired = true;
+        if (phase == Phase::Running && !child_reaped &&
+            (now >= deadline || watch.requested())) {
+            // An abort is not a deadline. Leaving deadline_fired false is what
+            // keeps killed_after_grace false, and the reader refuses a report
+            // that sets that flag without the deadline having fired.
+            deadline_fired = now >= deadline;
             ::killpg(child.pgid, SIGTERM);
             // A stopped process cannot run to handle SIGTERM.
             ::killpg(child.pgid, SIGCONT);
             signal_sent = true;
-            grace_deadline = now + options.grace_ms;
+            grace_deadline = now + (watch.immediate() ? 0 : options.grace_ms);
             phase = Phase::Grace;
         } else if (phase == Phase::Grace && !child_reaped && !escalated &&
-                   now >= grace_deadline) {
+                   (now >= grace_deadline || watch.immediate())) {
             ::killpg(child.pgid, SIGKILL);
             escalated = true;
             confirm_deadline = now + group_confirm_ms;
@@ -253,6 +272,12 @@ CommandRun run_command(const Options& options, int index, const std::string& com
 }
 
 RunAll run_all(const Options& options, const std::vector<std::string>& commands) {
+    AbortWatch never(-1);
+    return run_all(options, commands, never);
+}
+
+RunAll run_all(const Options& options, const std::vector<std::string>& commands,
+               AbortWatch& watch) {
     RunAll all;
     Report& report = all.report;
 
@@ -280,6 +305,15 @@ RunAll run_all(const Options& options, const std::vector<std::string>& commands)
     }
 
     for (std::size_t i = 0; i < commands.size(); ++i) {
+        // Nothing polls the descriptor between commands, so look once here.
+        // Otherwise a stop arriving in the gap waits for the next command to
+        // finish before it is noticed.
+        watch.consume();
+        if (watch.requested()) {
+            report.exit_reason = ExitReason::Signal;
+            break;
+        }
+
         const long long remaining = total_deadline - monotonic_ms();
         if (remaining <= 0) {
             // Ten commands at a ten-minute deadline would otherwise hold a
@@ -294,12 +328,19 @@ RunAll run_all(const Options& options, const std::vector<std::string>& commands)
         Options budgeted = options;
         budgeted.timeout_ms = std::min(options.timeout_ms, remaining);
 
-        CommandRun run = run_command(budgeted, static_cast<int>(i), commands[i]);
+        CommandRun run = run_command(budgeted, static_cast<int>(i), commands[i], watch);
         report.orphans_reaped_total += run.result.orphans_reaped;
         report.commands[i] = std::move(run.result);
         if (!run.fatal.empty()) {
             all.fatal = run.fatal;
             return all;
+        }
+
+        if (watch.requested()) {
+            // The remaining entries stay not_run, and the report says the run
+            // was cut short rather than completed.
+            report.exit_reason = ExitReason::Signal;
+            break;
         }
 
         if (options.stop_on_failure && !succeeded(report.commands[i].verdict)) {

@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
+import time
 from dataclasses import fields
 from pathlib import Path
 from typing import Any
@@ -213,6 +215,100 @@ def test_a_missing_workdir_is_exit_four(runner: Path, tmp_path: Path) -> None:
     code, _ = _invoke(runner, tmp_path, "true\n", workdir=tmp_path / "does-not-exist")
 
     assert code == 4
+
+
+def _start(
+    runner: Path, tmp_path: Path, command_text: str, *, grace_ms: int = 500
+) -> tuple[subprocess.Popen[bytes], Path]:
+    work = tmp_path / "work"
+    logs = tmp_path / "out" / "logs"
+    work.mkdir(parents=True, exist_ok=True)
+    logs.mkdir(parents=True, exist_ok=True)
+
+    command_file = tmp_path / "commands.txt"
+    command_file.write_text(command_text, encoding="utf-8", newline="")
+
+    result = tmp_path / "out" / "result.json"
+    process = subprocess.Popen(
+        [
+            str(runner),
+            "--commands",
+            str(command_file),
+            "--workdir",
+            str(work),
+            "--result",
+            str(result),
+            "--log-dir",
+            str(logs),
+            "--timeout-ms",
+            "60000",
+            "--total-timeout-ms",
+            "60000",
+            "--grace-ms",
+            str(grace_ms),
+            "--max-log-bytes",
+            "8388608",
+            "--tail-bytes",
+            "4096",
+            "--drain-after-exit-ms",
+            "500",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return process, result
+
+
+# Without a blocked SIGTERM and a signalfd, `docker stop` kills the runner at
+# SIG_DFL and the container dies with no result at all. The control plane then
+# records a runner failure and cannot say why.
+def test_a_signal_writes_a_complete_partial_result(
+    runner: Path, tmp_path: Path
+) -> None:
+    process, result = _start(runner, tmp_path, "sleep 30 & wait\necho never\n")
+    time.sleep(1.0)
+    process.send_signal(signal.SIGTERM)
+    process.wait(timeout=30)
+
+    assert process.returncode == 7
+    assert result.is_file(), "the runner died without writing anything"
+
+    report = _parse(result)
+    assert report.exit_reason is ExitReason.SIGNAL
+    assert report.aborted
+
+    # The reader requires indices 0..n-1, so a partial result must still carry
+    # an entry for every command in the file.
+    assert len(report.commands) == 2
+    assert report.commands[1].outcome is CommandOutcome.NOT_RUN
+
+    # An abort is not a deadline. CommandResult refuses killed_after_grace
+    # without deadline_signal_sent, so getting this wrong makes the report
+    # unparseable, which _parse above would already have raised on.
+    interrupted = report.commands[0]
+    assert not interrupted.deadline_signal_sent
+    assert not interrupted.killed_after_grace
+    assert not interrupted.timed_out
+
+
+def test_a_second_signal_does_not_wait_out_the_grace(
+    runner: Path, tmp_path: Path
+) -> None:
+    process, result = _start(
+        runner, tmp_path, "trap '' TERM; sleep 30 & wait\n", grace_ms=30000
+    )
+    time.sleep(1.0)
+    process.send_signal(signal.SIGTERM)
+    time.sleep(0.3)
+    process.send_signal(signal.SIGTERM)
+
+    started = time.monotonic()
+    process.wait(timeout=30)
+    elapsed = time.monotonic() - started
+
+    assert process.returncode == 7
+    assert elapsed < 20, "the second signal must skip the 30 second grace period"
+    assert result.is_file()
 
 
 def test_a_usage_error_is_exit_two(runner: Path) -> None:

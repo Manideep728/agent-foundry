@@ -25,6 +25,32 @@ int make_signalfd();
 // everywhere, so orphan reaping is exercised outside a container too.
 void become_subreaper();
 
+// Watches the signalfd for a request to stop.
+//
+// The whole abort path has to fit inside Docker's stop grace period, which is
+// ten seconds by default: kill the group, mark the rest not_run, write a
+// partial result, exit 7.
+class AbortWatch {
+  public:
+    // -1 means nothing is watched and the run can never be aborted.
+    explicit AbortWatch(int fd) : fd_(fd) {}
+
+    int fd() const { return fd_; }
+
+    // Drains the descriptor. Signals coalesce, so this counts the reads it
+    // makes rather than trusting any per-signal delivery.
+    void consume();
+
+    bool requested() const { return stop_requests_ > 0; }
+
+    // Asked twice. The operator means it, so the grace period is skipped.
+    bool immediate() const { return stop_requests_ > 1; }
+
+  private:
+    int fd_;
+    int stop_requests_ = 0;
+};
+
 struct Reaped {
     int orphans = 0;
     bool child_reaped = false;
