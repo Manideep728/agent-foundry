@@ -11,6 +11,7 @@
 #include "child.hpp"
 #include "clock.hpp"
 #include "outcome.hpp"
+#include "signals.hpp"
 #include "sink.hpp"
 
 namespace afrunner {
@@ -88,10 +89,11 @@ CommandRun run_command(const Options& options, int index, const std::string& com
         Stream{child.stderr_fd, &err},
     };
 
-    // Drain before reaping, always. A Linux pipe holds about 64 KiB; waiting
-    // in waitpid while the child fills it deadlocks both until the deadline
-    // fires, and the command is then reported as a timeout it never had.
-    while (streams[0].fd >= 0 || streams[1].fd >= 0) {
+    bool child_reaped = false;
+    int status = 0;
+    long long orphans = 0;
+
+    while (!child_reaped || streams[0].fd >= 0 || streams[1].fd >= 0) {
         std::array<pollfd, 2> fds{};
         std::array<Stream*, 2> watched{};
         nfds_t count = 0;
@@ -105,33 +107,43 @@ CommandRun run_command(const Options& options, int index, const std::string& com
         }
 
         const int ready = ::poll(fds.data(), count, poll_slice_ms);
-        if (ready < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
+        if (ready < 0 && errno != EINTR) {
             break;
         }
-        for (nfds_t i = 0; i < count; ++i) {
-            if (fds[i].revents == 0) {
-                continue;
-            }
-            if (!drain_ready(watched[i]->fd, *watched[i]->sink)) {
-                ::close(watched[i]->fd);
-                watched[i]->fd = -1;
+
+        // Drain first, always, before anything that can reap or block. A Linux
+        // pipe holds about 64 KiB; waiting in waitpid while the child fills it
+        // deadlocks both until the deadline fires, and the command is then
+        // reported as a timeout it never had.
+        if (ready > 0) {
+            for (nfds_t i = 0; i < count; ++i) {
+                if (fds[i].revents == 0) {
+                    continue;
+                }
+                if (!drain_ready(watched[i]->fd, *watched[i]->sink)) {
+                    ::close(watched[i]->fd);
+                    watched[i]->fd = -1;
+                }
             }
         }
-    }
 
-    int status = 0;
-    while (::waitpid(child.pid, &status, 0) < 0 && errno == EINTR) {
-        // Interrupted before the child was reaped; ask again.
+        // Reap every iteration, whether or not SIGCHLD was seen. signalfd
+        // coalesces signals, so a count would be wrong, and an unconditional
+        // WNOHANG cannot strand a zombie.
+        const Reaped collected = reap(child.pid);
+        orphans += collected.orphans;
+        if (collected.child_reaped) {
+            child_reaped = true;
+            status = collected.child_status;
+        }
     }
 
     out.close();
     err.close();
 
     result.verdict =
-        decide_outcome(Facts{.spawned = true, .reaped = true, .status = status});
+        decide_outcome(Facts{.spawned = true, .reaped = child_reaped, .status = status});
+    result.orphans_reaped = orphans;
     result.out = out.capture();
     result.err = err.capture();
     result.duration_ms = monotonic_ms() - started;

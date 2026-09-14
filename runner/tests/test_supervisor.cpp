@@ -2,6 +2,10 @@
 
 #include <gtest/gtest.h>
 
+#include <sys/wait.h>
+#include <unistd.h>
+
+#include <cerrno>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -9,6 +13,7 @@
 #include "options.hpp"
 #include "outcome.hpp"
 #include "resultfile.hpp"
+#include "signals.hpp"
 #include "temp_dir.hpp"
 
 namespace {
@@ -150,6 +155,47 @@ TEST(Supervisor, ReportsASpawnFailure) {
     EXPECT_EQ(run.result.verdict.outcome, Outcome::SpawnFailed);
     EXPECT_NE(run.result.spawn_error, "");
     EXPECT_EQ(run.result.out.path, "") << "a command that never ran has no log";
+}
+
+// Two bugs, two assertions. The exit codes are deliberately different so a
+// waitpid(-1) misattribution reads as 42 instead of 7, and orphans_reaped
+// catches the opposite failure of never reaping at all.
+TEST(Supervisor, ADoubleForkedOrphanIsReapedAndNotAttributed) {
+    afrunner::become_subreaper();
+    const TempDir dir;
+    Options options = options_for(dir);
+    ASSERT_EQ(afrunner::ensure_directory(options.log_dir), "");
+
+    const CommandRun run =
+        afrunner::run_command(options, 0, "( sleep 0.2; exit 42 ) & exit 7");
+
+    EXPECT_EQ(run.result.verdict.outcome, Outcome::Exited);
+    EXPECT_EQ(run.result.verdict.exit_code, 7) << "the orphan's 42 leaked in";
+    EXPECT_GE(run.result.orphans_reaped, 1);
+}
+
+// Unreaped orphans accumulate as zombies, consume PID slots against
+// --pids-limit, and make later commands fail to spawn.
+TEST(Supervisor, ManyOrphansLeaveNoZombies) {
+    afrunner::become_subreaper();
+    const TempDir dir;
+    Options options = options_for(dir);
+    ASSERT_EQ(afrunner::ensure_directory(options.log_dir), "");
+
+    std::string command;
+    for (int i = 0; i < 20; ++i) {
+        command += "( sleep 0.15 ) & ";
+    }
+    command += "exit 0";
+
+    const CommandRun run = afrunner::run_command(options, 0, command);
+
+    EXPECT_EQ(run.result.verdict.exit_code, 0);
+    EXPECT_GE(run.result.orphans_reaped, 20);
+
+    int leftover = 0;
+    EXPECT_EQ(::waitpid(-1, &leftover, WNOHANG), -1) << "a zombie was left behind";
+    EXPECT_EQ(errno, ECHILD);
 }
 
 TEST(Supervisor, ReportsACommandKilledByASignal) {

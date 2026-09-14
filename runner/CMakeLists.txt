@@ -26,6 +26,7 @@ add_library(afrunner_core OBJECT
     src/outcome.cpp
     src/report.cpp
     src/resultfile.cpp
+    src/signals.cpp
     src/sink.cpp
     src/supervisor.cpp
     src/sysinfo.cpp
@@ -65,6 +66,7 @@ if(AFRUNNER_BUILD_TESTS)
         tests/test_options.cpp
         tests/test_outcome.cpp
         tests/test_report.cpp
+        tests/test_signals.cpp
         tests/test_supervisor.cpp
         tests/test_resultfile.cpp
         tests/test_sysinfo.cpp
