@@ -22,10 +22,10 @@ import subprocess
 import time
 from dataclasses import fields
 from pathlib import Path
-from typing import Any
 
 import pytest
 
+from control_plane.adapters.result_json import decode_report
 from control_plane.domain.validation import (
     CommandOutcome,
     CommandResult,
@@ -38,16 +38,14 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _find_runner() -> Path | None:
-    """Locate afrunner, preferring an explicit build directory.
+    """Locate afrunner: an explicit build directory first, then the default.
 
-    The default build tree is outside the repository, because the sources sit
-    on a Windows drive that WSL reaches over 9p.
+    The default is `runner/build`, the Makefile's `RUNNER_BUILD_DIR`.
     """
     candidates: list[Path] = []
     override = os.environ.get("RUNNER_BUILD_DIR")
     if override:
         candidates.append(Path(override) / "afrunner")
-    candidates.append(Path.home() / ".cache" / "afrunner" / "build" / "afrunner")
     candidates.append(REPO_ROOT / "runner" / "build" / "afrunner")
 
     return next(
@@ -120,23 +118,12 @@ def _invoke(
 
 
 def _parse(result: Path) -> ValidationReport:
-    """Build a ValidationReport from the runner's JSON.
+    """Read the runner's JSON through the control plane's own decoder.
 
-    Deliberately splats the decoded object into the dataclasses: an unknown key
-    or a missing one raises TypeError here, which is exactly the drift this
-    test exists to catch.
+    The decoder rejects an unknown or missing key and a value of the wrong
+    type, which is exactly the drift this test exists to catch.
     """
-    raw: dict[str, Any] = json.loads(result.read_text(encoding="utf-8"))
-
-    commands = []
-    for entry in raw.pop("commands"):
-        entry["outcome"] = CommandOutcome(entry["outcome"])
-        entry["stdout"] = StreamCapture(**entry["stdout"])
-        entry["stderr"] = StreamCapture(**entry["stderr"])
-        commands.append(CommandResult(**entry))
-
-    raw["exit_reason"] = ExitReason(raw["exit_reason"])
-    return ValidationReport(commands=tuple(commands), **raw)
+    return decode_report(result.read_bytes())
 
 
 def test_the_runner_writes_a_report_the_reader_accepts(
