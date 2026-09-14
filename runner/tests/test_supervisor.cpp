@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -196,6 +197,99 @@ TEST(Supervisor, ManyOrphansLeaveNoZombies) {
     int leftover = 0;
     EXPECT_EQ(::waitpid(-1, &leftover, WNOHANG), -1) << "a zombie was left behind";
     EXPECT_EQ(errno, ECHILD);
+}
+
+// BUGS.md bug 1, end to end. `sleep` obeys SIGTERM and dies inside the grace
+// window, so nothing is escalated -- and it is still a timeout. Recording it
+// as a spontaneous crash would put the benchmark's timeout rate near zero
+// while looking entirely plausible.
+//
+// The command is compound on purpose. dash optimises `sh -c '<simple
+// command>'` into a bare exec, so `sh -c 'sleep 300'` creates no grandchild
+// and the test would pass whether or not group cleanup works.
+TEST(Supervisor, ACommandThatObeysSigtermIsStillATimeout) {
+    const TempDir dir;
+    Options options = options_for(dir);
+    options.timeout_ms = 300;
+    options.grace_ms = 5000;
+    ASSERT_EQ(afrunner::ensure_directory(options.log_dir), "");
+
+    const CommandRun run = afrunner::run_command(options, 0, "sleep 300 & wait");
+
+    EXPECT_EQ(run.result.verdict.outcome, Outcome::Timeout);
+    EXPECT_TRUE(run.result.verdict.deadline_signal_sent);
+    EXPECT_FALSE(run.result.verdict.killed_after_grace)
+        << "it obeyed SIGTERM, so nothing was escalated";
+    EXPECT_LT(run.result.duration_ms, 4000)
+        << "it should die well inside the 5s grace window";
+}
+
+TEST(Supervisor, ACommandThatIgnoresSigtermIsKilledAfterTheGrace) {
+    const TempDir dir;
+    Options options = options_for(dir);
+    options.timeout_ms = 300;
+    options.grace_ms = 500;
+    ASSERT_EQ(afrunner::ensure_directory(options.log_dir), "");
+
+    const CommandRun run =
+        afrunner::run_command(options, 0, "trap '' TERM; sleep 300 & wait");
+
+    EXPECT_EQ(run.result.verdict.outcome, Outcome::Timeout);
+    EXPECT_TRUE(run.result.verdict.deadline_signal_sent);
+    EXPECT_TRUE(run.result.verdict.killed_after_grace);
+    EXPECT_EQ(run.result.verdict.signal, SIGKILL);
+}
+
+// The guard against D5's caveat quietly invalidating the group tests: if the
+// shell ever stops forking a layer, this fails loudly instead of the others
+// passing for the wrong reason.
+TEST(Supervisor, TheShellReallyForksALayer) {
+    const TempDir dir;
+    Options options = options_for(dir);
+    ASSERT_EQ(afrunner::ensure_directory(options.log_dir), "");
+
+    const CommandRun run =
+        afrunner::run_command(options, 0, "sleep 0.05 & echo $!; wait");
+
+    const long long grandchild = std::stoll(run.result.out.tail);
+    EXPECT_GT(grandchild, 0);
+}
+
+// Killing the bare process leaves a backgrounded grandchild running, holding
+// the pipe open and a PID slot with it. Signalling the group is what cleans up.
+TEST(Supervisor, ABackgroundedGrandchildDoesNotHoldTheRunOpen) {
+    const TempDir dir;
+    Options options = options_for(dir);
+    options.timeout_ms = 300;
+    options.grace_ms = 500;
+    ASSERT_EQ(afrunner::ensure_directory(options.log_dir), "");
+
+    const CommandRun run =
+        afrunner::run_command(options, 0, "sleep 300 & echo $!; wait");
+
+    EXPECT_EQ(run.result.verdict.outcome, Outcome::Timeout);
+    EXPECT_LT(run.result.duration_ms, 20000) << "the run must not wait out the sleep";
+
+    const long long grandchild = std::stoll(run.result.out.tail);
+    ASSERT_GT(grandchild, 0);
+    // Without this the test only proves the runner did not hang, not that it
+    // cleaned up after itself.
+    ::usleep(200000);
+    EXPECT_EQ(::kill(static_cast<pid_t>(grandchild), 0), -1);
+    EXPECT_EQ(errno, ESRCH) << "the backgrounded grandchild survived the run";
+}
+
+TEST(Supervisor, ACommandFinishingInTimeIsNotATimeout) {
+    const TempDir dir;
+    Options options = options_for(dir);
+    options.timeout_ms = 5000;
+    ASSERT_EQ(afrunner::ensure_directory(options.log_dir), "");
+
+    const CommandRun run = afrunner::run_command(options, 0, "sleep 0.05 & wait");
+
+    EXPECT_EQ(run.result.verdict.outcome, Outcome::Exited);
+    EXPECT_FALSE(run.result.verdict.deadline_signal_sent);
+    EXPECT_FALSE(run.result.verdict.killed_after_grace);
 }
 
 TEST(Supervisor, ReportsACommandKilledByASignal) {
