@@ -14,10 +14,10 @@ run twice produces two comparable records.
 
 ## Status
 
-Phase 4. One task runs end to end: the harness verifies a fixture against its
+Phase 5. One task runs end to end: the harness verifies a fixture against its
 pinned content hash, copies it to an isolated workspace, invokes an agent,
-captures the patch, executes the repository's own tests, scores the result and
-stores it.
+captures the patch, executes the repository's own tests inside a container,
+scores the result and stores it.
 
 The C++ execution supervisor, `afrunner`, now exists. It reads a command file,
 runs each line under `/bin/sh -c` in its own process group, captures both
@@ -33,15 +33,17 @@ group, it records a fork refused by `--pids-limit` as `spawn_failed`, it
 writes a partial result and exits 7 on `docker stop`, and it reports a command
 killed by the memory limit. The suite also runs under `docker run --init`.
 
-`make runner-image` packages `afrunner` as a container entrypoint.
-`DockerRunner` starts that container with no network, no capabilities, a
-read-only command file, and fixed memory, CPU and process limits. A test runs
-the benchmark task end to end through it. **`af run` does not use it yet.**
-The CLI validates through `LocalRunner`, which executes commands directly on
-the host with no isolation, no resource limits and no
-network restriction -- development only. Every run it produces records
-`pid1=false` and a runner version naming it, so those rows are identifiable in
-the data rather than only in this paragraph.
+`make runner-image` packages `afrunner` as a container entrypoint, and `af run`
+validates inside that container by default. The container has no network, no
+capabilities, a read-only command file, and fixed memory, CPU and process
+limits. When the memory limit kills a process, the run is recorded as an
+infrastructure failure, not as a failed test. A run that the control plane did
+not finish has its container removed the next time `af run` starts.
+
+`--runner local` runs the commands directly on the host instead, with no
+isolation, no resource limits and no network restriction -- development only.
+Every run it produces records `pid1=false` and a runner version naming it, so
+those rows are identifiable in the data rather than only in this paragraph.
 
 One benchmark task exists. No benchmark results are published.
 
@@ -80,19 +82,24 @@ afrunner 0.1.0
 
 ## Run a task
 
+Build the image first (`make runner-image`).
+
 ```
 $ uv run af run tasks/csv-quoted-fields.toml
-af: warning: running with local-subprocess, which provides no isolation.
-run 20260912-224928-bbecefa7  csv-quoted-fields  [synthetic]
+run 20260915-070407-f7225053  csv-quoted-fields  [synthetic]
   state       scored
   outcome     clean_patch
   resolved    yes         regressed   no
   fail->pass  1/1          pass->pass  1/1
-  duration    agent 1ms   validation 81ms
+  duration    agent 2ms   validation 1121ms
   cost        0 micro-USD  (fake/scripted)
   patch       1391 bytes
-  runner      local-subprocess 0.1.0 (no isolation)  pid1=False arch=arm64
+  runner      afrunner in docker image afrunner:local  pid1=True arch=x86_64
 ```
+
+`--image` selects a different validation image. `--runner local` skips Docker
+and prints a warning on every run. If Docker or the image is missing, the run
+is recorded as `infrastructure_failed` and `af` exits 1.
 
 `af list` and `af show <run-id>` reprint stored runs. `af fixture-hash <dir>`
 prints the digest a task file should pin.
@@ -126,8 +133,8 @@ the first release.
 - **Statistical significance.** Single-trial results are single-trial results.
 - **Portability.** The supervisor depends on POSIX process semantics and is
   Linux-only by design.
-- **No isolation today.** `LocalRunner` is not a sandbox. Point it only at
-  fixtures whose contents are already trusted.
+- **`--runner local` is not a sandbox.** Point it only at fixtures whose
+  contents are already trusted.
 
 Benchmark numbers, when they exist, will name the machine that produced them
 and be reported as ranges across runs. Results from different model providers

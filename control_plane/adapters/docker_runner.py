@@ -129,6 +129,10 @@ def build_argv(request: ValidationRequest, config: DockerConfig) -> list[str]:
         container_name(request.run_id),
         "--label",
         f"agentfoundry.run_id={request.run_id.value}",
+        # A missing image is an error, never a silent download: the image is
+        # the validation environment, and its provenance is `make runner-image`.
+        "--pull",
+        "never",
         "--network",
         "none",
         "--cap-drop=ALL",

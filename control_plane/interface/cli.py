@@ -20,7 +20,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from control_plane import __version__
-from control_plane.adapters.docker_runner import DockerRunner
+from control_plane.adapters.docker_runner import DockerConfig, DockerRunner
 from control_plane.adapters.fake_agent import FakeAgent
 from control_plane.adapters.fixtures import digest_tree
 from control_plane.adapters.local_runner import LocalRunner
@@ -31,9 +31,11 @@ from control_plane.adapters.workspace import WorkspaceFactory
 from control_plane.domain.errors import DomainError
 from control_plane.domain.fixture import manifest_bytes
 from control_plane.domain.ids import RunId
+from control_plane.domain.outcomes import FailureCategory
 from control_plane.domain.record import RunRecord
 from control_plane.domain.states import RunState
 from control_plane.services.evaluate import EvaluationService
+from control_plane.services.ports import ValidationRunner
 from control_plane.services.recovery import recover_unfinished
 
 PROGRAM = "af"
@@ -47,6 +49,10 @@ DEFAULT_DB = Path("af.sqlite3")
 DEFAULT_RUNS = Path("runs")
 DEFAULT_FIXTURES = Path("tasks/fixtures")
 DEFAULT_SOLUTIONS = Path("tasks/solutions")
+DEFAULT_IMAGE = "afrunner:local"
+
+RUNNER_DOCKER = "docker"
+RUNNER_LOCAL = "local"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -77,6 +83,20 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--runs", type=Path, default=DEFAULT_RUNS)
     run.add_argument("--fixtures", type=Path, default=DEFAULT_FIXTURES)
     run.add_argument("--solutions", type=Path, default=DEFAULT_SOLUTIONS)
+    run.add_argument(
+        "--runner",
+        choices=(RUNNER_DOCKER, RUNNER_LOCAL),
+        default=RUNNER_DOCKER,
+        help=(
+            "docker validates inside the runner image; local runs the commands "
+            "on this machine with no isolation, for development only"
+        ),
+    )
+    run.add_argument(
+        "--image",
+        default=DEFAULT_IMAGE,
+        help="the validation image for --runner docker (build it: make runner-image)",
+    )
 
     show = subcommands.add_parser("show", help="print a stored run")
     show.add_argument("run_id")
@@ -168,11 +188,14 @@ def run_task(args: argparse.Namespace) -> int:
         return EXIT_USAGE
 
     clock = SystemClock()
-    runner = LocalRunner(clock)
+    docker = DockerRunner(DockerConfig(image=args.image))
+    runner: ValidationRunner = (
+        docker if args.runner == RUNNER_DOCKER else LocalRunner(clock)
+    )
 
     if not runner.isolated:
-        # Printed every time, on stderr. Once a runner with a real boundary
-        # exists this becomes an explicit opt-in rather than the default.
+        # Printed every time, on stderr, so an unisolated run is never mistaken
+        # for a measured one.
         print(
             f"{PROGRAM}: warning: running with {runner.runner_id}, which provides "
             f"no isolation. Commands execute as you, with your network and "
@@ -182,10 +205,10 @@ def run_task(args: argparse.Namespace) -> int:
 
     with SqliteRunRepository(args.db) as repository:
         workspaces = WorkspaceFactory(args.runs)
-        # Removing a container by name needs no image, so the default config
-        # serves whichever runner this invocation uses.
+        # Recovery removes containers left by earlier Docker runs, whichever
+        # runner this invocation uses.
         recovered = recover_unfinished(
-            repository, workspaces, clock, DockerRunner().remove_container
+            repository, workspaces, clock, docker.remove_container
         )
         for entry in recovered:
             print(
@@ -215,6 +238,18 @@ def run_task(args: argparse.Namespace) -> int:
             return EXIT_ABORTED
 
     _print_record(record)
+    failure = record.run.failure
+    if (
+        args.runner == RUNNER_DOCKER
+        and failure is not None
+        and failure.kind is FailureCategory.INFRASTRUCTURE_FAILED
+    ):
+        print(
+            f"{PROGRAM}: validation could not run in Docker. Check that Docker is "
+            f"running and the image exists (make runner-image), or pass "
+            f"--runner local for an unisolated development run.",
+            file=sys.stderr,
+        )
     return _exit_code_for(record)
 
 

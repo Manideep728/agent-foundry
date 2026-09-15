@@ -1,4 +1,8 @@
-"""The run, show and list commands."""
+"""The run, show and list commands.
+
+Most tests pass `--runner local`, so they need no Docker. The tests that use the
+default Docker runner either expect it to fail cleanly or skip without the image.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from control_plane.interface.cli import main
+from control_plane.interface.cli import build_parser, main
+from tests.docker_support import IMAGE, requires_image
 
 REPO = Path(__file__).resolve().parent.parent
 TASK_FILE = REPO / "tasks" / "csv-quoted-fields.toml"
@@ -14,7 +19,9 @@ FIXTURES = REPO / "tasks" / "fixtures"
 SOLUTIONS = REPO / "tasks" / "solutions"
 
 
-def run_args(tmp_path: Path, solutions: Path | None = None) -> list[str]:
+def run_args(
+    tmp_path: Path, solutions: Path | None = None, runner: str = "local"
+) -> list[str]:
     return [
         "run",
         str(TASK_FILE),
@@ -26,7 +33,54 @@ def run_args(tmp_path: Path, solutions: Path | None = None) -> list[str]:
         str(FIXTURES),
         "--solutions",
         str(solutions or SOLUTIONS),
+        "--runner",
+        runner,
     ]
+
+
+def test_run_defaults_to_the_docker_runner_and_the_local_image() -> None:
+    args = build_parser().parse_args(["run", str(TASK_FILE)])
+
+    assert args.runner == "docker"
+    assert args.image == "afrunner:local"
+
+
+def test_an_unknown_runner_is_a_usage_error() -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        build_parser().parse_args(["run", str(TASK_FILE), "--runner", "ssh"])
+
+    assert exit_info.value.code == 2
+
+
+def test_a_missing_image_fails_the_run_and_says_what_to_do(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Runs with or without Docker installed: either `docker` is absent or the
+    # image is, and both are an infrastructure failure rather than a score.
+    args = [*run_args(tmp_path, runner="docker"), "--image", "afrunner:absent"]
+
+    assert main(args) == 1
+
+    captured = capsys.readouterr()
+    assert "infrastructure_failed" in captured.out
+    assert "make runner-image" in captured.err
+    assert "no isolation" not in captured.err
+
+
+@pytest.mark.docker
+@requires_image
+def test_the_docker_runner_measures_the_task_without_a_warning(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    args = [*run_args(tmp_path, runner="docker"), "--image", IMAGE]
+
+    assert main(args) == 0
+
+    captured = capsys.readouterr()
+    assert "clean_patch" in captured.out
+    assert "pid1=True" in captured.out
+    assert f"afrunner in docker image {IMAGE}" in captured.out
+    assert "no isolation" not in captured.err
 
 
 def test_a_solved_task_exits_zero(

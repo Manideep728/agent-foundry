@@ -69,6 +69,7 @@ def test_the_container_has_no_network_and_no_capabilities(tmp_path: Path) -> Non
     argv = build_argv(_request(tmp_path), DockerConfig())
 
     assert _value_after(argv, "--network") == "none"
+    assert _value_after(argv, "--pull") == "never"
     assert "--cap-drop=ALL" in argv
     assert _value_after(argv, "--security-opt") == "no-new-privileges"
 
