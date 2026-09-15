@@ -80,6 +80,21 @@ $ docker run --rm afrunner:local --version
 afrunner 0.1.0
 ```
 
+`make doctor` runs real validation containers and checks that this machine's
+Docker enforces the limits the harness asks for. It exits 1 if any check fails.
+On WSL2 with Docker Engine 29.1.3:
+
+```
+$ make doctor
+PASS  runtime     server 29.1.3, cgroups v2, x86_64
+PASS  image       afrunner:local: afrunner 0.1.0
+PASS  pid1        pid1=True, shell /usr/bin/dash
+PASS  network     1.1.1.1:53 blocked
+PASS  memory      512 MiB under a 67108864-byte limit: kill detected
+PASS  pids        --pids-limit 1: fork: Resource temporarily unavailable
+INFO  bind        200 small files written to /work in 2 ms
+```
+
 ## Run a task
 
 Build the image first (`make runner-image`).

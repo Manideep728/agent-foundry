@@ -36,6 +36,7 @@ from control_plane.domain.outcomes import FailureCategory
 from control_plane.domain.record import RunRecord
 from control_plane.domain.states import RunState
 from control_plane.domain.task import TaskDefinition
+from control_plane.interface.doctor import run_doctor
 from control_plane.services.evaluate import EvaluationService
 from control_plane.services.ports import ValidationRunner
 from control_plane.services.recovery import recover_unfinished
@@ -107,6 +108,12 @@ def build_parser() -> argparse.ArgumentParser:
     listing = subcommands.add_parser("list", help="list stored runs")
     listing.add_argument("--db", type=Path, default=DEFAULT_DB)
     listing.add_argument("--limit", type=int, default=20)
+
+    doctor = subcommands.add_parser(
+        "doctor",
+        help="check that the container runtime enforces the validation limits",
+    )
+    doctor.add_argument("--image", default=DEFAULT_IMAGE)
 
     return parser
 
@@ -328,6 +335,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return show_run(args)
     if args.command == "list":
         return list_runs(args)
+    if args.command == "doctor":
+        report, code = run_doctor(args.image)
+        print(report)
+        return code
 
     print(f"{PROGRAM}: unknown command {args.command!r}", file=sys.stderr)
     return EXIT_USAGE

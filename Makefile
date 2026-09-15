@@ -15,7 +15,7 @@ RUNNER_IMAGE      ?= afrunner:local
 RUNNER_JOBS       ?= $(shell nproc 2>/dev/null || echo 2)
 
 .PHONY: help sync test lint fmt typecheck check run clean \
-        runner-configure runner-build runner-test runner-image
+        runner-configure runner-build runner-test runner-image doctor
 
 ## help: list the documented targets
 help:
@@ -60,6 +60,10 @@ runner-image:
 	docker build --target runtime \
 		--build-arg BUILD_TYPE=$(RUNNER_BUILD_TYPE) --build-arg JOBS=$(RUNNER_JOBS) \
 		-t $(RUNNER_IMAGE) $(RUNNER_SRC)
+
+## doctor: check that the container runtime enforces the validation limits
+doctor:
+	uv run af doctor --image $(RUNNER_IMAGE)
 
 ## check: everything CI runs
 check: lint typecheck test
