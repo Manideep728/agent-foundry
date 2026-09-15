@@ -101,6 +101,9 @@ run 20260915-070407-f7225053  csv-quoted-fields  [synthetic]
 and prints a warning on every run. If Docker or the image is missing, the run
 is recorded as `infrastructure_failed` and `af` exits 1.
 
+One `af run` at a time uses a database. A second one started beside it exits 1
+at once, because each run starts by recovering the runs it finds unfinished.
+
 `af list` and `af show <run-id>` reprint stored runs. `af fixture-hash <dir>`
 prints the digest a task file should pin.
 

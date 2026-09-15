@@ -24,6 +24,7 @@ from control_plane.adapters.docker_runner import DockerConfig, DockerRunner
 from control_plane.adapters.fake_agent import FakeAgent
 from control_plane.adapters.fixtures import digest_tree
 from control_plane.adapters.local_runner import LocalRunner
+from control_plane.adapters.run_lock import DatabaseBusy, exclusive_run_lock
 from control_plane.adapters.sqlite_repo import SqliteRunRepository
 from control_plane.adapters.system import SystemClock, UuidIdGenerator
 from control_plane.adapters.task_toml import load_task
@@ -34,6 +35,7 @@ from control_plane.domain.ids import RunId
 from control_plane.domain.outcomes import FailureCategory
 from control_plane.domain.record import RunRecord
 from control_plane.domain.states import RunState
+from control_plane.domain.task import TaskDefinition
 from control_plane.services.evaluate import EvaluationService
 from control_plane.services.ports import ValidationRunner
 from control_plane.services.recovery import recover_unfinished
@@ -180,29 +182,13 @@ def _print_record(record: RunRecord) -> None:
         print(f"  workspace   {record.workspace_path}")
 
 
-def run_task(args: argparse.Namespace) -> int:
-    try:
-        task = load_task(args.task_file)
-    except DomainError as error:
-        print(f"{PROGRAM}: {error}", file=sys.stderr)
-        return EXIT_USAGE
-
-    clock = SystemClock()
-    docker = DockerRunner(DockerConfig(image=args.image))
-    runner: ValidationRunner = (
-        docker if args.runner == RUNNER_DOCKER else LocalRunner(clock)
-    )
-
-    if not runner.isolated:
-        # Printed every time, on stderr, so an unisolated run is never mistaken
-        # for a measured one.
-        print(
-            f"{PROGRAM}: warning: running with {runner.runner_id}, which provides "
-            f"no isolation. Commands execute as you, with your network and "
-            f"filesystem. Development use only.",
-            file=sys.stderr,
-        )
-
+def _recover_and_evaluate(
+    args: argparse.Namespace,
+    task: TaskDefinition,
+    runner: ValidationRunner,
+    docker: DockerRunner,
+    clock: SystemClock,
+) -> RunRecord:
     with SqliteRunRepository(args.db) as repository:
         workspaces = WorkspaceFactory(args.runs)
         # Recovery removes containers left by earlier Docker runs, whichever
@@ -231,11 +217,44 @@ def run_task(args: argparse.Namespace) -> int:
             ids=UuidIdGenerator(),
             fixtures_root=args.fixtures,
         )
-        try:
-            record = service.execute(task)
-        except KeyboardInterrupt:
-            print(f"{PROGRAM}: aborted", file=sys.stderr)
-            return EXIT_ABORTED
+        return service.execute(task)
+
+
+def run_task(args: argparse.Namespace) -> int:
+    try:
+        task = load_task(args.task_file)
+    except DomainError as error:
+        print(f"{PROGRAM}: {error}", file=sys.stderr)
+        return EXIT_USAGE
+
+    clock = SystemClock()
+    docker = DockerRunner(DockerConfig(image=args.image))
+    runner: ValidationRunner = (
+        docker if args.runner == RUNNER_DOCKER else LocalRunner(clock)
+    )
+
+    if not runner.isolated:
+        # Printed every time, on stderr, so an unisolated run is never mistaken
+        # for a measured one.
+        print(
+            f"{PROGRAM}: warning: running with {runner.runner_id}, which provides "
+            f"no isolation. Commands execute as you, with your network and "
+            f"filesystem. Development use only.",
+            file=sys.stderr,
+        )
+
+    # Held from before recovery until the run is stored. Recovery assumes every
+    # unfinished run is abandoned, which is only true while no other af run
+    # uses this database.
+    try:
+        with exclusive_run_lock(args.db):
+            record = _recover_and_evaluate(args, task, runner, docker, clock)
+    except DatabaseBusy as error:
+        print(f"{PROGRAM}: {error}", file=sys.stderr)
+        return EXIT_HARNESS_FAILED
+    except KeyboardInterrupt:
+        print(f"{PROGRAM}: aborted", file=sys.stderr)
+        return EXIT_ABORTED
 
     _print_record(record)
     failure = record.run.failure
