@@ -270,10 +270,14 @@ def run_task(args: argparse.Namespace) -> int:
         and failure is not None
         and failure.kind is FailureCategory.INFRASTRUCTURE_FAILED
     ):
+        # The cause is in the failure detail, and it is not always setup: a
+        # memory-limit kill is also an infrastructure failure. So the hint
+        # says what to do if the detail points at Docker, without claiming it.
         print(
-            f"{PROGRAM}: validation could not run in Docker. Check that Docker is "
-            f"running and the image exists (make runner-image), or pass "
-            f"--runner local for an unisolated development run.",
+            f"{PROGRAM}: validation produced no measurement; the failure detail "
+            f"says why. If Docker is not running or the image is missing, start "
+            f"Docker and run make runner-image, or pass --runner local for an "
+            f"unisolated development run.",
             file=sys.stderr,
         )
     return _exit_code_for(record)

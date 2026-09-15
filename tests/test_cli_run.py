@@ -83,6 +83,31 @@ def test_the_docker_runner_measures_the_task_without_a_warning(
     assert "no isolation" not in captured.err
 
 
+@pytest.mark.docker
+@requires_image
+def test_a_memory_limit_kill_is_not_blamed_on_a_missing_docker(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The regression: every infrastructure failure printed "validation could
+    # not run in Docker", including a command the memory limit killed.
+    hungry = tmp_path / "hungry.toml"
+    hungry.write_text(
+        TASK_FILE.read_text(encoding="utf-8")
+        + '\n[[commands]]\nrole = "pass_to_pass"\n'
+        + 'command = "python3 -c \\"b = bytes(1) * (2 * 1024 * 1024 * 1024)\\""\n',
+        encoding="utf-8",
+    )
+    args = run_args(tmp_path, runner="docker")
+    args[1] = str(hungry)
+
+    assert main([*args, "--image", IMAGE]) == 1
+
+    captured = capsys.readouterr()
+    assert "killed by the memory limit" in captured.out
+    assert "could not run in Docker" not in captured.err
+    assert "the failure detail says why" in captured.err
+
+
 def test_a_solved_task_exits_zero(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
