@@ -19,7 +19,7 @@ pinned content hash, copies it to an isolated workspace, invokes an agent,
 captures the patch, executes the repository's own tests inside a container,
 scores the result and stores it.
 
-The C++ execution supervisor, `afrunner`, now exists. It reads a command file,
+`afrunner` is the C++ execution supervisor. It reads a command file,
 runs each line under `/bin/sh -c` in its own process group, captures both
 streams to capped log files, enforces a per-command and a total deadline,
 escalates from `SIGTERM` to `SIGKILL` after a grace period, reaps orphaned
@@ -58,9 +58,14 @@ Requires [uv](https://docs.astral.sh/uv/). The Python toolchain is pinned to
 
 ```
 make sync     # create the virtualenv from pyproject.toml
-make check    # lint, typecheck, tests -- everything CI runs
+make check    # lint, typecheck, tests
 make test     # tests only
 ```
+
+Without Docker and the image, the tests that start containers are skipped and
+say so. CI runs two jobs: `make check`, and a runner job that builds the
+supervisor and the image, runs every test with neither skipped, repeats the
+container tests under `docker run --init`, and runs `make doctor`.
 
 `make help` lists the documented targets. Nothing in the project requires
 make; every target is a plain `uv`, `cmake` or `docker` command.
@@ -137,9 +142,10 @@ did its job; the agent did not.
 
 ## Planned scope
 
-The first release will include a C++ execution supervisor, a Python control
-plane and CLI, Docker-isolated execution, a model-provider adapter, benchmark
-tasks, test-based scoring, SQLite storage, and report generation.
+The C++ supervisor, the Python control plane and CLI, Docker-isolated
+validation, test-based scoring and SQLite storage exist. The first release also
+needs a model-provider adapter in place of the scripted agent, more benchmark
+tasks, and report generation.
 
 Distributed execution, automatic pull requests, and a web interface are outside
 the first release.

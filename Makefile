@@ -1,5 +1,5 @@
-# Convenience targets. Everything here is a plain uv command -- nothing in the
-# project requires make. Targets are added as the behaviour behind them lands,
+# Convenience targets. Everything here is a plain uv, cmake or docker command --
+# nothing in the project requires make. Targets are added as the behaviour behind them lands,
 # so anything listed here works today.
 
 PYTEST_ARGS ?=

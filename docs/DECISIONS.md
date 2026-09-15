@@ -149,6 +149,13 @@ test written around `sh -c 'sleep 300'` can therefore pass without exercising
 the behaviour it claims to test. Such tests must force a process layer with a
 compound command.
 
+**Amendment, 2026-09-15.** The optimisation depends on the build of `dash`, not
+on `dash` itself. Ubuntu 26.04's `dash` replaces its image for a simple command.
+Debian bookworm's `dash`, which is `/bin/sh` in the validation image, forks the
+command instead. The native tests and the container therefore see different
+process trees for the same command line, and in the container every command has
+a shell layer. D16 records the consequence for commands the memory limit kills.
+
 **On command injection.** Commands originate from task definitions written by
 the operator, not from a model. The untrusted artifact is the patch the agent
 produces, and the boundary that contains it is the container — no network,
@@ -230,6 +237,12 @@ reproducible.
 **What would change it.** Concurrent writers, or a deployment where a single
 file is not appropriate.
 
+**Amendment, 2026-09-15.** A run records its supervisor version, which names
+the image tag, together with its architecture and `pid1`. It does not record the
+image digest, so two images built under the same tag cannot be told apart in the
+data. Recording the digest is open work. Concurrent writers on one database are
+refused, as D17 describes.
+
 ---
 
 ## D12 — Durations and timestamps come from different clocks
@@ -249,8 +262,11 @@ are needed for different purposes.
 
 Host timestamps order runs; in-container monotonic deltas measure latency.
 
+---
 
 ## D13 — The contract's unstated behaviour, settled before the supervisor was written
+
+*2026-09-13*
 
 **Context.** `docs/RUNNER_CONTRACT.md` fixes the field names, the outcome
 vocabulary and the exit codes, and a conformance test holds both languages to
@@ -288,6 +304,32 @@ The command interrupted by an abort cannot be a timeout, so it is reported from
 its wait status. `aborted` on the report is what tells the control plane to
 refuse the whole run, not the outcome of that one command.
 
+---
+
+## D15 — The validation image carries the task's toolchain
+
+*2026-09-14*
+
+**Context.** The supervisor runs the task's own validation commands inside its
+own container, so the container must hold every program those commands call.
+The synthetic tasks validate with `python3 -m unittest`.
+
+**Decision.** The image has two stages. A `debian:bookworm` stage compiles
+`afrunner`. The runtime stage is `python:3.12-slim-bookworm` with the binary
+copied in, and `afrunner` is its entrypoint in exec form. The runtime stays on
+bookworm, like the builder, so the dynamically linked binary finds the
+`libstdc++` it was built against.
+
+**Consequence.** There is one image for each toolchain, not one image for
+every task. A suite of real repositories needs its own images, each with the
+same binary copied in from the build stage. The image binary comes from g++ 12,
+while the native tests use the host compiler, so the container tests, not the
+native suite, are what cover the binary that actually runs.
+
+**What would change it.** Tasks whose toolchains cannot share a base image, or
+a static build of `afrunner` that removes the need to match the distribution.
+
+---
 
 ## D16 — A memory-limit kill is detected from outside the container
 
@@ -313,3 +355,30 @@ Docker call per run, and a container that cannot be removed fails the run.
 **What would change it.** A Docker or cgroup version where the flag reports only
 a kill of PID 1. The test that runs an allocating command through the Docker
 runner fails in that case.
+
+---
+
+## D17 — One `af run` at a time uses a database
+
+*2026-09-15*
+
+**Context.** Each `af run` starts by recovering the runs it finds unfinished:
+it marks them interrupted and removes their containers. That is correct only
+when no other process is still executing one of them. A second `af run` started
+beside a live one was observed to mark the live run interrupted and remove its
+container during validation.
+
+**Decision.** `af run` takes an exclusive, non-blocking `flock` on a file beside
+the database before recovery, and holds it until the run is stored. A second
+`af run` on the same database exits 1 at once. Recovery also claims a run's
+state before it cleans up, so a run that finishes in the gap keeps its result
+and its container.
+
+**Consequence.** The kernel releases the lock when its holder exits for any
+reason, including `SIGKILL`, so a crashed run leaves no stale lock, and holding
+the lock proves that no other `af run` is alive. Runs against one database are
+serial. Parallel benchmarks need separate databases, or a scheduler that owns
+the lock.
+
+**What would change it.** A database on a network filesystem, where `flock`
+semantics differ, or a need to run tasks in parallel from one process.
