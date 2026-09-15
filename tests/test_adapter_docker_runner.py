@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
@@ -102,7 +103,9 @@ def test_docker_options_precede_the_image_and_runner_flags_follow(
     argv = build_argv(_request(tmp_path), config)
     image_at = argv.index("afrunner:test")
 
-    assert argv[:3] == ["docker", "run", "--rm"]
+    assert argv[:2] == ["docker", "run"]
+    # Kept after exit so `docker inspect` can read State.OOMKilled.
+    assert "--rm" not in argv
     assert _value_after(argv, "--name") == "af-run-0001"
     assert "--user" in argv[:image_at]
     runner_flags = argv[image_at + 1 :]
@@ -161,26 +164,48 @@ class FakeDocker:
         result: bytes | None = None,
         raises: Exception | None = None,
         stderr: bytes = b"",
+        oom_killed: bool = False,
+        inspect_fails: bool = False,
+        rm_fails: bool = False,
+        plant: Callable[[Path], None] | None = None,
     ) -> None:
         self.returncode = returncode
         self.result = result
+        # Called with the result path during `docker run`, standing in for a
+        # patch that writes something hostile to /out.
+        self.plant = plant
         self.raises = raises
         self.stderr = stderr
+        self.oom_killed = oom_killed
+        self.inspect_fails = inspect_fails
+        self.rm_fails = rm_fails
         self.calls: list[list[str]] = []
         # The host side of the /out mount, set once the request exists.
         self.out_dir: Path | None = None
+
+    def verbs(self) -> list[str]:
+        return [call[1] for call in self.calls]
 
     def __call__(
         self, argv: list[str], timeout_s: float
     ) -> subprocess.CompletedProcess[bytes]:
         self.calls.append(argv)
         if argv[:2] == ["docker", "rm"]:
+            if self.rm_fails:
+                return subprocess.CompletedProcess(argv, 1, b"", b"daemon went away")
             return subprocess.CompletedProcess(argv, 0, b"", b"")
+        if argv[:2] == ["docker", "inspect"]:
+            if self.inspect_fails:
+                return subprocess.CompletedProcess(argv, 1, b"", b"No such object")
+            answer = b"true\n" if self.oom_killed else b"false\n"
+            return subprocess.CompletedProcess(argv, 0, answer, b"")
         if self.raises is not None:
             raise self.raises
+        assert self.out_dir is not None
         if self.result is not None:
-            assert self.out_dir is not None
             (self.out_dir / "result.json").write_bytes(self.result)
+        if self.plant is not None:
+            self.plant(self.out_dir / "result.json")
         return subprocess.CompletedProcess(argv, self.returncode, b"", self.stderr)
 
 
@@ -280,32 +305,16 @@ def test_a_malformed_result_is_runner_failed(tmp_path: Path) -> None:
 def test_a_result_symlinked_to_a_host_file_is_not_followed(tmp_path: Path) -> None:
     secret = tmp_path / "host-secret.json"
     secret.write_bytes(encode(sample_report()))
-    docker = FakeDocker(0)
+    docker = FakeDocker(0, plant=lambda result: result.symlink_to(secret))
     runner, request = _runner(tmp_path, docker)
-
-    def plant_symlink(
-        argv: list[str], timeout_s: float
-    ) -> subprocess.CompletedProcess[bytes]:
-        (request.output_dir / "result.json").symlink_to(secret)
-        return docker(argv, timeout_s)
-
-    runner = DockerRunner(DockerConfig(user="1000:1000"), run_process=plant_symlink)
 
     with pytest.raises(RunnerFailed, match="cannot be opened"):
         runner.run(request)
 
 
 def test_a_fifo_in_place_of_the_result_does_not_block(tmp_path: Path) -> None:
-    docker = FakeDocker(0)
+    docker = FakeDocker(0, plant=os.mkfifo)
     runner, request = _runner(tmp_path, docker)
-
-    def plant_fifo(
-        argv: list[str], timeout_s: float
-    ) -> subprocess.CompletedProcess[bytes]:
-        os.mkfifo(request.output_dir / "result.json")
-        return docker(argv, timeout_s)
-
-    runner = DockerRunner(DockerConfig(user="1000:1000"), run_process=plant_fifo)
 
     with pytest.raises(RunnerFailed, match="not a regular file"):
         runner.run(request)
@@ -324,10 +333,84 @@ def test_a_host_timeout_removes_the_container(tmp_path: Path) -> None:
     docker = FakeDocker(raises=subprocess.TimeoutExpired(["docker"], 1.0))
     runner, request = _runner(tmp_path, docker)
 
-    with pytest.raises(RunnerUnavailable, match="was removed"):
+    with pytest.raises(RunnerUnavailable, match="host budget"):
         runner.run(request)
 
     assert docker.calls[-1] == ["docker", "rm", "--force", container_name(RUN_ID)]
+
+
+# --- memory limit and container lifetime -----------------------------------
+
+
+def test_a_clean_run_is_inspected_then_removed(tmp_path: Path) -> None:
+    docker = FakeDocker(result=encode(sample_report()))
+    runner, request = _runner(tmp_path, docker)
+
+    runner.run(request)
+
+    assert docker.verbs() == ["run", "inspect", "rm"]
+    assert docker.calls[1][-1] == container_name(RUN_ID)
+
+
+@pytest.mark.parametrize(
+    ("code", "result"),
+    [
+        pytest.param(0, encode(sample_report()), id="exit-0"),
+        pytest.param(7, _signal_report(), id="exit-7"),
+    ],
+)
+def test_an_oom_kill_overrides_a_valid_report(
+    tmp_path: Path, code: int, result: bytes
+) -> None:
+    # The report may say `exited 137` for a test: without the verdict it would
+    # score as a failed test rather than a resource limit.
+    docker = FakeDocker(code, result=result, oom_killed=True)
+    runner, request = _runner(tmp_path, docker)
+
+    with pytest.raises(RunnerUnavailable, match="memory limit of 1073741824 bytes"):
+        runner.run(request)
+
+    assert docker.verbs()[-1] == "rm"
+
+
+def test_a_failed_inspect_is_unavailable_not_a_pass(tmp_path: Path) -> None:
+    docker = FakeDocker(result=encode(sample_report()), inspect_fails=True)
+    runner, request = _runner(tmp_path, docker)
+
+    with pytest.raises(RunnerUnavailable, match="could not inspect"):
+        runner.run(request)
+
+    assert docker.verbs()[-1] == "rm"
+
+
+def test_a_docker_failure_is_reported_without_an_inspect(tmp_path: Path) -> None:
+    # Exit 125 can mean the container was never created, so an inspect would
+    # fail and replace Docker's own message with a less useful one.
+    docker = FakeDocker(125, stderr=b"Unable to find image", inspect_fails=True)
+    runner, request = _runner(tmp_path, docker)
+
+    with pytest.raises(RunnerUnavailable, match="Unable to find image"):
+        runner.run(request)
+
+    assert "inspect" not in docker.verbs()
+
+
+def test_a_container_that_cannot_be_removed_fails_a_clean_run(tmp_path: Path) -> None:
+    docker = FakeDocker(result=encode(sample_report()), rm_fails=True)
+    runner, request = _runner(tmp_path, docker)
+
+    with pytest.raises(RunnerUnavailable, match="could not remove"):
+        runner.run(request)
+
+
+def test_a_failed_removal_does_not_hide_the_original_error(tmp_path: Path) -> None:
+    docker = FakeDocker(3, stderr=b"afrunner: unreadable command file", rm_fails=True)
+    runner, request = _runner(tmp_path, docker)
+
+    with pytest.raises(RunnerFailed, match="unreadable command file"):
+        runner.run(request)
+
+    assert docker.verbs()[-1] == "rm"
 
 
 # --- real containers -------------------------------------------------------
@@ -360,6 +443,36 @@ def test_validation_cannot_reach_the_network_or_rewrite_its_commands(
     assert report.pid1 is True
 
 
+def _leftover_containers(run_id: str) -> str:
+    return subprocess.run(
+        ["docker", "ps", "-aq", "--filter", f"label=agentfoundry.run_id={run_id}"],
+        capture_output=True,
+        check=True,
+        text=True,
+    ).stdout.strip()
+
+
+@pytest.mark.docker
+@requires_image
+def test_a_command_killed_by_the_memory_limit_is_not_a_test_result(
+    tmp_path: Path,
+) -> None:
+    # The plain form, with the shell layer: the runner alone would report it as
+    # `exited 137`, indistinguishable from a failing test.
+    request = replace(
+        _request(tmp_path),
+        run_id=RunId("oom-0001"),
+        commands=("python3 -c \"b = b'x' * (512 * 1024 * 1024)\"",),
+        total_timeout_ms=60_000,
+    )
+    config = DockerConfig(image=IMAGE, memory_bytes=64 * 1024 * 1024)
+
+    with pytest.raises(RunnerUnavailable, match="memory limit of 67108864 bytes"):
+        DockerRunner(config).run(request)
+
+    assert _leftover_containers("oom-0001") == ""
+
+
 @pytest.mark.docker
 @requires_image
 def test_one_task_runs_end_to_end_in_docker(tmp_path: Path) -> None:
@@ -383,10 +496,4 @@ def test_one_task_runs_end_to_end_in_docker(tmp_path: Path) -> None:
     assert record.pid1 is True
     assert record.runner_version == f"afrunner in docker image {IMAGE}"
 
-    no_leftover = subprocess.run(
-        ["docker", "ps", "-aq", "--filter", "label=agentfoundry.run_id=e2e-0001"],
-        capture_output=True,
-        check=True,
-        text=True,
-    )
-    assert no_leftover.stdout.strip() == ""
+    assert _leftover_containers("e2e-0001") == ""

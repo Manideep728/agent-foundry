@@ -287,3 +287,29 @@ control plane cannot parse, which surfaces weeks later as a missing measurement.
 The command interrupted by an abort cannot be a timeout, so it is reported from
 its wait status. `aborted` on the report is what tells the control plane to
 refuse the whole run, not the outcome of that one command.
+
+
+## D16 — A memory-limit kill is detected from outside the container
+
+*2026-09-15*
+
+**Context.** The validation image's `/bin/sh` forks even a simple `sh -c`
+command. When the memory limit kills a command, the shell survives and exits
+137, so the runner reports an ordinary `exited 137`. That result is valid, and
+it is scored as a failed test. The runner cannot tell it apart from a command
+that exits 137 by itself.
+
+**Decision.** The container is started without `--rm`. After it stops, the
+control plane reads `State.OOMKilled` from `docker inspect`. When the flag is
+true, the run is an infrastructure failure, whatever the exit code and the
+result file say. The container is then removed on every path.
+
+**Consequence.** The flag was checked by experiment on cgroups v2 before the
+design was adopted. It was true for a killed child with and without a shell
+layer, and under `docker run --init`, while the runner itself exited 0. It was
+false for a command that exited 137 by itself. The control plane makes one more
+Docker call per run, and a container that cannot be removed fails the run.
+
+**What would change it.** A Docker or cgroup version where the flag reports only
+a kill of PID 1. The test that runs an allocating command through the Docker
+runner fails in that case.

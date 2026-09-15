@@ -166,6 +166,13 @@ so it exits 0 and says `total_timeout` in the file.
 cause is the container hitting its memory limit. Mapping it to a test failure would record the
 host's memory ceiling as agent failures across an entire benchmark.
 
+The same kill can also reach the runner inside a command. `/bin/sh` in the image forks even a
+simple command, so when the memory limit kills the command's process, the shell exits `137` and the
+runner reports `exited` with exit code `137`. The runner cannot tell that from a command that exits
+137 by itself. The control plane can: after the container stops, it reads `State.OOMKilled` from
+`docker inspect`, which is true when the memory limit killed any process in the container. A run
+with that flag set is a harness failure whatever the result file says.
+
 ## Rules that decide what a result means
 
 **The wait status is the authority for reporting; the deadline is the authority for scoring.**

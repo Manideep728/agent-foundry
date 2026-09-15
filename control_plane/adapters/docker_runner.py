@@ -19,10 +19,15 @@ Three directories are mounted:
 Because the patch can write to `/out`, `result.json` is untrusted when it comes
 back: it is opened without following symlinks, its size is capped, and it is
 decoded strictly.
+
+After the container stops, `docker inspect` reports whether the memory limit
+killed anything inside it. That verdict overrides the runner's own result,
+because the runner sees an OOM-killed command only as an exit status.
 """
 
 from __future__ import annotations
 
+import contextlib
 import os
 import stat
 import subprocess
@@ -55,7 +60,7 @@ _HOST_MARGIN_MS = 30_000
 # was not written by the runner.
 _MAX_RESULT_BYTES = 16 * 1024 * 1024
 
-_REMOVE_TIMEOUT_S = 30.0
+_DOCKER_CALL_TIMEOUT_S = 30.0
 
 
 def _current_user() -> str:
@@ -115,10 +120,11 @@ def build_argv(request: ValidationRequest, config: DockerConfig) -> list[str]:
             f"{request.output_dir}, so the container cannot see it"
         ) from error
 
+    # No --rm: the stopped container must still exist for `docker inspect` to
+    # read State.OOMKilled. DockerRunner.run removes it on every path.
     argv = [
         "docker",
         "run",
-        "--rm",
         "--name",
         container_name(request.run_id),
         "--label",
@@ -215,6 +221,22 @@ class DockerRunner:
         result_path.unlink(missing_ok=True)
 
         argv = build_argv(request, self._config)
+        try:
+            report = self._execute(request, argv, result_path)
+        except BaseException:
+            # Every failure path, including a timeout and ^C, still removes the
+            # container, and a failed removal must not hide the original error.
+            with contextlib.suppress(RunnerUnavailable):
+                self.remove_container(request.run_id)
+            raise
+        # On success a container that cannot be removed is a host problem worth
+        # stopping for, so this one is allowed to raise.
+        self.remove_container(request.run_id)
+        return report
+
+    def _execute(
+        self, request: ValidationRequest, argv: list[str], result_path: Path
+    ) -> ValidationReport:
         budget_ms = (
             request.total_timeout_ms
             + self._config.grace_ms
@@ -226,20 +248,56 @@ class DockerRunner:
         except FileNotFoundError as error:
             raise RunnerUnavailable("docker is not installed or not on PATH") from error
         except subprocess.TimeoutExpired as error:
-            # Killing the docker CLI does not stop the container.
-            self.remove_container(request.run_id)
+            # Killing the docker CLI does not stop the container; run() removes it.
             raise RunnerUnavailable(
-                f"the container ran past {budget_ms} ms and was removed"
+                f"the container ran past the host budget of {budget_ms} ms"
             ) from error
 
+        # Only exits 0 and 7 yield a report, so only they need the verdict; every
+        # other code is already a failure, and for 125 the container may not
+        # exist to inspect. A command the OOM killer stopped reaches the runner
+        # through /bin/sh as an ordinary `exited 137`, which the runner cannot
+        # tell from a command that chose to exit 137, and which would otherwise
+        # be scored as a failed test.
+        if completed.returncode in (_EXIT_OK, _EXIT_ABORTED) and self._oom_killed(
+            request.run_id
+        ):
+            raise RunnerUnavailable(
+                "a process in the container was killed by the memory limit of "
+                f"{self._config.memory_bytes} bytes; this is a resource limit, "
+                "not a test result"
+            )
         return _interpret(completed, result_path)
+
+    def _oom_killed(self, run_id: RunId) -> bool:
+        """Whether the kernel's OOM killer acted inside the run's container.
+
+        Docker sets State.OOMKilled for a kill of any process in the container's
+        cgroup, not only PID 1: observed true for a killed child while afrunner
+        exited 0, and false for a command that exited 137 by itself.
+        """
+        name = container_name(run_id)
+        try:
+            completed = self._run_process(
+                ["docker", "inspect", "--format", "{{.State.OOMKilled}}", name],
+                _DOCKER_CALL_TIMEOUT_S,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as error:
+            raise RunnerUnavailable(f"could not inspect container {name}") from error
+
+        answer = completed.stdout.strip()
+        if completed.returncode != 0 or answer not in (b"true", b"false"):
+            raise RunnerUnavailable(
+                f"could not inspect container {name}: {_stderr_tail(completed)}"
+            )
+        return answer == b"true"
 
     def remove_container(self, run_id: RunId) -> None:
         """Force-remove the run's container. A container already gone is fine."""
         name = container_name(run_id)
         try:
             completed = self._run_process(
-                ["docker", "rm", "--force", name], _REMOVE_TIMEOUT_S
+                ["docker", "rm", "--force", name], _DOCKER_CALL_TIMEOUT_S
             )
         except (FileNotFoundError, subprocess.TimeoutExpired) as error:
             raise RunnerUnavailable(f"could not remove container {name}") from error
