@@ -67,4 +67,14 @@ struct Reaped {
 // its status would be the same bug by a slower route.
 Reaped reap(pid_t child);
 
+// Collects the orphans still exiting when the run ends, for at most budget_ms.
+//
+// A command's loop reaps only while that command runs. An orphan that exits in
+// the instant after the last command's loop finished has no later loop to reap
+// it, so without this it would go uncounted, and the contract counts orphans
+// collected at shutdown. Returns as soon as no child is left, when a stop is
+// requested, or when the budget is spent. An orphan that outlives the budget
+// is not waited for: in the container it dies with PID 1.
+int reap_remaining_orphans(long long budget_ms, AbortWatch& watch);
+
 }  // namespace afrunner

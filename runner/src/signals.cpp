@@ -1,12 +1,16 @@
 #include "signals.hpp"
 
+#include <poll.h>
 #include <signal.h>
 #include <sys/prctl.h>
 #include <sys/signalfd.h>
 #include <sys/wait.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
+
+#include "clock.hpp"
 
 namespace afrunner {
 namespace {
@@ -95,6 +99,40 @@ Reaped reap(pid_t child) {
     }
 
     return reaped;
+}
+
+int reap_remaining_orphans(long long budget_ms, AbortWatch& watch) {
+    const long long deadline = monotonic_ms() + budget_ms;
+    int orphans = 0;
+
+    while (true) {
+        int status = 0;
+        const pid_t got = ::waitpid(-1, &status, WNOHANG);
+        if (got > 0) {
+            ++orphans;
+            continue;
+        }
+        if (got < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            // ECHILD: no child is left to wait for.
+            break;
+        }
+
+        watch.consume();
+        const long long remaining = deadline - monotonic_ms();
+        if (watch.requested() || remaining <= 0) {
+            break;
+        }
+        // SIGCHLD makes the signalfd readable, so an orphan's exit ends the
+        // wait at once. Without a descriptor this is a short sleep.
+        pollfd ready{.fd = watch.fd(), .events = POLLIN, .revents = 0};
+        const nfds_t count = watch.fd() >= 0 ? 1 : 0;
+        ::poll(&ready, count, static_cast<int>(std::min(remaining, 10LL)));
+    }
+
+    return orphans;
 }
 
 }  // namespace afrunner

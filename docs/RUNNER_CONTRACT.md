@@ -138,6 +138,9 @@ last frame. One byte is replaced by one byte, so the tail never exceeds `--tail-
 
 `orphans_reaped_total` is at least the sum of the per-command counts and can exceed it. Orphans are
 also collected between commands and during shutdown, when there is no command to attribute them to.
+After the last command, the runner waits up to `--drain-after-exit-ms` for orphans that are still
+exiting, and stops early when no child is left. It does not wait after a stop request. An orphan
+that outlives that wait is not counted; in the container it ends with PID 1.
 
 ## Exit codes
 
@@ -228,7 +231,8 @@ of it, so the total expiring inside a command is an ordinary deadline with the o
 
 Cleanup deliberately outlives the total budget. The worst case is
 `--total-timeout-ms` plus `--grace-ms` plus the bounded kill confirmation plus
-`--drain-after-exit-ms`, so nothing may assert that `wall_ms` fits inside the total.
+`--drain-after-exit-ms` for the last command plus `--drain-after-exit-ms` for the orphans collected
+at shutdown, so nothing may assert that `wall_ms` fits inside the total.
 
 ## Stopping the runner
 

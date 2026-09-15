@@ -368,6 +368,47 @@ TEST(RunAll, CountsOrphansAcrossEveryCommand) {
     EXPECT_GE(all.report.orphans_reaped_total, 2);
 }
 
+// The regression behind a CI failure: the last command's orphan exited just
+// after that command's loop ended, and nothing reaped it. Redirecting the
+// orphan's output makes the gap certain rather than a race, because the orphan
+// no longer holds the pipe that keeps the command's loop running.
+TEST(RunAll, CountsAnOrphanThatExitsAfterTheLastCommand) {
+    afrunner::become_subreaper();
+    const TempDir dir;
+    Options options = options_for(dir);
+    ASSERT_EQ(afrunner::ensure_directory(options.log_dir), "");
+
+    const afrunner::RunAll all =
+        afrunner::run_all(options, {"sleep 0.2 >/dev/null 2>&1 & exit 0"});
+
+    EXPECT_EQ(all.report.commands[0].orphans_reaped, 0);
+    EXPECT_EQ(all.report.orphans_reaped_total, 1);
+}
+
+TEST(RunAll, AnOrphanThatOutlivesTheBudgetDoesNotHoldTheRun) {
+    afrunner::become_subreaper();
+    const TempDir dir;
+    Options options = options_for(dir);
+    options.drain_after_exit_ms = 200;
+    ASSERT_EQ(afrunner::ensure_directory(options.log_dir), "");
+    const std::string pid_file = dir.file("orphan.pid");
+
+    const afrunner::RunAll all = afrunner::run_all(
+        options, {"sleep 30 >/dev/null 2>&1 & echo $! > " + pid_file + "; exit 0"});
+
+    EXPECT_LT(all.report.wall_ms, 5000);
+    EXPECT_EQ(all.report.orphans_reaped_total, 0);
+
+    // The orphan is this test process's child now; kill and reap it so it
+    // cannot be counted by a later test in the same process.
+    std::ifstream pid_stream(pid_file);
+    pid_t orphan = 0;
+    ASSERT_TRUE(pid_stream >> orphan);
+    ::kill(orphan, SIGKILL);
+    int status = 0;
+    ::waitpid(orphan, &status, 0);
+}
+
 TEST(Supervisor, ReportsACommandKilledByASignal) {
     const TempDir dir;
     Options options = options_for(dir);

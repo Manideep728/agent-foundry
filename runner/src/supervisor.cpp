@@ -350,6 +350,12 @@ RunAll run_all(const Options& options, const std::vector<std::string>& commands,
         }
     }
 
+    // The loop reaps only inside a command, so an orphan of the last command
+    // that exits just after its loop ended would go uncounted. A stop request
+    // skips the wait, because the caller's own grace period is already running.
+    report.orphans_reaped_total +=
+        reap_remaining_orphans(watch.requested() ? 0 : options.drain_after_exit_ms, watch);
+
     report.wall_ms = monotonic_ms() - started;
     return all;
 }
