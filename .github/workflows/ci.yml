@@ -35,3 +35,39 @@ jobs:
 
       - name: Test
         run: make test
+
+  # The supervisor and everything that needs it: the native C++ suite, the
+  # image, and the tests that start real containers. The control-plane job has
+  # no image, so its container tests skip; here none may skip.
+  runner:
+    name: runner
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Build and test the runner natively
+        run: make runner-test
+
+      - name: Build the runner image
+        run: make runner-image
+
+      # The full suite, so the conformance test reads the binary built above
+      # and the container tests use the image.
+      - name: Test with the runner and the image
+        run: uv run pytest -q -rs
+
+      # tini as PID 1 and afrunner as its child: the supervisor must still
+      # reap orphans, handle docker stop, and report pid1 honestly.
+      - name: Test the container suite under --init
+        run: AF_DOCKER_INIT=1 uv run pytest -q tests/test_runner_container.py
+
+      - name: Check the runtime enforces the limits
+        run: make doctor
