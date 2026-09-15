@@ -20,6 +20,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from control_plane import __version__
+from control_plane.adapters.docker_runner import DockerRunner
 from control_plane.adapters.fake_agent import FakeAgent
 from control_plane.adapters.fixtures import digest_tree
 from control_plane.adapters.local_runner import LocalRunner
@@ -181,12 +182,22 @@ def run_task(args: argparse.Namespace) -> int:
 
     with SqliteRunRepository(args.db) as repository:
         workspaces = WorkspaceFactory(args.runs)
-        recovered = recover_unfinished(repository, workspaces, clock)
+        # Removing a container by name needs no image, so the default config
+        # serves whichever runner this invocation uses.
+        recovered = recover_unfinished(
+            repository, workspaces, clock, DockerRunner().remove_container
+        )
         for entry in recovered:
             print(
                 f"{PROGRAM}: marked {entry.run_id} interrupted ({entry.action.value})",
                 file=sys.stderr,
             )
+            if entry.cleanup_error is not None:
+                print(
+                    f"{PROGRAM}: cleanup for {entry.run_id} failed: "
+                    f"{entry.cleanup_error}",
+                    file=sys.stderr,
+                )
 
         service = EvaluationService(
             repository=repository,
