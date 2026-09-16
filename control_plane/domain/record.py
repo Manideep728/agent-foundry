@@ -82,7 +82,21 @@ class RunRecord:
             # The load-bearing one. It turns "the stored outcome drifted from
             # the stored score" from a silent reporting error into a load-time
             # exception.
-            if scored:
+            if scored and self.outcome is AgentOutcome.MALFORMED_OUTPUT:
+                # The one outcome the validation cannot derive. `classify`
+                # never returns it, because it describes the model's reply
+                # rather than the test results, so only the agent adapter can
+                # know. It is still constrained rather than trusted: a reply
+                # that could not be read as an edit writes nothing, so the
+                # patch must be empty. Every other disagreement between the
+                # stored outcome and the stored score stays a load-time
+                # exception, which is the point of the check.
+                self._require(
+                    self.patch_is_empty,
+                    "malformed_output requires an empty patch: a reply that "
+                    "could not be read as an edit cannot have changed a file",
+                )
+            elif scored:
                 expected = classify(self.score, patch_is_empty=self.patch_is_empty)
                 self._require(
                     self.outcome is expected,

@@ -10,13 +10,25 @@ from control_plane.adapters.fixtures import digest_tree
 from control_plane.adapters.task_toml import load_task
 from control_plane.adapters.workspace import WorkspaceFactory
 from control_plane.domain.ids import RunId
-from control_plane.domain.model import MicroUsdPerMTok, TokenPrice
+from control_plane.domain.model import MicroUsdPerMTok, ModelInvocation, TokenPrice
+from control_plane.services.ports import AgentResult
 from tests.fakes import FakeClock
 
 REPO = Path(__file__).resolve().parent.parent
 FIXTURES = REPO / "tasks" / "fixtures"
 SOLUTIONS = REPO / "tasks" / "solutions"
 TASK_FILE = REPO / "tasks" / "csv-quoted-fields.toml"
+
+
+def only_invocation(result: AgentResult) -> ModelInvocation:
+    """The one call this agent makes, asserted to be the only one.
+
+    The port carries a tuple so a multi-turn agent can report every call. This
+    agent is single-shot, and a second invocation appearing here would mean the
+    cost and latency below describe only part of the run.
+    """
+    assert len(result.invocations) == 1
+    return result.invocations[0]
 
 
 def prepared(tmp_path: Path):  # type: ignore[no-untyped-def]
@@ -64,7 +76,9 @@ def test_usage_is_recorded_with_real_token_counts(tmp_path: Path) -> None:
     # structurally zero and therefore untested.
     task, workspace, _ = prepared(tmp_path)
 
-    invocation = FakeAgent(SOLUTIONS, FakeClock()).edit(workspace.repo, task)
+    invocation = only_invocation(
+        FakeAgent(SOLUTIONS, FakeClock()).edit(workspace.repo, task)
+    )
 
     assert invocation.provider_id == "fake"
     assert invocation.usage.input_tokens > 0
@@ -82,8 +96,8 @@ def test_a_priced_client_produces_a_real_cost(tmp_path: Path) -> None:
         output_per_mtok=MicroUsdPerMTok(15_000_000),
     )
 
-    invocation = FakeAgent(SOLUTIONS, FakeClock(), price=price).edit(
-        workspace.repo, task
+    invocation = only_invocation(
+        FakeAgent(SOLUTIONS, FakeClock(), price=price).edit(workspace.repo, task)
     )
 
     # 4200 * 3 + 310 * 15 micro-dollars
@@ -99,7 +113,9 @@ def test_latency_comes_from_the_injected_clock(tmp_path: Path) -> None:
             self.advance(250)
             return value
 
-    invocation = FakeAgent(SOLUTIONS, AdvancingClock()).edit(workspace.repo, task)
+    invocation = only_invocation(
+        FakeAgent(SOLUTIONS, AdvancingClock()).edit(workspace.repo, task)
+    )
     assert invocation.latency_ms == 250
 
 

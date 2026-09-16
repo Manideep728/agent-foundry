@@ -17,6 +17,7 @@ from control_plane.adapters.sqlite_repo import SqliteRunRepository
 from control_plane.adapters.task_toml import load_task
 from control_plane.adapters.workspace import WorkspaceFactory
 from control_plane.domain.errors import PreconditionViolated
+from control_plane.domain.model import MicroUsd, ModelInvocation, ModelUsage
 from control_plane.domain.outcomes import AgentOutcome, FailureCategory
 from control_plane.domain.states import RunState
 from control_plane.domain.task import TaskDefinition
@@ -30,7 +31,7 @@ from control_plane.domain.validation import (
 )
 from control_plane.services.errors import AgentError, RunnerFailed, RunnerUnavailable
 from control_plane.services.evaluate import EvaluationService
-from control_plane.services.ports import ValidationRequest
+from control_plane.services.ports import AgentResult, ValidationRequest
 from tests.fakes import FakeIdGenerator
 
 REPO = Path(__file__).resolve().parent.parent
@@ -126,6 +127,94 @@ def test_a_fixture_that_does_not_match_its_pin_fails_before_spending_anything(
     # row names -- is the leak recovery cannot see.
     assert record.workspace_path == str(tmp_path / "runs" / "run-0001")
     assert not (tmp_path / "runs" / "run-0001").exists()
+    repo.close()
+
+
+class SilentAgent:
+    """Changes nothing and reports whatever outcome it is given.
+
+    Stands in for a model whose reply could not be read as an edit: the
+    workspace is untouched either way, so the only thing separating "the model
+    broke the output contract" from "the model chose not to edit" is what the
+    agent says about itself.
+    """
+
+    provider_id = "stub"
+
+    def __init__(self, outcome: AgentOutcome | None) -> None:
+        self._outcome = outcome
+
+    def edit(self, workspace: Path, task: TaskDefinition) -> AgentResult:
+        invocation = ModelInvocation(
+            provider_id="stub",
+            model_id="stub-1",
+            usage=ModelUsage(input_tokens=10, output_tokens=5),
+            cost=MicroUsd(0),
+            latency_ms=1,
+        )
+        return AgentResult((invocation,), outcome=self._outcome)
+
+
+def test_a_malformed_reply_is_scored_as_malformed_not_as_no_patch(
+    tmp_path: Path,
+) -> None:
+    """The precedence that makes the malformed-output rate measurable at all.
+
+    Both agents below leave the workspace untouched, so both produce an empty
+    patch and `classify` returns NO_PATCH_PRODUCED for each. Only the agent's
+    own verdict tells them apart. Let classification win and every malformed
+    reply is recorded as an agent that ran cleanly and chose to change nothing,
+    and the rate reads zero no matter how badly a model behaves.
+    """
+    service, repo = build(tmp_path, agent=SilentAgent(AgentOutcome.MALFORMED_OUTPUT))
+
+    record = service.execute(task())
+
+    assert record.run.state is RunState.SCORED
+    assert record.outcome is AgentOutcome.MALFORMED_OUTPUT
+    assert record.patch_is_empty is True
+    repo.close()
+
+
+def test_an_agent_with_no_verdict_still_gets_the_classified_outcome(
+    tmp_path: Path,
+) -> None:
+    """The override is opt-in. Silence must not change the existing scoring."""
+    service, repo = build(tmp_path, agent=SilentAgent(None))
+
+    record = service.execute(task())
+
+    assert record.run.state is RunState.SCORED
+    assert record.outcome is AgentOutcome.NO_PATCH_PRODUCED
+    repo.close()
+
+
+def test_every_invocation_an_agent_reports_is_recorded(tmp_path: Path) -> None:
+    """A multi-turn agent's cost is the sum of its calls, not its last one."""
+
+    class TwoCallAgent:
+        provider_id = "stub"
+
+        def edit(self, workspace: Path, task: TaskDefinition) -> AgentResult:
+            def call(cost: int) -> ModelInvocation:
+                return ModelInvocation(
+                    provider_id="stub",
+                    model_id="stub-1",
+                    usage=ModelUsage(input_tokens=10, output_tokens=5),
+                    cost=MicroUsd(cost),
+                    latency_ms=1,
+                )
+
+            return AgentResult((call(7), call(11)))
+
+    service, repo = build(tmp_path, agent=TwoCallAgent())
+    record = service.execute(task())
+
+    assert len(record.invocations) == 2
+    assert record.total_cost_micros == 18
+    stored = repo.get(record.run.run_id)
+    assert stored is not None
+    assert len(stored.invocations) == 2
     repo.close()
 
 

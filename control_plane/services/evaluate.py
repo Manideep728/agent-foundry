@@ -27,7 +27,7 @@ from control_plane.adapters.fixtures import digest_tree
 from control_plane.adapters.sqlite_repo import SqliteRunRepository
 from control_plane.adapters.workspace import WorkspaceFactory
 from control_plane.domain.errors import DomainError
-from control_plane.domain.model import ModelInvocation, total_micros
+from control_plane.domain.model import total_micros
 from control_plane.domain.outcomes import AgentOutcome, FailureCategory
 from control_plane.domain.patch import Patch
 from control_plane.domain.ports import Clock, IdGenerator
@@ -47,7 +47,12 @@ from control_plane.services.errors import (
     RunnerFailed,
     RunnerUnavailable,
 )
-from control_plane.services.ports import AgentPort, ValidationRequest, ValidationRunner
+from control_plane.services.ports import (
+    AgentPort,
+    AgentResult,
+    ValidationRequest,
+    ValidationRunner,
+)
 
 UNKNOWN_ARCH = "unknown"
 """Recorded until a report supplies the real one.
@@ -124,7 +129,7 @@ class EvaluationService:
             run = self._advance(run, RunState.AGENT_RUNNING)
             agent_started = self._clock.monotonic_ms()
             try:
-                invocation = self._agent.edit(workspace.repo, task)
+                agent_result = self._agent.edit(workspace.repo, task)
             except AgentError as error:
                 record = self._fail(run, task, FailureCategory.AGENT_ERROR, str(error))
                 return record
@@ -166,7 +171,7 @@ class EvaluationService:
                 task,
                 report,
                 patch,
-                invocation,
+                agent_result,
                 agent_ms,
                 validation_ms,
             )
@@ -205,7 +210,7 @@ class EvaluationService:
         task: TaskDefinition,
         report: ValidationReport,
         patch: Patch,
-        invocation: ModelInvocation,
+        agent_result: AgentResult,
         agent_ms: int,
         validation_ms: int,
     ) -> RunRecord:
@@ -221,7 +226,7 @@ class EvaluationService:
                 mismatch.reason,
                 report=report,
                 patch=patch,
-                invocation=invocation,
+                agent_result=agent_result,
                 agent_ms=agent_ms,
                 validation_ms=validation_ms,
             )
@@ -240,7 +245,7 @@ class EvaluationService:
                 report=report,
                 score_result=result,
                 patch=patch,
-                invocation=invocation,
+                agent_result=agent_result,
                 agent_ms=agent_ms,
                 validation_ms=validation_ms,
                 task_defect=True,
@@ -252,9 +257,18 @@ class EvaluationService:
             task,
             report=report,
             score_result=result,
-            outcome=classify(result, patch_is_empty=patch_is_empty),
+            # The agent's verdict outranks classification, and the order is
+            # load-bearing. A reply that could not be read as an edit writes
+            # nothing, so the patch is empty and classify would return
+            # NO_PATCH_PRODUCED -- an agent that ran fine and chose to change
+            # nothing. Reversing these two silently relabels every malformed
+            # reply as well-behaved restraint, and the malformed-output rate,
+            # which is the honest measure of whether a model can follow the
+            # output contract at all, reads zero forever.
+            outcome=agent_result.outcome
+            or classify(result, patch_is_empty=patch_is_empty),
             patch=patch,
-            invocation=invocation,
+            agent_result=agent_result,
             agent_ms=agent_ms,
             validation_ms=validation_ms,
         )
@@ -271,7 +285,7 @@ class EvaluationService:
         report: ValidationReport | None = None,
         score_result: Score | None = None,
         patch: Patch | None = None,
-        invocation: ModelInvocation | None = None,
+        agent_result: AgentResult | None = None,
         agent_ms: int | None = None,
         validation_ms: int | None = None,
         task_defect: bool = False,
@@ -284,7 +298,7 @@ class EvaluationService:
             report=report,
             score_result=score_result,
             patch=patch,
-            invocation=invocation,
+            agent_result=agent_result,
             agent_ms=agent_ms,
             validation_ms=validation_ms,
             task_defect=task_defect,
@@ -301,12 +315,12 @@ class EvaluationService:
         score_result: Score | None = None,
         outcome: AgentOutcome | None = None,
         patch: Patch | None = None,
-        invocation: ModelInvocation | None = None,
+        agent_result: AgentResult | None = None,
         agent_ms: int | None = None,
         validation_ms: int | None = None,
         task_defect: bool = False,
     ) -> RunRecord:
-        invocations = (invocation,) if invocation is not None else ()
+        invocations = agent_result.invocations if agent_result is not None else ()
         unified = patch.unified_diff if patch is not None else None
 
         return RunRecord(

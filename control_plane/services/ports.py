@@ -13,6 +13,7 @@ from typing import Protocol
 
 from control_plane.domain.ids import RunId
 from control_plane.domain.model import ModelInvocation
+from control_plane.domain.outcomes import AgentOutcome
 from control_plane.domain.task import TaskDefinition
 from control_plane.domain.validation import ValidationReport
 
@@ -59,6 +60,30 @@ class ValidationRunner(Protocol):
     def run(self, request: ValidationRequest) -> ValidationReport: ...
 
 
+@dataclass(frozen=True, slots=True)
+class AgentResult:
+    """What one agent run consumed, and what it says about its own output.
+
+    `invocations` is a tuple rather than a single call because an agent that
+    edits over several turns makes several calls, and each one is a measurement
+    in its own right. A single-shot agent returns a tuple of one.
+
+    `outcome` is set only when the agent knows something the validation cannot
+    tell. The case it exists for is `MALFORMED_OUTPUT`: a reply that could not
+    be read as an edit writes nothing, so the patch is empty and scoring would
+    otherwise call it `NO_PATCH_PRODUCED` -- an agent that deliberately changed
+    nothing. Those are different measurements and must not be confused. An
+    agent that has nothing to add leaves this None and lets scoring decide.
+
+    It is not an error channel. `AgentError` means the adapter itself failed --
+    a network fault, a bad key -- and becomes a harness failure. A model
+    answering badly is a result, and results are scored.
+    """
+
+    invocations: tuple[ModelInvocation, ...]
+    outcome: AgentOutcome | None = None
+
+
 class AgentPort(Protocol):
     """Edits a workspace in place and reports what it consumed.
 
@@ -69,4 +94,4 @@ class AgentPort(Protocol):
     @property
     def provider_id(self) -> str: ...
 
-    def edit(self, workspace: Path, task: TaskDefinition) -> ModelInvocation: ...
+    def edit(self, workspace: Path, task: TaskDefinition) -> AgentResult: ...

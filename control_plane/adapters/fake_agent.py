@@ -26,6 +26,7 @@ from control_plane.domain.model import (
 )
 from control_plane.domain.ports import Clock
 from control_plane.domain.task import TaskDefinition
+from control_plane.services.ports import AgentResult
 
 PROVIDER_ID = "fake"
 MODEL_ID = "scripted"
@@ -79,7 +80,7 @@ class FakeAgent:
     def provider_id(self) -> str:
         return PROVIDER_ID
 
-    def edit(self, workspace: Path, task: TaskDefinition) -> ModelInvocation:
+    def edit(self, workspace: Path, task: TaskDefinition) -> AgentResult:
         started = self._clock.monotonic_ms()
 
         response = self._client.complete(
@@ -98,10 +99,17 @@ class FakeAgent:
         # do-nothing agent is expressed, and the run is then scored as
         # NO_PATCH_PRODUCED -- which is a measurement, not a failure.
 
-        return ModelInvocation(
-            provider_id=PROVIDER_ID,
-            model_id=MODEL_ID,
-            usage=response.usage,
-            cost=cost_micros(response.usage, self._price),
-            latency_ms=self._clock.monotonic_ms() - started,
+        # No outcome: this agent never reports on its own output. It either
+        # applied a solution or found none, and scoring reads the patch to see
+        # which -- the same evidence it would use for a real model.
+        return AgentResult(
+            (
+                ModelInvocation(
+                    provider_id=PROVIDER_ID,
+                    model_id=MODEL_ID,
+                    usage=response.usage,
+                    cost=cost_micros(response.usage, self._price),
+                    latency_ms=self._clock.monotonic_ms() - started,
+                ),
+            )
         )
