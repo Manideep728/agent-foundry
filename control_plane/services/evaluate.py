@@ -83,9 +83,11 @@ class EvaluationService:
             self._ids.new_run_id(), task.task_id, self._clock.now_unix_ms()
         )
         base = self._base_record(run, task)
-        # Written before anything creates external state: a directory nothing
-        # knows about is invisible to the recovery scan, while a row with no
-        # directory is harmless.
+        # Written before anything creates external state, and already naming
+        # the workspace it is about to create: a directory nothing knows about
+        # is invisible to the recovery scan, while a row naming a directory
+        # that was never made is harmless -- the cleanup is an rmtree that
+        # ignores a missing path.
         self._repo.create(base)
 
         workspace = None
@@ -167,7 +169,6 @@ class EvaluationService:
                 invocation,
                 agent_ms,
                 validation_ms,
-                str(workspace.root),
             )
             return record
         except KeyboardInterrupt:
@@ -207,7 +208,6 @@ class EvaluationService:
         invocation: ModelInvocation,
         agent_ms: int,
         validation_ms: int,
-        workspace_path: str,
     ) -> RunRecord:
         mismatch = check_report_matches_task(task, report)
         if mismatch is not None:
@@ -224,7 +224,6 @@ class EvaluationService:
                 invocation=invocation,
                 agent_ms=agent_ms,
                 validation_ms=validation_ms,
-                workspace_path=workspace_path,
             )
 
         result = score(task, report)
@@ -244,7 +243,6 @@ class EvaluationService:
                 invocation=invocation,
                 agent_ms=agent_ms,
                 validation_ms=validation_ms,
-                workspace_path=workspace_path,
                 task_defect=True,
             )
 
@@ -259,7 +257,6 @@ class EvaluationService:
             invocation=invocation,
             agent_ms=agent_ms,
             validation_ms=validation_ms,
-            workspace_path=workspace_path,
         )
         self._repo.finish(record, expected=RunState.VALIDATING)
         return record
@@ -277,7 +274,6 @@ class EvaluationService:
         invocation: ModelInvocation | None = None,
         agent_ms: int | None = None,
         validation_ms: int | None = None,
-        workspace_path: str | None = None,
         task_defect: bool = False,
     ) -> RunRecord:
         expected = run.state
@@ -291,7 +287,6 @@ class EvaluationService:
             invocation=invocation,
             agent_ms=agent_ms,
             validation_ms=validation_ms,
-            workspace_path=workspace_path,
             task_defect=task_defect,
         )
         self._repo.finish(record, expected=expected)
@@ -309,7 +304,6 @@ class EvaluationService:
         invocation: ModelInvocation | None = None,
         agent_ms: int | None = None,
         validation_ms: int | None = None,
-        workspace_path: str | None = None,
         task_defect: bool = False,
     ) -> RunRecord:
         invocations = (invocation,) if invocation is not None else ()
@@ -338,5 +332,11 @@ class EvaluationService:
             total_cost_micros=total_micros(i.cost for i in invocations),
             agent_ms=agent_ms,
             validation_ms=validation_ms,
-            workspace_path=workspace_path,
+            # Derived, never passed in. Every record names its workspace from
+            # CREATED onwards, including the ones that fail: a run that dies in
+            # PREPARING is exactly the run whose directory recovery must delete,
+            # and it is also the run that never reached the code that used to
+            # supply this. A parameter here would be a second place that knows
+            # the layout, free to disagree with WorkspaceFactory.
+            workspace_path=str(self._workspaces.path_for(run.run_id)),
         )

@@ -57,6 +57,7 @@ def _left_in(
     state: RunState,
     run_id: str = "run-0001",
     runner_id: str = DOCKER_RUNNER_ID,
+    workspace_path: str | None = None,
 ) -> EvaluationRun:
     """Create a run and walk it to `state`, as a process that then died would."""
     run = EvaluationRun.create(RunId(run_id), TaskId("csv-quoted-fields"), EPOCH_MS)
@@ -69,6 +70,7 @@ def _left_in(
             runner_version="test",
             arch="x86_64",
             pid1=False,
+            workspace_path=workspace_path,
         )
     )
     for next_state in PATH_TO_STATE[state]:
@@ -127,6 +129,60 @@ def test_a_run_that_never_validated_removes_no_container(
     _recover(repository, tmp_path, remover)
 
     assert remover.removed == []
+
+
+def test_a_run_left_preparing_has_its_working_copy_deleted(
+    repository: SqliteRunRepository, tmp_path: Path
+) -> None:
+    """The reason a record names its workspace from CREATED onwards.
+
+    PREPARING is the one state whose recovery action is DELETE_WORKSPACE, and
+    it is reached before anything used to supply a workspace path -- so the
+    path had to be recorded at creation or this branch could never run. Revert
+    that and `create` stops persisting the column: the recovered record reads
+    back a null path, the deletion is skipped, and `repo/` survives below.
+    """
+    workspace = tmp_path / "runs" / "run-0001"
+    (workspace / "repo" / "src").mkdir(parents=True)
+    (workspace / "repo" / "src" / "reader.py").write_text("x = 1\n")
+    (workspace / "out" / "logs").mkdir(parents=True)
+    (workspace / "manifest.txt").write_text("sha256  reader.py\n")
+
+    _left_in(repository, RunState.PREPARING, workspace_path=str(workspace))
+
+    recovered = _recover(repository, tmp_path, RecordingRemover())
+
+    assert len(recovered) == 1
+    assert recovered[0].action is RecoveryAction.DELETE_WORKSPACE
+    assert recovered[0].cleanup_error is None
+    assert not (workspace / "repo").exists()
+    # Only the working copy goes. It is reconstructible from the fixture and
+    # the patch; the manifest and the logs are the record of what happened.
+    assert (workspace / "manifest.txt").is_file()
+    assert (workspace / "out" / "logs").is_dir()
+
+
+def test_a_run_left_preparing_without_a_workspace_on_disk_still_recovers(
+    repository: SqliteRunRepository, tmp_path: Path
+) -> None:
+    """A row may name a directory that was never created.
+
+    Every record names its workspace now, including a run that died before
+    `WorkspaceFactory.create` ran. Deleting a path that does not exist must be
+    a no-op rather than an error, or recovery would fail on precisely the runs
+    it exists to clean up after.
+    """
+    workspace = tmp_path / "runs" / "run-0001"
+
+    _left_in(repository, RunState.PREPARING, workspace_path=str(workspace))
+
+    recovered = _recover(repository, tmp_path, RecordingRemover())
+
+    assert recovered[0].action is RecoveryAction.DELETE_WORKSPACE
+    assert recovered[0].cleanup_error is None
+    stored = repository.get(RunId("run-0001"))
+    assert stored is not None
+    assert stored.run.state is RunState.FAILED
 
 
 def test_a_second_pass_finds_nothing(

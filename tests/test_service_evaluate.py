@@ -121,6 +121,11 @@ def test_a_fixture_that_does_not_match_its_pin_fails_before_spending_anything(
     assert record.run.failure.kind is FailureCategory.FIXTURE_HASH_MISMATCH
     assert record.run.failure.failed_from is RunState.PREPARING
     assert record.invocations == ()  # nothing was paid for
+    # Named even though WorkspaceFactory.create never ran. A row pointing at a
+    # directory that does not exist is harmless; the reverse -- a directory no
+    # row names -- is the leak recovery cannot see.
+    assert record.workspace_path == str(tmp_path / "runs" / "run-0001")
+    assert not (tmp_path / "runs" / "run-0001").exists()
     repo.close()
 
 
@@ -382,9 +387,16 @@ def test_a_failed_run_keeps_its_workspace_for_inspection(tmp_path: Path) -> None
             raise RunnerFailed("nothing came back")
 
     service, repo = build(tmp_path, runner=BrokenRunner())
-    service.execute(task())
+    record = service.execute(task())
 
     assert (tmp_path / "runs" / "run-0001" / "repo").is_dir()
+    # Keeping the evidence is only useful if the record says where it is. A
+    # failed run never reaches the scoring path, which is the only place that
+    # used to supply this.
+    assert record.workspace_path == str(tmp_path / "runs" / "run-0001")
+    stored = repo.get(record.run.run_id)
+    assert stored is not None
+    assert stored.workspace_path == record.workspace_path
     repo.close()
 
 

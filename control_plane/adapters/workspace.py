@@ -80,8 +80,18 @@ class WorkspaceFactory:
     def __init__(self, runs_root: Path) -> None:
         self._runs_root = runs_root
 
+    def path_for(self, run_id: RunId) -> Path:
+        """Where this run's workspace will live. Pure: creates nothing.
+
+        Separate from `create` because the path is a function of the run id
+        alone and is therefore knowable before the directory exists. The record
+        is written first and names this path, so a run that dies during setup
+        still tells the recovery scan what to clean up.
+        """
+        return self._runs_root / run_id.value
+
     def create(self, run_id: RunId) -> Workspace:
-        workspace = Workspace(run_id=run_id, root=self._runs_root / run_id.value)
+        workspace = Workspace(run_id=run_id, root=self.path_for(run_id))
         try:
             # exist_ok=False deliberately: a reused run id must be an error,
             # not a silent overwrite of another run's evidence.

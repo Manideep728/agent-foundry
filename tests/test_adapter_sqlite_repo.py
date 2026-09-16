@@ -124,6 +124,22 @@ def test_a_created_run_reads_back(repo: SqliteRunRepository) -> None:
     assert stored.pid1 is False
 
 
+def test_a_created_run_records_its_workspace_before_it_exists(
+    repo: SqliteRunRepository,
+) -> None:
+    """`create`, not just `finish`, persists the workspace path.
+
+    The recovery scan reads this column to find the working copy of a run that
+    died during setup. Written only by `finish`, it is null for every run that
+    never finished -- which is exactly the set recovery exists for.
+    """
+    repo.create(base_record(new_run(), workspace_path="/runs/run-0001"))
+    stored = repo.get(RunId("run-0001"))
+
+    assert stored is not None
+    assert stored.workspace_path == "/runs/run-0001"
+
+
 def test_recording_the_same_run_twice_is_refused(repo: SqliteRunRepository) -> None:
     from control_plane.services.errors import RunAlreadyExists
 

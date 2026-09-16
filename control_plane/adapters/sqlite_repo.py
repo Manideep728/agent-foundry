@@ -201,8 +201,8 @@ class SqliteRunRepository:
                     "INSERT INTO runs "
                     "(run_id, task_id, suite, state, created_at_unix_ms, "
                     " updated_at_unix_ms, fixture_sha256, runner_id, "
-                    " runner_version, arch, pid1) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    " runner_version, arch, pid1, workspace_path) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         record.run.run_id.value,
                         record.run.task_id.value,
@@ -215,6 +215,10 @@ class SqliteRunRepository:
                         record.runner_version,
                         record.arch,
                         _flag(record.pid1),
+                        # Recorded at creation, not at finish. The row must name
+                        # the directory before the run can die leaving one
+                        # behind, or the recovery scan has nothing to delete.
+                        record.workspace_path,
                     ),
                 )
         except sqlite3.IntegrityError as error:
