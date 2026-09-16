@@ -22,9 +22,31 @@ _TOP_LEVEL_KEYS = frozenset(
     {"schema_version", "task", "fixture", "timeouts", "commands"}
 )
 _TASK_KEYS = frozenset({"id", "suite", "description"})
-_FIXTURE_KEYS = frozenset({"id", "sha256"})
+_FIXTURE_KEYS = frozenset({"id", "sha256", "hidden_paths"})
 _TIMEOUT_KEYS = frozenset({"per_command_ms", "total_ms"})
 _COMMAND_KEYS = frozenset({"role", "command"})
+
+
+def _string_list(where: str, table: dict[str, Any], key: str) -> tuple[str, ...]:
+    """An optional list of strings. Absent is empty; present and wrong is an error.
+
+    A bare string is refused rather than wrapped. TOML makes `hidden_paths =
+    "tests/a.py"` easy to write, and silently treating it as a one-element list
+    would teach a habit that breaks the day someone adds a second path.
+    """
+    if key not in table:
+        return ()
+    value = table[key]
+    if not isinstance(value, list):
+        raise InvalidTaskDefinition(
+            f"{where}: {key} must be a list of strings, got {type(value).__name__}"
+        )
+    for entry in value:
+        if not isinstance(entry, str):
+            raise InvalidTaskDefinition(
+                f"{where}: {key} must contain only strings, got {type(entry).__name__}"
+            )
+    return tuple(value)
 
 
 def _reject_unknown(where: str, table: dict[str, Any], allowed: frozenset[str]) -> None:
@@ -146,6 +168,7 @@ def load_task(path: Path) -> TaskDefinition:
             description=_string(f"{where} [task]", task, "description"),
             fixture_id=_string(f"{where} [fixture]", fixture, "id"),
             fixture_sha256=_string(f"{where} [fixture]", fixture, "sha256"),
+            hidden_paths=_string_list(f"{where} [fixture]", fixture, "hidden_paths"),
             commands=TaskDefinition.index_commands(pairs),
             per_command_timeout_ms=_integer(
                 f"{where} [timeouts]", timeouts, "per_command_ms"

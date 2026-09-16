@@ -13,7 +13,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 
-from control_plane.domain.errors import InvalidTaskDefinition
+from control_plane.domain.errors import DomainError, InvalidTaskDefinition
+from control_plane.domain.fixture import validate_fixture_path
 from control_plane.domain.ids import TaskId, validate_identifier
 
 _SHA256_HEX = re.compile(r"\A[0-9a-f]{64}\Z")
@@ -84,6 +85,24 @@ class TaskDefinition:
     per_command_timeout_ms: int
     total_timeout_ms: int
 
+    hidden_paths: tuple[str, ...] = ()
+    """Fixture files an agent must not be shown (D18).
+
+    The tests that decide the score live in the fixture, so an agent handed the
+    whole repository is handed the answer. A benchmark scored that way measures
+    reading comprehension, and its numbers cannot be compared with published
+    results, which is what D7 says the OSS suite has to do.
+
+    Listed rather than derived. The command is `python3 -m unittest
+    tests.test_quoting`, a module path, and turning that back into a file is
+    guesswork that breaks on the first task that does anything unusual. An
+    explicit list is checked by reading it.
+
+    Hiding is not secrecy: validation still runs these files, and they are
+    still in the workspace the agent edits. It only governs what goes into a
+    prompt.
+    """
+
     def __post_init__(self) -> None:
         if not self.description.strip():
             raise InvalidTaskDefinition(f"{self.task_id} has an empty description")
@@ -100,6 +119,21 @@ class TaskDefinition:
 
         self._validate_commands()
         self._validate_timeouts()
+        self._validate_hidden_paths()
+
+    def _validate_hidden_paths(self) -> None:
+        # Same rule as any other fixture path, so a listed file can be matched
+        # against the manifest by string equality rather than by normalising
+        # two spellings and hoping they agree.
+        for path in self.hidden_paths:
+            try:
+                validate_fixture_path(path)
+            except DomainError as error:
+                raise InvalidTaskDefinition(
+                    f"{self.task_id} hidden_paths: {error}"
+                ) from error
+        if len(set(self.hidden_paths)) != len(self.hidden_paths):
+            raise InvalidTaskDefinition(f"{self.task_id} hidden_paths has a duplicate")
 
     def _validate_commands(self) -> None:
         if not self.commands:
