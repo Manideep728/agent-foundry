@@ -24,7 +24,9 @@ from control_plane.adapters.docker_runner import DockerConfig, DockerRunner
 from control_plane.adapters.fake_agent import FakeAgent
 from control_plane.adapters.fixtures import digest_tree
 from control_plane.adapters.local_runner import LocalRunner
+from control_plane.adapters.ollama_client import DEFAULT_BASE_URL, OllamaClient
 from control_plane.adapters.run_lock import DatabaseBusy, exclusive_run_lock
+from control_plane.adapters.single_shot_agent import SingleShotAgent
 from control_plane.adapters.sqlite_repo import SqliteRunRepository
 from control_plane.adapters.system import SystemClock, UuidIdGenerator
 from control_plane.adapters.task_toml import load_task
@@ -38,7 +40,7 @@ from control_plane.domain.states import RunState
 from control_plane.domain.task import TaskDefinition
 from control_plane.interface.doctor import run_doctor
 from control_plane.services.evaluate import EvaluationService
-from control_plane.services.ports import ValidationRunner
+from control_plane.services.ports import AgentPort, ValidationRunner
 from control_plane.services.recovery import recover_unfinished
 
 PROGRAM = "af"
@@ -56,6 +58,11 @@ DEFAULT_IMAGE = "afrunner:local"
 
 RUNNER_DOCKER = "docker"
 RUNNER_LOCAL = "local"
+
+AGENT_FAKE = "fake"
+AGENT_OLLAMA = "ollama"
+
+DEFAULT_MODEL = "qwen2.5-coder:3b"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -99,6 +106,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--image",
         default=DEFAULT_IMAGE,
         help="the validation image for --runner docker (build it: make runner-image)",
+    )
+    run.add_argument(
+        "--agent",
+        choices=(AGENT_FAKE, AGENT_OLLAMA),
+        default=AGENT_FAKE,
+        help=(
+            "fake applies a known solution and calls no model, which is what "
+            "CI and offline development use; ollama sends the task to a local "
+            "model and applies whatever comes back"
+        ),
+    )
+    run.add_argument(
+        "--model",
+        default=DEFAULT_MODEL,
+        help=f"the model for --agent ollama (default {DEFAULT_MODEL})",
+    )
+    run.add_argument(
+        "--ollama-url",
+        default=DEFAULT_BASE_URL,
+        help=f"where the ollama server is (default {DEFAULT_BASE_URL})",
     )
 
     show = subcommands.add_parser("show", help="print a stored run")
@@ -218,13 +245,27 @@ def _recover_and_evaluate(
         service = EvaluationService(
             repository=repository,
             runner=runner,
-            agent=FakeAgent(args.solutions, clock),
+            agent=_build_agent(args, clock),
             workspaces=workspaces,
             clock=clock,
             ids=UuidIdGenerator(),
             fixtures_root=args.fixtures,
         )
         return service.execute(task)
+
+
+def _build_agent(args: argparse.Namespace, clock: SystemClock) -> AgentPort:
+    """Pick the agent the flags asked for.
+
+    `fake` is the default deliberately. It needs no server and no GPU, so the
+    test suite, CI and any offline clone keep working exactly as before, and
+    reaching a model is something a run has to ask for.
+    """
+    if args.agent == AGENT_OLLAMA:
+        return SingleShotAgent(
+            OllamaClient(args.model, base_url=args.ollama_url), clock
+        )
+    return FakeAgent(args.solutions, clock)
 
 
 def run_task(args: argparse.Namespace) -> int:

@@ -10,7 +10,10 @@ from pathlib import Path
 
 import pytest
 
-from control_plane.interface.cli import build_parser, main
+from control_plane.adapters.fake_agent import FakeAgent
+from control_plane.adapters.single_shot_agent import SingleShotAgent
+from control_plane.adapters.system import SystemClock
+from control_plane.interface.cli import _build_agent, build_parser, main
 from tests.docker_support import IMAGE, requires_image
 
 REPO = Path(__file__).resolve().parent.parent
@@ -43,6 +46,46 @@ def test_run_defaults_to_the_docker_runner_and_the_local_image() -> None:
 
     assert args.runner == "docker"
     assert args.image == "afrunner:local"
+
+
+def test_run_defaults_to_the_fake_agent() -> None:
+    """The default must need no server and no GPU.
+
+    CI, an offline clone and every test in this suite rely on `af run` calling
+    no model unless a run asks for one.
+    """
+    args = build_parser().parse_args(["run", str(TASK_FILE)])
+
+    assert args.agent == "fake"
+    assert isinstance(_build_agent(args, SystemClock()), FakeAgent)
+
+
+def test_the_ollama_agent_is_built_from_the_flags() -> None:
+    args = build_parser().parse_args(
+        [
+            "run",
+            str(TASK_FILE),
+            "--agent",
+            "ollama",
+            "--model",
+            "some-model:7b",
+            "--ollama-url",
+            "http://elsewhere:11434",
+        ]
+    )
+
+    agent = _build_agent(args, SystemClock())
+
+    assert isinstance(agent, SingleShotAgent)
+    # The record must name the model, not this wrapper (D6).
+    assert agent.provider_id == "ollama"
+
+
+def test_an_unknown_agent_is_a_usage_error() -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        build_parser().parse_args(["run", str(TASK_FILE), "--agent", "gpt"])
+
+    assert exit_info.value.code == 2
 
 
 def test_an_unknown_runner_is_a_usage_error() -> None:
