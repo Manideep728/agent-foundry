@@ -140,12 +140,37 @@ output:
 A run whose agent produced a patch that fails every test exits 0. The harness
 did its job; the agent did not.
 
+## Agents
+
+Two agents exist behind one interface.
+
+`--agent fake` is the default. It applies a known solution from
+`tasks/solutions/` and calls no model, so the pipeline runs offline and in CI.
+
+`--agent ollama` sends the task and the visible files to a local model and
+applies the files it sends back. It runs at temperature 0 with a fixed seed:
+two runs of the same task against the same model produce byte-identical
+patches. Token counts are recorded and the cost is zero, which is the honest
+figure for a model that cost nothing to call.
+
+The tests that decide a task's score can be listed as `hidden_paths` and are
+then kept out of the agent's prompt. They are still copied and still run; an
+agent shown the tests that grade it is being handed the answer.
+
+A reply the harness cannot read as an edit is scored `malformed_output` rather
+than treated as an error. Failing to follow the output format is something a
+model does, so it is measured like anything else it does.
+
+```
+af run tasks/csv-quoted-fields.toml --agent ollama --model qwen2.5-coder:3b
+```
+
 ## Planned scope
 
 The C++ supervisor, the Python control plane and CLI, Docker-isolated
-validation, test-based scoring and SQLite storage exist. The first release also
-needs a model-provider adapter in place of the scripted agent, more benchmark
-tasks, and report generation.
+validation, test-based scoring, SQLite storage and a local-model agent exist.
+The first release also needs more benchmark tasks, report generation, and a
+hosted-provider adapter.
 
 Distributed execution, automatic pull requests, and a web interface are outside
 the first release.

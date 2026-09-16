@@ -382,3 +382,32 @@ the lock.
 
 **What would change it.** A database on a network filesystem, where `flock`
 semantics differ, or a need to run tasks in parallel from one process.
+
+## D18 — The tests that grade a task are hidden from the agent
+
+**Context.** A task's fixture contains the tests that decide its score. An
+agent given the whole repository is given the answer, and a score measured that
+way says more about reading comprehension than about repair. D7 commits the
+second suite to SWE-bench Lite instances and to calibrating against published
+baselines, and those baselines are produced without showing the model the tests
+that grade it. Mixing the two conventions makes the numbers incomparable.
+
+**Decision.** A task may list `hidden_paths` under `[fixture]`. Those files are
+kept out of the agent's prompt. They are still copied into the workspace and
+still run by validation: this governs prompts, not execution.
+
+The list is explicit rather than derived. A command reads
+`python3 -m unittest tests.test_quoting`, a module path, and turning that back
+into a file is guesswork that breaks on the first task doing anything unusual.
+A list is checked by reading it.
+
+Only the fail-to-pass tests are hidden. A pass-to-pass test is a regression
+check that already exists in the repository an agent would really be handed, so
+hiding it would model a repository that never existed.
+
+**Consequence.** An agent sees the problem statement, the source, and the tests
+that were already there. It cannot read the specification it is being graded
+against, which is the position a developer given a bug report is in.
+
+**What would change it.** An oracle-setting benchmark, where showing the tests
+is the point and the numbers are labelled accordingly.
