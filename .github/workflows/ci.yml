@@ -9,15 +9,21 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Actions are pinned to exact versions, like the GoogleTest tag and
+# `uv sync --locked`: the version CI ran is a fact in the file, not whatever a
+# moving tag points at today. setup-uv publishes no moving major tag past v7,
+# so following that style would strand this workflow three majors back. Both
+# versions run on node24; node20 is deprecated.
+
 jobs:
   control-plane:
     name: control plane
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v10.1.0
         with:
           enable-cache: true
 
@@ -43,10 +49,10 @@ jobs:
     name: runner
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v10.1.0
         with:
           enable-cache: true
 
