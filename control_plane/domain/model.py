@@ -173,6 +173,16 @@ class ModelResponse:
     text: str
     usage: ModelUsage
 
+    truncated: bool = False
+    """Whether the provider stopped at the output cap rather than finishing.
+
+    A fact about the reply, not about the model's ability. A truncated reply is
+    the most likely reason an agent cannot read an edit out of it, and the two
+    have different fixes: raise the cap, or change the model. Without this the
+    agent can only report that the output was malformed, and a benchmark would
+    blame the model for a limit the harness chose.
+    """
+
 
 @dataclass(frozen=True, slots=True)
 class ModelInvocation:

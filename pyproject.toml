@@ -37,10 +37,16 @@ testpaths = ["tests"]
 # advance notice that something will break, and this project would rather take
 # the break now than during a benchmark run.
 filterwarnings = ["error"]
-# Markers for tests that need something the machine may not have. CI runs all
-# of them; a laptop without Docker can still run the rest.
+# Markers for tests that need something the machine may not have. A laptop
+# without Docker can still run the rest.
 markers = [
     "docker: requires a working Docker daemon and the runner image",
+    # CI runs the docker marker but not this one: the runners have no GPU and
+    # no pulled model. So nothing the Ollama adapter decides may depend on it
+    # -- the adapter's rules are tested against a canned HTTP server, and this
+    # marker covers only the claim that a real server answers in the shape the
+    # adapter expects.
+    "ollama: requires a running Ollama server with the model pulled",
 ]
 
 [tool.ruff]
