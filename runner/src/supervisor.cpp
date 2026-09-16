@@ -33,6 +33,14 @@ constexpr int poll_slice_ms = 50;
 // survivor is uninterruptible sleep, which no timeout setting changes.
 constexpr long long group_confirm_ms = 2000;
 
+// How long one command waits for an orphan that became reapable as its drain
+// loop ended. Not a flag, and deliberately small: the gap this closes is the
+// microseconds between an orphan closing its pipe and the kernel making it
+// waitable, not a wait for work still to be done. An orphan that is still
+// running is left to the sweep at the end of the run, which is what
+// --drain-after-exit-ms sizes.
+constexpr long long post_command_reap_ms = 20;
+
 enum class Phase {
     Running,
     Grace,
@@ -264,10 +272,19 @@ CommandRun run_command(const Options& options, int index, const std::string& com
         result.verdict.group_escaped = true;
     }
     result.drain_deadline_hit = drain_deadline_hit;
-    result.orphans_reaped = orphans;
     result.out = out.capture();
     result.err = err.capture();
     result.duration_ms = monotonic_ms() - started;
+
+    // The drain loop reaps only while this command holds its pipes open, so an
+    // orphan that becomes reapable in the instant after the loop ends has no
+    // later pass within the command. Left unreaped it is a zombie that holds a
+    // PID slot against --pids-limit, and the next command fails to spawn for a
+    // reason that has nothing to do with it. Taken after duration_ms is read,
+    // so this cleanup never inflates the command's own measurement. A stop
+    // request skips the wait: the caller's grace period is already running.
+    orphans += reap_remaining_orphans(watch.requested() ? 0 : post_command_reap_ms, watch);
+    result.orphans_reaped = orphans;
     return run;
 }
 
@@ -350,9 +367,10 @@ RunAll run_all(const Options& options, const std::vector<std::string>& commands,
         }
     }
 
-    // The loop reaps only inside a command, so an orphan of the last command
-    // that exits just after its loop ended would go uncounted. A stop request
-    // skips the wait, because the caller's own grace period is already running.
+    // Each command already sweeps the instant after its own drain loop, so what
+    // reaches here is an orphan that was still running when the last command
+    // ended. This is the wait --drain-after-exit-ms sizes. A stop request skips
+    // it, because the caller's own grace period is already running.
     report.orphans_reaped_total +=
         reap_remaining_orphans(watch.requested() ? 0 : options.drain_after_exit_ms, watch);
 

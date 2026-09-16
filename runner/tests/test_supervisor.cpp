@@ -176,6 +176,29 @@ TEST(Supervisor, ADoubleForkedOrphanIsReapedAndNotAttributed) {
     EXPECT_GE(run.result.orphans_reaped, 1);
 }
 
+// The per-command half of the orphan sweep, made certain rather than raced.
+// The orphan redirects its output, so it does not hold the command's pipes:
+// the drain loop ends as soon as the shell exits, and the orphan becomes
+// reapable afterwards. That is exactly the gap that used to leave a zombie.
+// The orphan exits well inside the post-command budget, so this command reaps
+// it rather than leaving it to the sweep at the end of the run.
+TEST(Supervisor, ReapsAnOrphanThatExitsJustAfterTheDrainLoop) {
+    afrunner::become_subreaper();
+    const TempDir dir;
+    Options options = options_for(dir);
+    ASSERT_EQ(afrunner::ensure_directory(options.log_dir), "");
+
+    const CommandRun run =
+        afrunner::run_command(options, 0, "sleep 0.002 >/dev/null 2>&1 & exit 0");
+
+    EXPECT_EQ(run.result.verdict.exit_code, 0);
+    EXPECT_EQ(run.result.orphans_reaped, 1);
+
+    int leftover = 0;
+    EXPECT_EQ(::waitpid(-1, &leftover, WNOHANG), -1) << "a zombie was left behind";
+    EXPECT_EQ(errno, ECHILD);
+}
+
 // Unreaped orphans accumulate as zombies, consume PID slots against
 // --pids-limit, and make later commands fail to spawn.
 TEST(Supervisor, ManyOrphansLeaveNoZombies) {
