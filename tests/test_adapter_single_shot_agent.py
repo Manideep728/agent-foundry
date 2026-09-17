@@ -276,3 +276,45 @@ def test_a_fixture_too_large_to_send_is_a_harness_failure(tmp_path: Path) -> Non
 
     with pytest.raises(AgentError, match="more than this agent sends"):
         agent.edit(repo, task)
+
+
+# --- keeping the reply that could not be read -------------------------------
+
+
+def test_a_malformed_reply_is_kept_with_the_reason_it_was_malformed(
+    tmp_path: Path,
+) -> None:
+    """A malformed_output rate nobody can inspect cannot be acted on.
+
+    The text used to be a local variable and the reason an exception caught
+    bare, so both were discarded by the handler that classified the run. What
+    survived was the verdict with none of the evidence.
+    """
+    reply = "I think the fix is to change the parser, but I will not write it."
+    result, _, _, _, _ = run(tmp_path, reply)
+
+    assert result.outcome is AgentOutcome.MALFORMED_OUTPUT
+    assert result.raw_reply == reply
+    assert result.outcome_detail is not None
+    assert "no tagged file block" in result.outcome_detail
+
+
+def test_a_reply_cut_off_by_the_output_cap_says_so(tmp_path: Path) -> None:
+    # Different causes, different fixes: an output cap is a harness choice
+    # and a missing fence is the model. Both score malformed_output, so the
+    # note is the only thing that tells them apart.
+    result, _, _, _, _ = run(
+        tmp_path, block("csvkit/fields.py", "x = 1"), truncated=True
+    )
+
+    assert result.outcome is AgentOutcome.MALFORMED_OUTPUT
+    assert result.outcome_detail == "the reply hit the output cap"
+
+
+def test_a_reply_that_parsed_keeps_nothing(tmp_path: Path) -> None:
+    # patch.diff already records what a working run did, in a more useful form.
+    result, _, _, _, _ = run(tmp_path, block("csvkit/fields.py", "x = 1"))
+
+    assert result.outcome is None
+    assert result.raw_reply is None
+    assert result.outcome_detail is None

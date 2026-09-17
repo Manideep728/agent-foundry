@@ -33,7 +33,7 @@ from control_plane.domain.validation import (
 )
 from control_plane.services.errors import ConcurrentModification, RunAlreadyExists
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _SCHEMA = (
     """
@@ -69,6 +69,7 @@ CREATE TABLE runs (
   validation_ms      INTEGER,
   workspace_path     TEXT,
   image_digest       TEXT,
+  agent_note         TEXT,
   CHECK ((state = 'failed') = (failure_kind IS NOT NULL)),
   CHECK (updated_at_unix_ms >= created_at_unix_ms),
   CHECK (pid1 IN (0, 1))
@@ -139,6 +140,9 @@ CREATE TABLE model_invocations (
 )
 
 
+_TABLES = ("runs", "validation_reports", "command_results", "model_invocations")
+
+
 # Ordered upgrade steps, each naming the version it produces. A step may add a
 # column, or repair data from a table that already holds the truth.
 #
@@ -146,8 +150,6 @@ CREATE TABLE model_invocations (
 # one, so `_SCHEMA` and this list would go on to describe different databases
 # depending on whether a file was created or upgraded. That rule is enforced by
 # test_a_migrated_database_matches_a_fresh_one, not by this comment.
-_TABLES = ("runs", "validation_reports", "command_results", "model_invocations")
-
 _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (
         2,
@@ -176,6 +178,15 @@ _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             # image, and a run that never reached validation used none. NULL
             # says exactly that, and cannot be mistaken for a digest.
             "ALTER TABLE runs ADD COLUMN image_digest TEXT",
+        ),
+    ),
+    (
+        4,
+        (
+            # Why a reply could not be read, in the agent's own words.
+            # Nullable too: almost every run has nothing to say here, and
+            # "" would not be distinguishable from a reason nobody wrote.
+            "ALTER TABLE runs ADD COLUMN agent_note TEXT",
         ),
     ),
 )
@@ -399,7 +410,7 @@ class SqliteRunRepository:
                 "timed_out_commands = ?, task_defect = ?, patch_sha256 = ?, "
                 "patch_bytes = ?, patch_is_empty = ?, total_cost_micros = ?, "
                 "agent_ms = ?, validation_ms = ?, workspace_path = ?, "
-                "image_digest = ? "
+                "image_digest = ?, agent_note = ? "
                 "WHERE run_id = ? AND state = ?",
                 (
                     record.run.state.value,
@@ -431,6 +442,7 @@ class SqliteRunRepository:
                     _measure("validation_ms", record.validation_ms),
                     record.workspace_path,
                     record.image_digest,
+                    record.agent_note,
                     record.run.run_id.value,
                     expected.value,
                 ),
@@ -598,6 +610,7 @@ class SqliteRunRepository:
             validation_ms=row["validation_ms"],
             workspace_path=row["workspace_path"],
             image_digest=row["image_digest"],
+            agent_note=row["agent_note"],
         )
 
     def _read_report(self, run_id: RunId) -> ValidationReport | None:

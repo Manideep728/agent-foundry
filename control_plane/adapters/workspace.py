@@ -62,6 +62,19 @@ class Workspace:
     def manifest_path(self) -> Path:
         return self.root / "manifest.txt"
 
+    @property
+    def reply_path(self) -> Path:
+        """Where the model's raw reply is kept when it could not be read.
+
+        Beside `patch.diff`, deliberately not inside `repo/`. Everything under
+        `repo/` is diffed into the patch, so an agent that wrote its own reply
+        there would make the reply part of the measurement -- and a
+        malformed_output run is defined by having produced no patch at all.
+        Being outside `repo/` also means `discard_repo` keeps it, which is the
+        point: the run whose reply is worth reading is one that already failed.
+        """
+        return self.root / "agent-reply.txt"
+
 
 def _ignore_excluded(directory: str, names: list[str]) -> set[str]:
     """The copy filter, derived from the same rule the hasher uses.

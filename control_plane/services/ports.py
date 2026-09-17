@@ -104,6 +104,29 @@ class AgentResult:
     invocations: tuple[ModelInvocation, ...]
     outcome: AgentOutcome | None = None
 
+    raw_reply: str | None = None
+    """What the model actually sent, when that is worth keeping.
+
+    Set on the path where the reply could not be read as an edit. Until this
+    existed the text was a local variable in the agent, discarded by the
+    `except` that classified the run -- so a `malformed_output` run recorded
+    that the model had answered badly and kept no way of seeing how. A rate
+    nobody can inspect cannot be acted on.
+
+    It travels back through the result rather than being written by the agent
+    itself, because the agent is handed only the repository copy and everything
+    written there becomes part of the patch.
+    """
+
+    outcome_detail: str | None = None
+    """One line saying why, in the agent's own words.
+
+    The `MalformedReply` message -- "the block for x.py was never closed", "the
+    reply contained no tagged file block" -- which was dropped along with the
+    text. It is the difference between a model that cannot follow the format
+    and one that was simply cut off, and those call for different fixes.
+    """
+
 
 class AgentPort(Protocol):
     """Edits a workspace in place and reports what it consumed.

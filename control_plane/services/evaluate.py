@@ -140,6 +140,15 @@ class EvaluationService:
             patch = diff_workspace(entries, fixture_root, workspace.repo)
             workspace.patch_path.write_text(patch.unified_diff, encoding="utf-8")
 
+            # Kept beside the patch, and only when the agent asked for it to be
+            # kept -- which today means the reply could not be read as an edit.
+            # Writing every reply would duplicate, in a less useful form, what
+            # patch.diff already says about the runs that worked.
+            if agent_result.raw_reply is not None:
+                workspace.reply_path.write_text(
+                    agent_result.raw_reply, encoding="utf-8"
+                )
+
             run = self._advance(run, RunState.VALIDATING)
             validation_started = self._clock.monotonic_ms()
             try:
@@ -337,6 +346,7 @@ class EvaluationService:
             # would empty the column on exactly the failure paths the pre-run
             # inspect exists to cover.
             image_digest=self._runner.image_digest,
+            agent_note=agent_result.outcome_detail if agent_result else None,
             report=report,
             score=score_result,
             outcome=outcome,

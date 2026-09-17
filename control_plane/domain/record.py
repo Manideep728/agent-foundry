@@ -72,6 +72,15 @@ class RunRecord:
     adapter that produced the value is the layer that knows its format.
     """
 
+    agent_note: str | None = None
+    """One line from the agent about its own output, when it has one.
+
+    Today that means why a reply could not be read as an edit. It explains an
+    outcome rather than scoring one, so nothing depends on it and a run without
+    it is complete. The reply itself is far too large for a row and is kept as
+    a file beside the patch.
+    """
+
     def __post_init__(self) -> None:
         scored = self.run.state is RunState.SCORED
 

@@ -554,3 +554,70 @@ def test_a_run_on_a_runner_with_no_image_records_none(tmp_path: Path) -> None:
     stored = repo.get(record.run.run_id)
     assert stored is not None
     assert stored.image_digest is None
+
+
+# --- the reply that could not be read is kept -------------------------------
+
+
+class MalformedAgent:
+    """An agent whose reply could not be read as an edit."""
+
+    provider_id = "stub"
+
+    def __init__(self, reply: str, reason: str) -> None:
+        self._reply = reply
+        self._reason = reason
+
+    def edit(self, workspace: Path, task: object) -> AgentResult:
+        return AgentResult(
+            (
+                ModelInvocation(
+                    provider_id="stub",
+                    model_id="stub",
+                    usage=ModelUsage(input_tokens=10, output_tokens=5),
+                    cost=MicroUsd(0),
+                    latency_ms=1,
+                ),
+            ),
+            outcome=AgentOutcome.MALFORMED_OUTPUT,
+            raw_reply=self._reply,
+            outcome_detail=self._reason,
+        )
+
+
+def test_a_malformed_reply_is_written_beside_the_patch(tmp_path: Path) -> None:
+    """The reply must survive the run, and survive the cleanup that follows it.
+
+    `repo/` is removed once a run is scored, so a reply written there would be
+    gone exactly when someone wants to read it -- and would have been diffed
+    into the patch before that, making a run defined by producing no patch
+    produce one.
+    """
+    agent = MalformedAgent("here is my answer, in prose", "no tagged file block")
+    service, repo = build(tmp_path, agent=agent)
+
+    record = service.execute(load_task(TASK_FILE))
+
+    assert record.outcome is AgentOutcome.MALFORMED_OUTPUT
+    assert record.patch_is_empty is True
+
+    reply_file = tmp_path / "runs" / record.run.run_id.value / "agent-reply.txt"
+    assert reply_file.read_text() == "here is my answer, in prose"
+    assert not (tmp_path / "runs" / record.run.run_id.value / "repo").exists()
+
+    stored = repo.get(record.run.run_id)
+    assert stored is not None
+    assert stored.agent_note == "no tagged file block"
+
+
+def test_a_run_whose_reply_was_read_writes_no_reply_file(tmp_path: Path) -> None:
+    # Writing every reply would duplicate patch.diff in a less useful form.
+    service, repo = build(tmp_path)
+    record = service.execute(load_task(TASK_FILE))
+
+    assert not (
+        tmp_path / "runs" / record.run.run_id.value / "agent-reply.txt"
+    ).exists()
+    stored = repo.get(record.run.run_id)
+    assert stored is not None
+    assert stored.agent_note is None

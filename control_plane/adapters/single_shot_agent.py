@@ -129,8 +129,17 @@ class SingleShotAgent:
                 raise MalformedReply("the reply hit the output cap")
             edits = _parse(response.text)
             _apply(workspace, edits)
-        except MalformedReply:
-            return AgentResult((invocation,), outcome=AgentOutcome.MALFORMED_OUTPUT)
+        except MalformedReply as error:
+            # The text and the reason both travel back. They used to die here:
+            # the reply was a local, the exception was caught bare, and the run
+            # recorded that the model had answered badly while keeping nothing
+            # that showed how.
+            return AgentResult(
+                (invocation,),
+                outcome=AgentOutcome.MALFORMED_OUTPUT,
+                raw_reply=response.text,
+                outcome_detail=str(error),
+            )
 
         return AgentResult((invocation,))
 

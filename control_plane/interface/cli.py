@@ -218,6 +218,10 @@ def _print_record(record: RunRecord) -> None:
     # this is the value someone reproduces a run from.
     if record.image_digest:
         print(f"  image       {record.image_digest}")
+    # Says why an outcome reads the way it does. Without it, malformed_output
+    # is a verdict with no evidence attached.
+    if record.agent_note:
+        print(f"  agent note  {record.agent_note}")
     if record.workspace_path:
         print(f"  workspace   {record.workspace_path}")
 
