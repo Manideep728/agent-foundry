@@ -64,8 +64,10 @@ make test     # tests only
 
 Without Docker and the image, the tests that start containers are skipped and
 say so. CI runs two jobs: `make check`, and a runner job that builds the
-supervisor and the image, runs every test with neither skipped, repeats the
-container tests under `docker run --init`, and runs `make doctor`.
+supervisor and the image, runs the suite with the container tests active,
+repeats those tests under `docker run --init`, and runs `make doctor`. One test
+skips even there: the `ollama` marker asks a real local model to answer, and the
+hosted runners have neither the server nor the pulled weights.
 
 `make help` lists the documented targets. Nothing in the project requires
 make; every target is a plain `uv`, `cmake` or `docker` command.

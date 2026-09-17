@@ -44,7 +44,10 @@ jobs:
 
   # The supervisor and everything that needs it: the native C++ suite, the
   # image, and the tests that start real containers. The control-plane job has
-  # no image, so its container tests skip; here none may skip.
+  # no image, so its container tests skip; here they run. The one remaining
+  # skip is the `ollama` marker, which needs a GPU and pulled weights no hosted
+  # runner has. `-rs` prints the reason for every skip, so a test that starts
+  # skipping for some other reason is visible in the log rather than silent.
   runner:
     name: runner
     runs-on: ubuntu-latest
