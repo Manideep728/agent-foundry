@@ -266,3 +266,13 @@ def test_a_command_that_ignores_sigterm_is_killed_after_the_grace_period(
     assert result.outcome is CommandOutcome.TIMEOUT
     assert result.deadline_signal_sent
     assert result.killed_after_grace
+
+
+def test_the_local_runner_reports_no_image_digest() -> None:
+    """None, never a sentinel string.
+
+    "" or "none" would satisfy a benchmark filter of `image_digest IS NOT
+    NULL`, letting a run with no isolation at all into a table of measured
+    ones -- the same failure `isolated` and `pid1` exist to prevent.
+    """
+    assert LocalRunner(RealClock()).image_digest is None

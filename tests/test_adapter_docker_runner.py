@@ -169,7 +169,11 @@ class FakeDocker:
         inspect_fails: bool = False,
         rm_fails: bool = False,
         plant: Callable[[Path], None] | None = None,
+        image_digest: bytes = b"sha256:" + b"a" * 64 + b"\n",
+        image_inspect_fails: bool = False,
     ) -> None:
+        self.image_digest = image_digest
+        self.image_inspect_fails = image_inspect_fails
         self.returncode = returncode
         self.result = result
         # Called with the result path during `docker run`, standing in for a
@@ -191,6 +195,13 @@ class FakeDocker:
         self, argv: list[str], timeout_s: float
     ) -> subprocess.CompletedProcess[bytes]:
         self.calls.append(argv)
+        # Before the `raises` check further down, so a test that makes
+        # `docker run` explode still answers the digest probe -- which is the
+        # whole point of reading it before the container starts.
+        if argv[:3] == ["docker", "image", "inspect"]:
+            if self.image_inspect_fails:
+                return subprocess.CompletedProcess(argv, 1, b"", b"No such image")
+            return subprocess.CompletedProcess(argv, 0, self.image_digest, b"")
         if argv[:2] == ["docker", "rm"]:
             if self.rm_fails:
                 return subprocess.CompletedProcess(argv, 1, b"", b"daemon went away")
@@ -349,8 +360,11 @@ def test_a_clean_run_is_inspected_then_removed(tmp_path: Path) -> None:
 
     runner.run(request)
 
-    assert docker.verbs() == ["run", "inspect", "rm"]
-    assert docker.calls[1][-1] == container_name(RUN_ID)
+    # "image" is the digest probe, and it comes first on purpose: the image is
+    # resolved before the container starts, so a run that dies still names the
+    # image it died in.
+    assert docker.verbs() == ["image", "run", "inspect", "rm"]
+    assert docker.calls[2][-1] == container_name(RUN_ID)
 
 
 @pytest.mark.parametrize(
@@ -498,3 +512,75 @@ def test_one_task_runs_end_to_end_in_docker(tmp_path: Path) -> None:
     assert record.runner_version == f"afrunner in docker image {IMAGE}"
 
     assert _leftover_containers("e2e-0001") == ""
+
+
+# --- the image digest -------------------------------------------------------
+
+
+DIGEST = "sha256:" + "a" * 64
+
+
+def test_the_image_is_resolved_before_the_container_starts(tmp_path: Path) -> None:
+    # Order is the design. Reading the digest from the post-run OOM inspect
+    # instead would leave it empty for every run that did not exit 0 or 7.
+    docker = FakeDocker(result=encode(sample_report()))
+    runner, request = _runner(tmp_path, docker)
+
+    runner.run(request)
+
+    assert docker.verbs()[0] == "image"
+    assert runner.image_digest == DIGEST
+
+
+def test_a_run_that_failed_still_reports_the_image_it_used(tmp_path: Path) -> None:
+    # The availability argument for reading it up front, as a test rather than
+    # a comment: this is the run whose provenance actually gets asked for.
+    docker = FakeDocker(3, stderr=b"afrunner: could not open /out")
+    runner, request = _runner(tmp_path, docker)
+
+    with pytest.raises(RunnerFailed):
+        runner.run(request)
+
+    assert runner.image_digest == DIGEST
+
+
+def test_a_garbled_image_inspect_is_not_stored_as_a_digest(tmp_path: Path) -> None:
+    # Docker exits 0 and prints a Go template error when the format is wrong.
+    # "<no value>" written into the provenance column looks like data for ever.
+    docker = FakeDocker(result=encode(sample_report()), image_digest=b"<no value>\n")
+    runner, request = _runner(tmp_path, docker)
+
+    with pytest.raises(RunnerUnavailable, match="not an image digest"):
+        runner.run(request)
+
+
+def test_a_missing_image_records_no_digest_and_lets_docker_run_explain(
+    tmp_path: Path,
+) -> None:
+    # Best effort on the call: `docker run --pull never` gives a far better
+    # message about a missing image than an inspect could, and replacing a good
+    # message with a worse one is a mistake this project has made before.
+    docker = FakeDocker(
+        result=encode(sample_report()),
+        image_inspect_fails=True,
+    )
+    runner, request = _runner(tmp_path, docker)
+
+    runner.run(request)
+
+    assert runner.image_digest is None
+
+
+def test_a_missing_docker_keeps_its_own_error(tmp_path: Path) -> None:
+    # The digest probe must not turn "docker is not installed" into a complaint
+    # about an inspect.
+    runner, request = _runner(tmp_path, FakeDocker(raises=FileNotFoundError("docker")))
+
+    with pytest.raises(RunnerUnavailable, match="not installed"):
+        runner.run(request)
+
+
+def test_a_runner_reports_no_digest_before_it_has_run(tmp_path: Path) -> None:
+    runner, _ = _runner(tmp_path, FakeDocker(result=encode(sample_report())))
+
+    assert runner.image_digest is None

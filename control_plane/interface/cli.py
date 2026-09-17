@@ -212,6 +212,12 @@ def _print_record(record: RunRecord) -> None:
     print(
         f"  runner      {record.runner_version}  pid1={record.pid1} arch={record.arch}"
     )
+    # Conditional, so the local runner's output is unchanged. A line reading
+    # "image None" on every development run is how a provenance field becomes
+    # noise that everyone learns to skip. Printed in full, not abbreviated:
+    # this is the value someone reproduces a run from.
+    if record.image_digest:
+        print(f"  image       {record.image_digest}")
     if record.workspace_path:
         print(f"  workspace   {record.workspace_path}")
 

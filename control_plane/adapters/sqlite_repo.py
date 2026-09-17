@@ -33,7 +33,7 @@ from control_plane.domain.validation import (
 )
 from control_plane.services.errors import ConcurrentModification, RunAlreadyExists
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA = (
     """
@@ -68,6 +68,7 @@ CREATE TABLE runs (
   agent_ms           INTEGER,
   validation_ms      INTEGER,
   workspace_path     TEXT,
+  image_digest       TEXT,
   CHECK ((state = 'failed') = (failure_kind IS NOT NULL)),
   CHECK (updated_at_unix_ms >= created_at_unix_ms),
   CHECK (pid1 IN (0, 1))
@@ -164,6 +165,17 @@ _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             "  pid1 = (SELECT v.pid1 FROM validation_reports v "
             "          WHERE v.run_id = runs.run_id) "
             "WHERE run_id IN (SELECT run_id FROM validation_reports)",
+        ),
+    ),
+    (
+        3,
+        (
+            # Nullable, which is also why this is one line. ALTER TABLE on a
+            # STRICT table may only add NOT NULL with a non-null default, and
+            # every candidate default here is a lie: the local runner has no
+            # image, and a run that never reached validation used none. NULL
+            # says exactly that, and cannot be mistaken for a digest.
+            "ALTER TABLE runs ADD COLUMN image_digest TEXT",
         ),
     ),
 )
@@ -386,7 +398,8 @@ class SqliteRunRepository:
                 "f2p_total = ?, p2p_passed = ?, p2p_total = ?, "
                 "timed_out_commands = ?, task_defect = ?, patch_sha256 = ?, "
                 "patch_bytes = ?, patch_is_empty = ?, total_cost_micros = ?, "
-                "agent_ms = ?, validation_ms = ?, workspace_path = ? "
+                "agent_ms = ?, validation_ms = ?, workspace_path = ?, "
+                "image_digest = ? "
                 "WHERE run_id = ? AND state = ?",
                 (
                     record.run.state.value,
@@ -417,6 +430,7 @@ class SqliteRunRepository:
                     _measure("agent_ms", record.agent_ms),
                     _measure("validation_ms", record.validation_ms),
                     record.workspace_path,
+                    record.image_digest,
                     record.run.run_id.value,
                     expected.value,
                 ),
@@ -583,6 +597,7 @@ class SqliteRunRepository:
             agent_ms=row["agent_ms"],
             validation_ms=row["validation_ms"],
             workspace_path=row["workspace_path"],
+            image_digest=row["image_digest"],
         )
 
     def _read_report(self, run_id: RunId) -> ValidationReport | None:

@@ -57,6 +57,27 @@ class ValidationRunner(Protocol):
         """
         ...
 
+    @property
+    def image_digest(self) -> str | None:
+        """The content address of the image the most recent `run()` used.
+
+        None for a runner with no image, before `run()` has been called, and
+        when the image could not be inspected. A benchmark table can require
+        `image_digest IS NOT NULL`, a stronger provenance filter than `pid1`
+        because it names the exact bytes rather than the arrangement.
+
+        A property rather than a second value returned from `run()`. The
+        alternative threads an outcome object through `_base_record`, `_fail`
+        and `_score`, and the paths that would forget to pass it are the
+        failure paths -- the least exercised, and the ones whose provenance is
+        most often asked for. Read where `runner_id` and `runner_version` are
+        already read, it cannot be forgotten by a caller.
+
+        Re-resolved at the top of every `run()`, so a runner reused across
+        tasks cannot report a previous task's image.
+        """
+        ...
+
     def run(self, request: ValidationRequest) -> ValidationReport: ...
 
 

@@ -243,6 +243,32 @@ image digest, so two images built under the same tag cannot be told apart in the
 data. Recording the digest is open work. Concurrent writers on one database are
 refused, as D17 describes.
 
+**Amendment, 2026-09-16.** The digest is now recorded, and the architecture a
+run reports is now the one it validated on. Two corrections:
+
+The digest is read with `docker image inspect --format '{{.Id}}'` before the
+container starts, rather than from the inspection that follows it, so that a run
+which failed still names the image it failed in — those are the runs whose
+provenance is most often asked for. The value is the local content address, not
+a repository digest: the validation image is built locally and never pushed, so
+it may carry no repository digest at all. A runner with no image records nothing
+rather than a placeholder, so `image_digest IS NOT NULL` is a usable filter for
+runs that were genuinely isolated. The column names the image the tag resolved
+to immediately before the container started; rebuilding the image mid-run would
+leave the record naming the older one, and passing the resolved identifier to
+`docker run` in place of the tag would close that. It has not been done.
+
+The architecture and `pid1` of a stored run were previously written once, before
+any container existed, and never corrected — so every stored run claimed an
+unknown architecture while the validation report beside it held the truth.
+
+**Amendment, 2026-09-16.** The schema carries a version and upgrades in place.
+An older database has each ordered step applied inside one transaction, so it
+cannot come out holding half an upgrade and a version number claiming all of it.
+A database written by a newer build is still refused rather than read. Refusing
+an older one as well was rejected: it discards recorded measurements to avoid
+writing a single `ALTER TABLE`.
+
 ---
 
 ## D12 — Durations and timestamps come from different clocks

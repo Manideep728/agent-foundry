@@ -193,6 +193,16 @@ class LocalRunner:
     def isolated(self) -> bool:
         return False
 
+    @property
+    def image_digest(self) -> str | None:
+        """None: there is no image. This runner executes on the host.
+
+        Deliberately not "" or "none". A sentinel string would satisfy a
+        benchmark filter of `image_digest IS NOT NULL` and let an unisolated
+        development run into a table of measured ones.
+        """
+        return None
+
     def run(self, request: ValidationRequest) -> ValidationReport:
         request.log_dir.mkdir(parents=True, exist_ok=True)
 

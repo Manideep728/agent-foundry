@@ -331,6 +331,12 @@ class EvaluationService:
             runner_version=self._runner.runner_version,
             arch=report.arch if report is not None else UNKNOWN_ARCH,
             pid1=report.pid1 if report is not None else False,
+            # Not guarded on `report is not None`, unlike arch and pid1. The
+            # adapter's own state already means the right thing -- None until a
+            # container has been started for this run -- so guarding it here
+            # would empty the column on exactly the failure paths the pre-run
+            # inspect exists to cover.
+            image_digest=self._runner.image_digest,
             report=report,
             score=score_result,
             outcome=outcome,

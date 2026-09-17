@@ -242,6 +242,7 @@ def test_an_unavailable_runner_is_infrastructure_not_the_agent(
         runner_id = "docker"
         runner_version = "docker 0"
         isolated = True
+        image_digest = None
 
         def run(self, request: ValidationRequest) -> ValidationReport:
             raise RunnerUnavailable("cannot connect to the Docker daemon")
@@ -263,6 +264,7 @@ def test_a_runner_that_produces_no_result_is_a_runner_failure(
         runner_id = "docker"
         runner_version = "docker 0"
         isolated = True
+        image_digest = None
 
         def run(self, request: ValidationRequest) -> ValidationReport:
             raise RunnerFailed("result.json was truncated")
@@ -316,6 +318,7 @@ class StubRunner:
     runner_id = "stub"
     runner_version = "stub 0"
     isolated = False
+    image_digest = None
 
     def __init__(self, report: ValidationReport) -> None:
         self._report = report
@@ -471,6 +474,7 @@ def test_a_failed_run_keeps_its_workspace_for_inspection(tmp_path: Path) -> None
         runner_id = "stub"
         runner_version = "stub 0"
         isolated = False
+        image_digest = None
 
         def run(self, request: ValidationRequest) -> ValidationReport:
             raise RunnerFailed("nothing came back")
@@ -497,6 +501,7 @@ def test_a_precondition_violation_is_not_swallowed(tmp_path: Path) -> None:
         runner_id = "stub"
         runner_version = "stub 0"
         isolated = False
+        image_digest = None
 
         def run(self, request: ValidationRequest) -> ValidationReport:
             raise PreconditionViolated("the domain was called wrongly")
@@ -505,3 +510,47 @@ def test_a_precondition_violation_is_not_swallowed(tmp_path: Path) -> None:
     with pytest.raises(PreconditionViolated):
         service.execute(task())
     repo.close()
+
+
+# --- the image digest reaches the row ---------------------------------------
+
+
+class ImagedRunner(LocalRunner):
+    """A runner that names its image, as the Docker runner does.
+
+    Subclasses the real local runner rather than stubbing a report, so the
+    digest travels the whole path a real run takes: adapter property ->
+    _base_record -> finish() -> the row -> _hydrate.
+    """
+
+    @property
+    def image_digest(self) -> str | None:
+        return "sha256:" + "b" * 64
+
+
+def test_a_run_that_validated_records_the_image_it_validated_in(
+    tmp_path: Path,
+) -> None:
+    """The digest must survive the round trip, not merely reach the record.
+
+    Every environment fact that has gone wrong in this project went wrong in
+    storage rather than in memory, and was invisible because the assertion was
+    made on the object the test had just built.
+    """
+    service, repo = build(tmp_path, runner=ImagedRunner(RealClock()))
+    record = service.execute(load_task(TASK_FILE))
+
+    stored = repo.get(record.run.run_id)
+    assert stored is not None
+    assert stored.image_digest == "sha256:" + "b" * 64
+
+
+def test_a_run_on_a_runner_with_no_image_records_none(tmp_path: Path) -> None:
+    # The local runner has no image. Storing "" or "none" here would let an
+    # unisolated run satisfy `image_digest IS NOT NULL`.
+    service, repo = build(tmp_path)
+    record = service.execute(load_task(TASK_FILE))
+
+    stored = repo.get(record.run.run_id)
+    assert stored is not None
+    assert stored.image_digest is None

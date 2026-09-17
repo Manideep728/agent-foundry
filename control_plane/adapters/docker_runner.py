@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import stat
 import subprocess
 from collections.abc import Callable
@@ -61,6 +62,10 @@ _HOST_MARGIN_MS = 30_000
 _MAX_RESULT_BYTES = 16 * 1024 * 1024
 
 _DOCKER_CALL_TIMEOUT_S = 30.0
+
+# Docker can exit 0 and print a Go template error, so the answer is matched
+# rather than trusted.
+_IMAGE_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 
 
 def _current_user() -> str:
@@ -201,6 +206,7 @@ class DockerRunner:
     ) -> None:
         self._config = config or DockerConfig()
         self._run_process = run_process
+        self._image_digest: str | None = None
 
     @property
     def runner_id(self) -> str:
@@ -214,7 +220,57 @@ class DockerRunner:
     def isolated(self) -> bool:
         return True
 
+    @property
+    def image_digest(self) -> str | None:
+        return self._image_digest
+
+    def _resolve_image_digest(self) -> str | None:
+        """The content address of the image this run will validate in.
+
+        `.Id`, not `RepoDigests[0]`: a repository digest comes from a registry,
+        and `afrunner:local` is built by `make runner-image` and never pushed,
+        so that list can be empty and the template would error. `.Id` is the
+        local content address and always exists.
+
+        Best effort on the *call*, strict on the *answer*. If Docker is absent
+        or the image is missing there is nothing to record, and `docker run
+        --pull never` is about to say so far better than an inspect could --
+        replacing a good message with a worse one is the mistake `70178ca`
+        fixed once already. But an inspect that exits 0 and answers something
+        that is not a digest means this is not talking to Docker, and
+        `<no value>` must never be stored as provenance: it looks like data.
+        """
+        try:
+            completed = self._run_process(
+                [
+                    "docker",
+                    "image",
+                    "inspect",
+                    "--format",
+                    "{{.Id}}",
+                    self._config.image,
+                ],
+                _DOCKER_CALL_TIMEOUT_S,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return None
+        if completed.returncode != 0:
+            return None
+        answer = completed.stdout.strip().decode("ascii", errors="replace")
+        if not _IMAGE_DIGEST.fullmatch(answer):
+            raise RunnerUnavailable(
+                f"docker image inspect {self._config.image} exited 0 but "
+                f"answered {answer!r}, which is not an image digest"
+            )
+        return answer
+
     def run(self, request: ValidationRequest) -> ValidationReport:
+        # Before the container, not after it. The OOM inspect runs only for
+        # exits 0 and 7, so reading the digest there would leave it empty for
+        # every run that died -- image missing, daemon down, 137, afrunner
+        # crashing -- which are exactly the runs whose provenance gets asked
+        # for. One extra call buys a column that is populated when it matters.
+        self._image_digest = self._resolve_image_digest()
         inbox = inbox_for(request)
         inbox.mkdir(exist_ok=True)
         (inbox / "commands.txt").write_text(

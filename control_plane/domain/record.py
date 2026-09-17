@@ -59,6 +59,19 @@ class RunRecord:
     validation_ms: int | None = None
     workspace_path: str | None = None
 
+    image_digest: str | None = None
+    """The content address of the image validation ran in.
+
+    None for a runner that has no image, and for a run that died before any
+    container started. Both are honestly "no image", and a sentinel string
+    would let an unisolated development run satisfy a benchmark filter of
+    `image_digest IS NOT NULL` -- the same failure `pid1` exists to prevent.
+
+    The spelling is not checked here. Docker writes `sha256:...` and another
+    runtime would write something else; this record is runner-agnostic, and the
+    adapter that produced the value is the layer that knows its format.
+    """
+
     def __post_init__(self) -> None:
         scored = self.run.state is RunState.SCORED
 
@@ -122,6 +135,14 @@ class RunRecord:
             value = getattr(self, name)
             if value is not None and value < 0:
                 raise PreconditionViolated(f"{name} must be >= 0")
+
+        # None means "no image". The empty string means an adapter looked and
+        # wrote down whatever it got, which is the one answer this must not
+        # store as provenance.
+        self._require(
+            self.image_digest != "",
+            "image_digest is None or a digest, never the empty string",
+        )
 
     def _require(self, condition: bool, message: str) -> None:
         if not condition:
