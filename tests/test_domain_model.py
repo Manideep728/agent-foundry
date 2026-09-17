@@ -15,6 +15,7 @@ from control_plane.domain.model import (
     ModelResponse,
     ModelUsage,
     TokenPrice,
+    ToolSpec,
     ceil_div,
     cost_micros,
     total_micros,
@@ -199,7 +200,11 @@ def test_a_fake_provider_satisfies_the_model_port() -> None:
         provider_id = "fake"
         model_id = "scripted"
 
-        def complete(self, messages: tuple[Message, ...]) -> ModelResponse:
+        def complete(
+            self,
+            messages: tuple[Message, ...],
+            tools: tuple[ToolSpec, ...] = (),
+        ) -> ModelResponse:
             return ModelResponse(
                 text=f"saw {len(messages)} messages",
                 usage=ModelUsage(input_tokens=10, output_tokens=5),

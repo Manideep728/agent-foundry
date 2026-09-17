@@ -19,7 +19,13 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-from control_plane.domain.model import Message, ModelResponse, ModelUsage
+from control_plane.domain.model import (
+    Message,
+    ModelResponse,
+    ModelUsage,
+    ToolCall,
+    ToolSpec,
+)
 from control_plane.services.errors import AgentError
 
 PROVIDER_ID = "ollama"
@@ -66,15 +72,32 @@ class OllamaClient:
     def model_id(self) -> str:
         return self._model
 
-    def complete(self, messages: tuple[Message, ...]) -> ModelResponse:
+    def complete(
+        self,
+        messages: tuple[Message, ...],
+        tools: tuple[ToolSpec, ...] = (),
+    ) -> ModelResponse:
         payload: dict[str, Any] = {
             "model": self._model,
-            "messages": [
-                {"role": m.role.value, "content": m.content} for m in messages
-            ],
+            "messages": [_encode_message(m) for m in messages],
             "stream": False,
             "options": {"temperature": self._temperature, "seed": self._seed},
         }
+        if tools:
+            # Omitted entirely when empty rather than sent as []. Some builds
+            # switch to a tool-calling prompt template on the key's presence,
+            # which would change single-shot replies for no reason.
+            payload["tools"] = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.parameters,
+                    },
+                }
+                for tool in tools
+            ]
         if self._num_predict is not None:
             payload["options"]["num_predict"] = self._num_predict
 
@@ -118,6 +141,64 @@ class OllamaClient:
         return decoded
 
 
+def _encode_message(message: Message) -> dict[str, Any]:
+    """One message in Ollama's wire shape.
+
+    An assistant turn that asked for tools is replayed with its tool calls
+    intact. Dropping them makes the model see its own request disappear from
+    the history, and it asks again -- a loop that burns its whole turn budget
+    repeating one call.
+    """
+    encoded: dict[str, Any] = {"role": message.role.value, "content": message.content}
+    if message.tool_calls:
+        encoded["tool_calls"] = [
+            {"function": {"name": call.name, "arguments": call.arguments}}
+            for call in message.tool_calls
+        ]
+    if message.tool_name is not None:
+        encoded["tool_name"] = message.tool_name
+    return encoded
+
+
+def _decode_tool_calls(message: dict[str, Any]) -> tuple[ToolCall, ...]:
+    """The tools the model asked for, if any.
+
+    Shape is checked, contents are not. A name that is not a tool, or arguments
+    with the wrong keys, is the model using the tools badly -- which is a
+    measurement the agent reports, not a transport fault. What is refused here
+    is a body that is not the documented shape at all, because guessing at that
+    would turn a provider change into wrong data rather than an error.
+    """
+    raw = message.get("tool_calls")
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise AgentError(
+            f"ollama returned tool_calls as {type(raw).__name__}, not a list"
+        )
+
+    calls: list[ToolCall] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            raise AgentError("ollama returned a tool call that is not an object")
+        function = entry.get("function")
+        if not isinstance(function, dict):
+            raise AgentError("ollama returned a tool call with no function object")
+        name = function.get("name")
+        if not isinstance(name, str) or not name:
+            raise AgentError("ollama returned a tool call with no name")
+        arguments = function.get("arguments", {})
+        if arguments is None:
+            arguments = {}
+        if not isinstance(arguments, dict):
+            raise AgentError(
+                f"ollama returned arguments for {name} as "
+                f"{type(arguments).__name__}, not an object"
+            )
+        calls.append(ToolCall(name=name, arguments=dict(arguments)))
+    return tuple(calls)
+
+
 def _count(body: dict[str, Any], key: str) -> int:
     """A token count from the response, absent meaning zero.
 
@@ -157,6 +238,7 @@ def _decode(body: dict[str, Any]) -> ModelResponse:
 
     return ModelResponse(
         text=message["content"],
+        tool_calls=_decode_tool_calls(message),
         usage=ModelUsage(
             input_tokens=prompt_total - cached,
             output_tokens=_count(body, "eval_count"),

@@ -22,6 +22,7 @@ from control_plane.domain.model import (
     ModelResponse,
     ModelUsage,
     TokenPrice,
+    ToolSpec,
     cost_micros,
 )
 from control_plane.domain.ports import Clock
@@ -47,7 +48,11 @@ class ScriptedModelClient:
     def model_id(self) -> str:
         return MODEL_ID
 
-    def complete(self, messages: tuple[Message, ...]) -> ModelResponse:
+    def complete(
+        self,
+        messages: tuple[Message, ...],
+        tools: tuple[ToolSpec, ...] = (),
+    ) -> ModelResponse:
         self.calls.append(messages)
         return ModelResponse(
             text=self._reply,

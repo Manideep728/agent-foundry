@@ -18,7 +18,7 @@ from control_plane.adapters.task_toml import load_task
 from control_plane.adapters.workspace import WorkspaceFactory
 from control_plane.domain.fixture import FixtureEntry
 from control_plane.domain.ids import RunId
-from control_plane.domain.model import Message, ModelResponse, ModelUsage
+from control_plane.domain.model import Message, ModelResponse, ModelUsage, ToolSpec
 from control_plane.domain.outcomes import AgentOutcome
 from control_plane.domain.task import TaskDefinition
 from control_plane.services.errors import AgentError
@@ -47,7 +47,11 @@ class StubClient:
     def model_id(self) -> str:
         return "stub-1"
 
-    def complete(self, messages: tuple[Message, ...]) -> ModelResponse:
+    def complete(
+        self,
+        messages: tuple[Message, ...],
+        tools: tuple[ToolSpec, ...] = (),
+    ) -> ModelResponse:
         self.prompts.append(messages)
         return ModelResponse(
             text=self._text,

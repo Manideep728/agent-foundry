@@ -158,12 +158,54 @@ class MessageRole(StrEnum):
     SYSTEM = "system"
     USER = "user"
     ASSISTANT = "assistant"
+    TOOL = "tool"
+    """A tool's answer, fed back so the model can act on it.
+
+    A separate role rather than another user turn: a model trained on tool use
+    treats the two differently, and flattening them loses the distinction
+    between what the operator asked for and what the harness observed.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCall:
+    """One request from the model to run a tool.
+
+    `arguments` is whatever the provider decoded, unvalidated. The model may
+    send a missing key or a number where a path belongs, and deciding what to
+    do about that is the agent's job -- a bad argument is a measurement, not a
+    transport error.
+    """
+
+    name: str
+    arguments: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class ToolSpec:
+    """A tool as it is offered to the model."""
+
+    name: str
+    description: str
+    parameters: dict[str, object]
+    """JSON Schema for the arguments, passed to the provider unchanged."""
 
 
 @dataclass(frozen=True, slots=True)
 class Message:
     role: MessageRole
     content: str
+
+    tool_calls: tuple[ToolCall, ...] = ()
+    """Set on an assistant turn that asked for tools, when it is replayed.
+
+    The conversation sent on turn N+1 must contain the assistant turn from turn
+    N exactly as it was, or the model sees its own tool call vanish and repeats
+    it for ever.
+    """
+
+    tool_name: str | None = None
+    """Which tool a TOOL message answers. Providers match replies by name."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +214,13 @@ class ModelResponse:
 
     text: str
     usage: ModelUsage
+
+    tool_calls: tuple[ToolCall, ...] = ()
+    """Tools the model asked to run before it can answer.
+
+    Empty for a provider that was offered none, and for a turn where the model
+    chose to answer directly. A reply may carry both text and tool calls.
+    """
 
     truncated: bool = False
     """Whether the provider stopped at the output cap rather than finishing.
@@ -224,4 +273,14 @@ class ModelClient(Protocol):
     @property
     def model_id(self) -> str: ...
 
-    def complete(self, messages: tuple[Message, ...]) -> ModelResponse: ...
+    def complete(
+        self,
+        messages: tuple[Message, ...],
+        tools: tuple[ToolSpec, ...] = (),
+    ) -> ModelResponse:
+        """Answer, optionally being allowed to ask for tools first.
+
+        Defaulted rather than required, so a client that cannot offer tools and
+        a caller that does not want them both keep working unchanged.
+        """
+        ...
