@@ -14,7 +14,7 @@ run twice produces two comparable records.
 
 ## Status
 
-Phase 5. One task runs end to end: the harness verifies a fixture against its
+Phase 6. Five tasks run end to end: the harness verifies a fixture against its
 pinned content hash, copies it to an isolated workspace, invokes an agent,
 captures the patch, executes the repository's own tests inside a container,
 scores the result and stores it.
@@ -45,7 +45,18 @@ isolation, no resource limits and no network restriction -- development only.
 Every run it produces records `pid1=false` and a runner version naming it, so
 those rows are identifiable in the data rather than only in this paragraph.
 
-One benchmark task exists. No benchmark results are published.
+Every run records the environment it validated in: the architecture, whether
+the supervisor was PID 1, and the content digest of the image. A run that
+cannot name the environment that produced it is not reproducible, so a
+benchmark table can require those fields rather than trusting them.
+
+The database carries a schema version and upgrades itself in place when an
+older one is opened. A database written by a newer build is refused rather than
+read, because a field may have changed meaning and guessing produces plausible
+wrong data.
+
+Five benchmark tasks exist, of deliberately varied difficulty. No benchmark
+results are published.
 
 Design decisions are in [docs/DECISIONS.md](docs/DECISIONS.md). The interface
 between the control plane and the supervisor is in
@@ -108,15 +119,16 @@ Build the image first (`make runner-image`).
 
 ```
 $ uv run af run tasks/csv-quoted-fields.toml
-run 20260915-070407-f7225053  csv-quoted-fields  [synthetic]
+run 20260917-030423-1d5f524b  csv-quoted-fields  [synthetic]
   state       scored
   outcome     clean_patch
   resolved    yes         regressed   no
   fail->pass  1/1          pass->pass  1/1
-  duration    agent 2ms   validation 1121ms
+  duration    agent 1ms   validation 1227ms
   cost        0 micro-USD  (fake/scripted)
   patch       1391 bytes
   runner      afrunner in docker image afrunner:local  pid1=True arch=x86_64
+  image       sha256:f1d7ad1eab4534bc1dc5ef1a6899f15a1e0da6e97ab7bfe667b092c9e2f81407
 ```
 
 `--image` selects a different validation image. `--runner local` skips Docker
@@ -144,35 +156,47 @@ did its job; the agent did not.
 
 ## Agents
 
-Two agents exist behind one interface.
+Three agents exist behind one interface, so they are comparable on the same
+suite rather than each having its own.
 
 `--agent fake` is the default. It applies a known solution from
 `tasks/solutions/` and calls no model, so the pipeline runs offline and in CI.
 
-`--agent ollama` sends the task and the visible files to a local model and
-applies the files it sends back. It runs at temperature 0 with a fixed seed:
-two runs of the same task against the same model produce byte-identical
-patches. Token counts are recorded and the cost is zero, which is the honest
-figure for a model that cost nothing to call.
+`--agent ollama` sends the task and the visible files to a local model in one
+prompt and applies the files it sends back. It runs at temperature 0 with a
+fixed seed: two runs of the same task against the same model produce
+byte-identical patches. Token counts are recorded and the cost is zero, which
+is the honest figure for a model that cost nothing to call.
+
+`--agent tools` gives the model three tools -- list the files, read one, write
+one -- and a budget of turns, set by `--max-turns`. Each turn is recorded as
+its own invocation, so the loop's cost is the sum of its calls rather than its
+last one. It is not a replacement for the single-shot agent: the two answer the
+same tasks through different amounts of context, and which is worth the tokens
+is a measurement, not a preference.
 
 The tests that decide a task's score can be listed as `hidden_paths` and are
-then kept out of the agent's prompt. They are still copied and still run; an
-agent shown the tests that grade it is being handed the answer.
+then kept out of the agent's prompt, and out of what the tools will list or
+read. They are still copied and still run; an agent shown the tests that grade
+it is being handed the answer.
 
 A reply the harness cannot read as an edit is scored `malformed_output` rather
 than treated as an error. Failing to follow the output format is something a
-model does, so it is measured like anything else it does.
+model does, so it is measured like anything else it does. The reply is kept
+next to the patch, with one line saying what was wrong with it, because a
+malformed-output rate nobody can inspect cannot be acted on.
 
 ```
 af run tasks/csv-quoted-fields.toml --agent ollama --model qwen2.5-coder:3b
+af run tasks/template-render.toml --agent tools --max-turns 8
 ```
 
 ## Planned scope
 
 The C++ supervisor, the Python control plane and CLI, Docker-isolated
-validation, test-based scoring, SQLite storage and a local-model agent exist.
-The first release also needs more benchmark tasks, report generation, and a
-hosted-provider adapter.
+validation, test-based scoring, SQLite storage with in-place schema upgrades,
+five benchmark tasks and two local-model agents exist. The first release also
+needs report generation and a hosted-provider adapter.
 
 Distributed execution, automatic pull requests, and a web interface are outside
 the first release.
@@ -186,6 +210,13 @@ the first release.
   Linux-only by design.
 - **`--runner local` is not a sandbox.** Point it only at fixtures whose
   contents are already trusted.
+- **`--agent tools` has no end-to-end measurement yet.** The loop is tested
+  against a scripted model, but the 3B model developed against advertises
+  tool-calling support and then writes its tool calls into the message body,
+  often as text that is not valid JSON. Every real run of it so far is scored
+  `malformed_output`. A larger model is the next step; no attempt is made to
+  repair malformed calls, because guessing at one produces a plausible patch
+  from a misread reply, which is worse than refusing it.
 
 Benchmark numbers, when they exist, will name the machine that produced them
 and be reported as ranges across runs. Results from different model providers
