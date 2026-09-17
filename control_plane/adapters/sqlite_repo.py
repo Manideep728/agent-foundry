@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterator
-from contextlib import closing
+from contextlib import closing, suppress
 from pathlib import Path
 
 from control_plane.domain.ids import RunId, TaskId
@@ -33,9 +33,10 @@ from control_plane.domain.validation import (
 )
 from control_plane.services.errors import ConcurrentModification, RunAlreadyExists
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
-_SCHEMA = """
+_SCHEMA = (
+    """
 CREATE TABLE runs (
   run_id             TEXT PRIMARY KEY,
   task_id            TEXT NOT NULL,
@@ -71,7 +72,8 @@ CREATE TABLE runs (
   CHECK (updated_at_unix_ms >= created_at_unix_ms),
   CHECK (pid1 IN (0, 1))
 ) STRICT;
-
+""",
+    """
 CREATE TABLE validation_reports (
   run_id               TEXT PRIMARY KEY REFERENCES runs(run_id) ON DELETE CASCADE,
   schema_version       INTEGER NOT NULL,
@@ -86,7 +88,8 @@ CREATE TABLE validation_reports (
   aborted              INTEGER NOT NULL,
   orphans_reaped_total INTEGER NOT NULL
 ) STRICT;
-
+""",
+    """
 CREATE TABLE command_results (
   run_id               TEXT NOT NULL
       REFERENCES validation_reports(run_id) ON DELETE CASCADE,
@@ -116,7 +119,8 @@ CREATE TABLE command_results (
   stderr_tail          TEXT NOT NULL,
   PRIMARY KEY (run_id, idx)
 ) STRICT;
-
+""",
+    """
 CREATE TABLE model_invocations (
   run_id             TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
   seq                INTEGER NOT NULL,
@@ -130,7 +134,39 @@ CREATE TABLE model_invocations (
   latency_ms         INTEGER NOT NULL,
   PRIMARY KEY (run_id, seq)
 ) STRICT;
-"""
+""",
+)
+
+
+# Ordered upgrade steps, each naming the version it produces. A step may add a
+# column, or repair data from a table that already holds the truth.
+#
+# A step may NOT add a table-level CHECK: SQLite's ALTER TABLE cannot express
+# one, so `_SCHEMA` and this list would go on to describe different databases
+# depending on whether a file was created or upgraded. That rule is enforced by
+# test_a_migrated_database_matches_a_fresh_one, not by this comment.
+_TABLES = ("runs", "validation_reports", "command_results", "model_invocations")
+
+_MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
+    (
+        2,
+        (
+            # Repair for the environment columns. `create()` writes them before
+            # any container exists -- arch 'unknown', pid1 0 -- and `finish()`
+            # did not rewrite them until `351cdd6`, so every run stored before
+            # that kept the placeholder. validation_reports has held the true
+            # values the whole time, so this copies from an authority rather
+            # than guessing. Runs that never reached validation have no report
+            # and are left alone: 'unknown' is the honest answer for them.
+            "UPDATE runs SET "
+            "  arch = (SELECT v.arch FROM validation_reports v "
+            "          WHERE v.run_id = runs.run_id), "
+            "  pid1 = (SELECT v.pid1 FROM validation_reports v "
+            "          WHERE v.run_id = runs.run_id) "
+            "WHERE run_id IN (SELECT run_id FROM validation_reports)",
+        ),
+    ),
+)
 
 
 def _flag(value: bool) -> int:
@@ -156,32 +192,108 @@ class SqliteRunRepository:
 
     def __init__(self, path: Path) -> None:
         self._path = path
-        fresh = not path.exists()
         self._conn = sqlite3.connect(path)
         self._conn.row_factory = sqlite3.Row
         # Foreign keys are per-connection, not stored in the file.
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.execute("PRAGMA busy_timeout = 5000")
-        if fresh:
-            # WAL persists in the file, so it is set once at creation. A reader
-            # then does not block the writer, and a crash mid-write leaves a
-            # recoverable database rather than a corrupt one.
+        try:
+            # Unconditional, where this used to run only when creating the
+            # file. WAL persists in the file, so setting it at creation was
+            # correct for a database this code made and silently skipped for
+            # one it did not -- such as the empty file a crashed create leaves.
+            # Re-setting costs one pragma and removes an invisible dependency
+            # on who made the file. It cannot run inside a transaction, so it
+            # happens before _prepare opens one.
+            #
+            # It is also the first statement to read page 1, so it is where a
+            # file that is not a database announces itself. That wrap covers
+            # this line only: a failure inside _prepare is a broken migration,
+            # and reporting that as "not a SQLite database" would send the
+            # reader to check the wrong thing entirely.
             self._conn.execute("PRAGMA journal_mode = WAL")
-            self._conn.executescript(_SCHEMA)
-            self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-            self._conn.commit()
-        self._check_version()
+        except sqlite3.DatabaseError as error:
+            # Without this the caller gets a bare "file is not a database"
+            # naming nothing, and the connection leaks on the way out.
+            self._conn.close()
+            raise RuntimeError(f"{path} is not a SQLite database: {error}") from error
 
-    def _check_version(self) -> None:
-        version = int(self._conn.execute("PRAGMA user_version").fetchone()[0])
-        if version > SCHEMA_VERSION:
-            # Refused rather than best-effort read, for the same reason a
-            # newer ValidationReport schema is refused: a field may mean
-            # something different now, and guessing yields plausible wrong data.
-            raise RuntimeError(
-                f"{self._path} was written by a newer build (schema {version}); "
-                f"this one understands {SCHEMA_VERSION}"
-            )
+        try:
+            self._prepare()
+        except BaseException:
+            self._conn.close()
+            raise
+
+    def _prepare(self) -> None:
+        """Create the schema, or upgrade it, atomically and without racing.
+
+        IMMEDIATE takes the write lock *before* the version is read, so two
+        processes opening the same file cannot both read version 1 and both
+        decide to migrate. `af show` and `af list` open the repository without
+        the run lock D17 describes, so that is reachable rather than
+        theoretical.
+
+        The explicit BEGIN is required rather than stylistic. Python's sqlite3
+        opens an implicit transaction only before DML, so DDL under
+        `with self._conn` runs in autocommit and a rollback would undo nothing
+        -- leaving a database carrying half an upgrade and a version number
+        claiming all of it.
+        """
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            version = int(self._conn.execute("PRAGMA user_version").fetchone()[0])
+            if version > SCHEMA_VERSION:
+                # Refused rather than best-effort read, for the same reason a
+                # newer ValidationReport schema is refused: a field may mean
+                # something different now, and guessing yields plausible wrong
+                # data.
+                raise RuntimeError(
+                    f"{self._path} was written by a newer build (schema {version}); "
+                    f"this one understands {SCHEMA_VERSION}"
+                )
+            if version == 0 and not self._has_tables():
+                self._create()
+            else:
+                self._migrate(version)
+            self._conn.execute("COMMIT")
+        except BaseException:
+            # A rollback that fails must not replace the real error.
+            with suppress(sqlite3.Error):
+                self._conn.execute("ROLLBACK")
+            raise
+
+    def _has_tables(self) -> bool:
+        """Whether this database has a schema yet.
+
+        Freshness is a property of the database, not of the file. A zero-byte
+        file is a perfectly valid empty SQLite database, and testing
+        `path.exists()` called it old and left it schemaless -- so the first
+        query died with `no such table: runs`, blaming the query.
+        """
+        row = self._conn.execute(
+            "SELECT count(*) FROM sqlite_master "
+            "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+        ).fetchone()
+        return int(row[0]) > 0
+
+    def _create(self) -> None:
+        for statement in _SCHEMA:
+            self._conn.execute(statement)
+        # A PRAGMA takes no bound parameters, hence the f-string. The value is
+        # a module constant int and never reaches here from input.
+        self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    def _migrate(self, version: int) -> None:
+        for target, statements in _MIGRATIONS:
+            if target <= version:
+                continue
+            for statement in statements:
+                self._conn.execute(statement)
+            # Bumped per step, inside the transaction that ran the step.
+            # user_version lives in the file header and is journalled like any
+            # other page, so a crash mid-upgrade rolls the version back with
+            # the DDL and never leaves a database claiming a schema it lacks.
+            self._conn.execute(f"PRAGMA user_version = {target}")
 
     def close(self) -> None:
         self._conn.close()
@@ -550,12 +662,35 @@ class SqliteRunRepository:
 
     def column_types(self) -> Iterator[tuple[str, str, str]]:
         """(table, column, declared type) for every column. Used by a test."""
-        for table in (
-            "runs",
-            "validation_reports",
-            "command_results",
-            "model_invocations",
-        ):
+        for table in _TABLES:
             with closing(self._conn.execute(f"PRAGMA table_info({table})")) as cursor:
                 for row in cursor.fetchall():
                     yield table, row["name"], row["type"]
+
+    def table_shapes(self) -> dict[str, dict[str, tuple[tuple[object, ...], ...]]]:
+        """Every table's normalised structure. Used by a test.
+
+        Deliberately not `sqlite_master.sql`. ALTER TABLE ADD COLUMN patches the
+        *stored text* of the CREATE TABLE statement, inserting the new column
+        before the closing paren -- which on `runs` puts it after the three
+        table-level CHECKs, where a hand-written schema puts it among the
+        columns. A migrated table's SQL text therefore never matches a fresh
+        one even when the two behave identically, so comparing text would give
+        a test that fails on day one for a cosmetic reason and is then deleted.
+
+        These pragmas report the facts that behave: name, declared type, NOT
+        NULL, default, primary-key rank, indexes and foreign keys. Known gap,
+        stated rather than papered over: table_info does not expose CHECK
+        constraints, which is exactly why `_MIGRATIONS` carries the rule that a
+        step may not add one.
+        """
+        return {
+            table: {
+                pragma: tuple(
+                    tuple(row)
+                    for row in self._conn.execute(f"PRAGMA {pragma}({table})")
+                )
+                for pragma in ("table_info", "index_list", "foreign_key_list")
+            }
+            for table in _TABLES
+        }
