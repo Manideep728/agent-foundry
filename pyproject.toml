@@ -52,6 +52,14 @@ markers = [
 [tool.ruff]
 line-length = 88
 target-version = "py312"
+# Fixtures are benchmark data, not project source. Their defects are the
+# measurement, and some are things a linter objects to: template-render's
+# broken version imports an escaper it never calls, which *is* the bug.
+# Linting them would either delete the bug or restrict every future task to
+# one no linter can see, narrowing the benchmark to suit the tooling.
+# conftest.py already keeps pytest out of `tasks/` for the same reason, and
+# mypy is already scoped to `control_plane tests`.
+extend-exclude = ["tasks"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]

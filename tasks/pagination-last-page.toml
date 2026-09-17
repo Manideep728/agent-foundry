@@ -1,0 +1,28 @@
+schema_version = 1
+
+[task]
+id = "pagination-last-page"
+suite = "synthetic"
+description = """
+paging.pages.paginate must split a sequence into pages of at most per_page entries, keeping every entry exactly once and in order. When the count does not divide evenly the final page holds the remainder, and it is currently dropped instead.
+"""
+
+[fixture]
+id = "pagination-last-page"
+sha256 = "3cc9420c574085be0d0f0af5835fa747a201c0e2c5f6bf334de63297e37311f2"
+# Kept out of the agent's prompt (D18). Showing the fail-to-pass test hands over
+# the answer. test_exact.py stays visible: a regression suite for the evenly
+# divisible case is what a repository would really already have.
+hidden_paths = ["tests/test_partial.py"]
+
+[timeouts]
+per_command_ms = 30000
+total_ms = 120000
+
+[[commands]]
+role = "fail_to_pass"
+command = "python3 -m unittest tests.test_partial"
+
+[[commands]]
+role = "pass_to_pass"
+command = "python3 -m unittest tests.test_exact"

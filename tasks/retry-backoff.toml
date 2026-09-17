@@ -1,0 +1,28 @@
+schema_version = 1
+
+[task]
+id = "retry-backoff"
+suite = "synthetic"
+description = """
+retry.backoff.delays must return the waits between retry attempts, each double the one before it starting at base_ms, and none of them above cap_ms. The doubling is currently unbounded, so a long schedule runs far past the cap.
+"""
+
+[fixture]
+id = "retry-backoff"
+sha256 = "f809067c2aafb563a221c5a883f0a058af8c8dd24162493f1442c2b3e644be30"
+# Kept out of the agent's prompt (D18). test_growth.py stays visible: the
+# doubling, the count and the refusals already work, and are what an existing
+# regression suite would hold.
+hidden_paths = ["tests/test_cap.py"]
+
+[timeouts]
+per_command_ms = 30000
+total_ms = 120000
+
+[[commands]]
+role = "fail_to_pass"
+command = "python3 -m unittest tests.test_cap"
+
+[[commands]]
+role = "pass_to_pass"
+command = "python3 -m unittest tests.test_growth"

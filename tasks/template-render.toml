@@ -1,0 +1,28 @@
+schema_version = 1
+
+[task]
+id = "template-render"
+suite = "synthetic"
+description = """
+tmpl.render.render must escape every value it substitutes into a template, so a value carrying markup is shown as text rather than injected as elements. The literal text of the template is trusted and must survive unescaped. Values are currently substituted raw, and tmpl.escaping.escape_html does not yet escape the double quote that attribute values need.
+"""
+
+[fixture]
+id = "template-render"
+sha256 = "0c4b615aef4dd006ff2ecab8730b14a04d45bff809077353f7ecf6cb1f72ead3"
+# Kept out of the agent's prompt (D18). test_substitution.py stays visible:
+# placeholder filling already works, and it also pins the rule that makes the
+# obvious wrong fix wrong -- the template's own markup is never escaped.
+hidden_paths = ["tests/test_escaping.py"]
+
+[timeouts]
+per_command_ms = 30000
+total_ms = 120000
+
+[[commands]]
+role = "fail_to_pass"
+command = "python3 -m unittest tests.test_escaping"
+
+[[commands]]
+role = "pass_to_pass"
+command = "python3 -m unittest tests.test_substitution"
