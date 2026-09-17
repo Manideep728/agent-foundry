@@ -255,11 +255,21 @@ class SqliteRunRepository:
         """Write the terminal state, the report and the costs in one transaction.
 
         One transaction, so a partial write cannot commit and a retry is free.
+
+        This writes *every* environment column, not only the measurements.
+        `create()` has to guess them -- it runs before a container exists, so
+        arch is 'unknown' and pid1 is False -- and for as long as `finish()`
+        left them alone, that guess was what every stored run kept. The rule is
+        deliberately stated as "finish writes the environment", rather than
+        "finish writes the two environment columns that are report-derived
+        today", so that the next fact learned during a run cannot quietly
+        reproduce the same bug.
         """
         with self._conn:
             cursor = self._conn.execute(
                 "UPDATE runs SET state = ?, updated_at_unix_ms = ?, "
                 "failure_kind = ?, failure_from = ?, failure_detail = ?, "
+                "runner_version = ?, arch = ?, pid1 = ?, "
                 "outcome = ?, resolved = ?, regressed = ?, f2p_passed = ?, "
                 "f2p_total = ?, p2p_passed = ?, p2p_total = ?, "
                 "timed_out_commands = ?, task_defect = ?, patch_sha256 = ?, "
@@ -274,6 +284,9 @@ class SqliteRunRepository:
                     if record.run.failure
                     else None,
                     record.run.failure.detail if record.run.failure else "",
+                    record.runner_version,
+                    record.arch,
+                    _flag(record.pid1),
                     record.outcome.value if record.outcome else None,
                     _flag(record.score.resolved) if record.score else None,
                     _flag(record.score.regressed) if record.score else None,

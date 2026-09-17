@@ -7,6 +7,7 @@ becoming a plausible wrong number.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -373,3 +374,52 @@ def test_a_database_from_a_newer_build_is_refused(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="newer build"):
         SqliteRunRepository(path)
+
+
+def test_the_stored_environment_is_the_one_validation_ran_on(
+    repo: SqliteRunRepository,
+) -> None:
+    """finish() must rewrite the environment columns create() could only guess.
+
+    create() runs before any container exists, so the service writes
+    arch 'unknown' and pid1 False -- there is genuinely nothing better to write
+    yet. finish() never rewrote them, so every stored run kept the placeholder
+    for ever: af show reported arch=unknown pid1=False for a run that measured
+    on x86_64 as PID 1, while validation_reports, one join away, held the truth.
+
+    The row is created with the placeholder on purpose. Reusing
+    advance_to_validating() would create it with 'arm64' already in place, and
+    the test would then pass against the broken code -- which is exactly how
+    this survived.
+    """
+    run = new_run()
+    repo.create(base_record(run, arch="unknown", pid1=False))
+    for state, at in (
+        (RunState.PREPARING, EPOCH_MS + 1),
+        (RunState.AGENT_RUNNING, EPOCH_MS + 2),
+        (RunState.VALIDATING, EPOCH_MS + 3),
+    ):
+        previous = run.state
+        run = run.transition_to(state, at)
+        repo.advance(run, previous)
+
+    scored = run.transition_to(RunState.SCORED, EPOCH_MS + 4)
+    repo.finish(
+        base_record(
+            scored,
+            report=replace(a_report(), arch="x86_64", pid1=True),
+            score=a_score(),
+            outcome=AgentOutcome.CLEAN_PATCH,
+            patch_is_empty=False,
+            runner_version="afrunner in docker image afrunner:local",
+            arch="x86_64",
+            pid1=True,
+        ),
+        RunState.VALIDATING,
+    )
+
+    stored = repo.get(RunId("run-0001"))
+    assert stored is not None
+    assert stored.arch == "x86_64"
+    assert stored.pid1 is True
+    assert stored.runner_version == "afrunner in docker image afrunner:local"
