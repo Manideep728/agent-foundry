@@ -13,6 +13,7 @@ import pytest
 from control_plane.adapters.fake_agent import FakeAgent
 from control_plane.adapters.single_shot_agent import SingleShotAgent
 from control_plane.adapters.system import SystemClock
+from control_plane.adapters.tool_use_agent import DEFAULT_MAX_TURNS, ToolUseAgent
 from control_plane.interface.cli import _build_agent, build_parser, main
 from tests.docker_support import IMAGE, requires_image
 
@@ -224,3 +225,32 @@ def test_show_without_a_database_is_a_usage_error(
 ) -> None:
     assert main(["show", "run-0001", "--db", str(tmp_path / "absent.sqlite3")]) == 2
     assert "no database" in capsys.readouterr().err
+
+
+def test_the_tools_flag_builds_the_loop_with_its_turn_budget() -> None:
+    args = build_parser().parse_args(
+        [
+            "run",
+            str(TASK_FILE),
+            "--agent",
+            "tools",
+            "--model",
+            "some-model:7b",
+            "--max-turns",
+            "5",
+        ]
+    )
+
+    agent = _build_agent(args, SystemClock())
+
+    assert isinstance(agent, ToolUseAgent)
+    # The record names the model, not the wrapper (D6), so the two agents stay
+    # comparable on one benchmark table.
+    assert agent.provider_id == "ollama"
+
+
+def test_the_turn_budget_has_a_default() -> None:
+    # Without one, forgetting the flag would mean an unbounded loop.
+    args = build_parser().parse_args(["run", str(TASK_FILE), "--agent", "tools"])
+
+    assert args.max_turns == DEFAULT_MAX_TURNS

@@ -30,6 +30,7 @@ from control_plane.adapters.single_shot_agent import SingleShotAgent
 from control_plane.adapters.sqlite_repo import SqliteRunRepository
 from control_plane.adapters.system import SystemClock, UuidIdGenerator
 from control_plane.adapters.task_toml import load_task
+from control_plane.adapters.tool_use_agent import DEFAULT_MAX_TURNS, ToolUseAgent
 from control_plane.adapters.workspace import WorkspaceFactory
 from control_plane.domain.errors import DomainError
 from control_plane.domain.fixture import manifest_bytes
@@ -61,6 +62,7 @@ RUNNER_LOCAL = "local"
 
 AGENT_FAKE = "fake"
 AGENT_OLLAMA = "ollama"
+AGENT_TOOLS = "tools"
 
 DEFAULT_MODEL = "qwen2.5-coder:3b"
 
@@ -109,12 +111,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument(
         "--agent",
-        choices=(AGENT_FAKE, AGENT_OLLAMA),
+        choices=(AGENT_FAKE, AGENT_OLLAMA, AGENT_TOOLS),
         default=AGENT_FAKE,
         help=(
             "fake applies a known solution and calls no model, which is what "
-            "CI and offline development use; ollama sends the task to a local "
-            "model and applies whatever comes back"
+            "CI and offline development use; ollama sends the whole fixture in "
+            "one prompt and applies whatever comes back; tools gives the model "
+            "read and write tools and several turns to use them"
+        ),
+    )
+    run.add_argument(
+        "--max-turns",
+        type=int,
+        default=DEFAULT_MAX_TURNS,
+        help=(
+            f"turn budget for --agent tools (default {DEFAULT_MAX_TURNS}); a "
+            f"model that never stops reading is ended and measured rather than "
+            f"left to hit the task timeout"
         ),
     )
     run.add_argument(
@@ -274,6 +287,12 @@ def _build_agent(args: argparse.Namespace, clock: SystemClock) -> AgentPort:
     if args.agent == AGENT_OLLAMA:
         return SingleShotAgent(
             OllamaClient(args.model, base_url=args.ollama_url), clock
+        )
+    if args.agent == AGENT_TOOLS:
+        return ToolUseAgent(
+            OllamaClient(args.model, base_url=args.ollama_url),
+            clock,
+            max_turns=args.max_turns,
         )
     return FakeAgent(args.solutions, clock)
 
