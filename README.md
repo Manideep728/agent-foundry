@@ -154,6 +154,56 @@ output:
 A run whose agent produced a patch that fails every test exits 0. The harness
 did its job; the agent did not.
 
+## Run a suite
+
+`af bench` evaluates every task in a directory, defaulting to `tasks/`, and
+summarises each suite separately.
+
+```
+$ uv run af bench
+af: [1/8] cache-eviction
+...
+20260918-040122-14353bc5  cache-eviction           clean_patch
+...
+
+suite synthetic  8 task(s)  8 measured of 8 attempted
+  model         fake/scripted
+  resolved      8/8
+  regressed     0/8
+                clean_patch              8
+                patch_with_regressions   0
+                tests_still_failing      0
+                validation_timeout       0
+                no_patch_produced        0
+                malformed_output         0
+  cost          0 micro-USD over 8 measured run(s)
+  agent         min 0ms  median 0ms  max 1ms
+  validation    min 64ms  median 65ms  max 97ms
+```
+
+The whole suite holds one database lock, so nothing else may evaluate against
+that database while it runs. It exits `0` only when **every** task produced a
+measurement — a suite where the harness broke on one task exits `1`, so a
+script never has to read the text to find out. What the agent scored does not
+affect the exit code: eight runs that all produced no patch are eight
+measurements.
+
+Counts are printed as `passed/total` rather than percentages, and durations as
+the range the runs covered rather than a mean — over eight tasks a mean is one
+slow run away from meaningless, and every figure printed here is a duration
+some run actually had.
+
+Suites are summarised separately and never averaged together, and the model
+that produced the runs is named. Runs that produced no measurement are listed
+with the reason, and money spent by them is reported on its own line rather
+than folded into the total: a failed run's cost is real, but it is not part of
+what the benchmark cost to measure.
+
+Interrupting a suite prints the summary for the tasks that finished and exits
+`130`. The run that was in flight is recorded as aborted, which is kept
+separate from a harness failure so that cancelling a suite does not look like
+unreliability.
+
 ## Agents
 
 Three agents exist behind one interface, so they are comparable on the same

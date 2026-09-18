@@ -29,7 +29,7 @@ from control_plane.adapters.run_lock import DatabaseBusy, exclusive_run_lock
 from control_plane.adapters.single_shot_agent import SingleShotAgent
 from control_plane.adapters.sqlite_repo import SqliteRunRepository
 from control_plane.adapters.system import SystemClock, UuidIdGenerator
-from control_plane.adapters.task_toml import load_task
+from control_plane.adapters.task_toml import load_task, load_tasks
 from control_plane.adapters.tool_use_agent import DEFAULT_MAX_TURNS, ToolUseAgent
 from control_plane.adapters.workspace import WorkspaceFactory
 from control_plane.domain.errors import DomainError
@@ -38,6 +38,7 @@ from control_plane.domain.ids import RunId
 from control_plane.domain.outcomes import FailureCategory
 from control_plane.domain.record import RunRecord
 from control_plane.domain.states import RunState
+from control_plane.domain.summary import Durations, SuiteSummary, summarise
 from control_plane.domain.task import TaskDefinition
 from control_plane.interface.doctor import run_doctor
 from control_plane.services.evaluate import EvaluationService
@@ -55,6 +56,7 @@ DEFAULT_DB = Path("af.sqlite3")
 DEFAULT_RUNS = Path("runs")
 DEFAULT_FIXTURES = Path("tasks/fixtures")
 DEFAULT_SOLUTIONS = Path("tasks/solutions")
+DEFAULT_TASKS = Path("tasks")
 DEFAULT_IMAGE = "afrunner:local"
 
 RUNNER_DOCKER = "docker"
@@ -151,6 +153,19 @@ def build_parser() -> argparse.ArgumentParser:
     run = subcommands.add_parser("run", help="evaluate one task")
     run.add_argument("task_file", type=Path)
     _add_run_flags(run)
+
+    bench = subcommands.add_parser(
+        "bench",
+        help="evaluate every task in a directory",
+        description=(
+            "Evaluate every *.toml directly inside DIRECTORY, in filename "
+            "order, then print one summary per suite. A single database lock "
+            "is held for the whole suite, so nothing else may run against this "
+            "database while it works."
+        ),
+    )
+    bench.add_argument("directory", type=Path, nargs="?", default=DEFAULT_TASKS)
+    _add_run_flags(bench)
 
     show = subcommands.add_parser("show", help="print a stored run")
     show.add_argument("run_id")
@@ -366,6 +381,171 @@ def _build_agent(args: argparse.Namespace, clock: SystemClock) -> AgentPort:
     return FakeAgent(args.solutions, clock)
 
 
+def _print_line(record: RunRecord) -> None:
+    """One line per task, shaped like `af list` so the two read the same.
+
+    The run id is on screen because `af show <run-id>` is how a reader gets
+    from a summary row to the detail behind it.
+    """
+    outcome = record.outcome.value if record.outcome else record.run.state.value
+    print(f"{record.run.run_id}  {record.run.task_id!s:<24} {outcome}")
+
+
+def _print_durations(label: str, durations: object) -> None:
+    if durations is None:
+        return
+    assert isinstance(durations, Durations)
+    print(
+        f"  {label:<13} min {durations.fastest_ms}ms  "
+        f"median {durations.median_ms}ms  max {durations.slowest_ms}ms"
+    )
+
+
+def _print_summary(summary: SuiteSummary, *, planned: int) -> None:
+    """Render one suite. Computation lives in the domain; this only formats."""
+    attempted = summary.runs
+    print()
+    print(
+        f"suite {summary.suite.value}  {planned} task(s)  "
+        f"{summary.measured} measured of {attempted} attempted"
+    )
+
+    # D6: a report states which implementation produced each run. More than one
+    # pair prints them all, because a blended report is what D6 forbids.
+    for provider, model in summary.labels:
+        # "model", not "agent": the duration rows below are named for the
+        # agent and validation *phases*, and one label meaning two things in
+        # one block is how a reader stops trusting either.
+        print(f"  model         {provider}/{model}")
+    for digest in summary.image_digests:
+        print(f"  image         {digest}")
+
+    print(f"  resolved      {summary.resolved}/{summary.measured}")
+    print(f"  regressed     {summary.regressed}/{summary.measured}")
+    # Every outcome, including the zeros. A rate nobody can see is zero is a
+    # rate nobody acts on.
+    for outcome, count in summary.outcomes.items():
+        print(f"  {'':<13} {outcome.value:<24} {count}")
+
+    if summary.aborted:
+        print(f"  aborted       {summary.aborted}")
+    if summary.unmeasured:
+        print(f"  no measure    {len(summary.unmeasured)}")
+        for entry in summary.unmeasured:
+            print(
+                f"  {'':<13} {entry.kind.value} (from {entry.failed_from.value})  "
+                f"{entry.task_id}  {entry.run_id}"
+            )
+            if entry.detail:
+                print(f"  {'':<13}   {entry.detail}")
+    if summary.runs_with_timeouts:
+        print(
+            f"  timed out     {summary.timed_out_commands} command(s) in "
+            f"{summary.runs_with_timeouts} run(s)"
+        )
+    if summary.without_regression_check:
+        print(
+            f"  uncovered     {summary.without_regression_check} measured run(s) "
+            f"had no pass->pass command to regress"
+        )
+
+    print(
+        f"  cost          {int(summary.measured_cost_micros)} micro-USD over "
+        f"{summary.measured} measured run(s)"
+    )
+    if summary.unmeasured_runs_that_spent:
+        # Reported, never added in. FailureCategory forbids a failed run
+        # contributing to a cost total; it does not forbid saying what the
+        # harness cost when it produced nothing.
+        print(
+            f"  {'':<13} {int(summary.unmeasured_cost_micros)} micro-USD spent by "
+            f"{summary.unmeasured_runs_that_spent} run(s) that measured nothing"
+        )
+    _print_durations("agent", summary.agent_ms)
+    _print_durations("validation", summary.validation_ms)
+
+
+def _bench_exit_code(
+    records: Sequence[RunRecord], *, planned: int, interrupted: bool
+) -> int:
+    """0 only when every task in the directory produced a measurement.
+
+    Not "0 if any did". Over eight tasks that would read 0 unless all eight
+    failed, so the harness could break on seven and a CI job would stay green
+    -- and the reason these codes exist at all is that a script never has to
+    parse the text.
+
+    The rule it preserves is the other one: this grades the harness, never the
+    agent. Eight runs that all produced no patch are eight measurements and
+    exit 0.
+    """
+    if interrupted:
+        return EXIT_ABORTED
+    if len(records) != planned:
+        return EXIT_HARNESS_FAILED
+    if any(_exit_code_for(record) != EXIT_MEASURED for record in records):
+        return EXIT_HARNESS_FAILED
+    return EXIT_MEASURED
+
+
+def bench_tasks(args: argparse.Namespace) -> int:
+    try:
+        tasks = load_tasks(args.directory)
+    except DomainError as error:
+        print(f"{PROGRAM}: {error}", file=sys.stderr)
+        return EXIT_USAGE
+    if not tasks:
+        # Never EXIT_MEASURED. A benchmark of nothing that exits 0 is a green
+        # CI job asserting that zero tasks passed.
+        print(f"{PROGRAM}: no task files in {args.directory}", file=sys.stderr)
+        return EXIT_USAGE
+
+    clock = SystemClock()
+    runner, docker = _build_runners(args, clock)
+
+    records: list[RunRecord] = []
+    interrupted = False
+    try:
+        # One lock for the whole suite (D17: "a scheduler that owns the lock").
+        # Recovery assumes every unfinished run is abandoned, and that has to
+        # hold for the eighth task as much as the first. It must also be this
+        # inner path rather than run_task: flock belongs to the open file
+        # description, so a second acquisition in this same process contends
+        # exactly as another process would.
+        with exclusive_run_lock(args.db), SqliteRunRepository(args.db) as repository:
+            workspaces = WorkspaceFactory(args.runs)
+            _recover(repository, workspaces, clock, docker.remove_container)
+            service = _build_service(args, repository, workspaces, runner, clock)
+
+            for position, task in enumerate(tasks, start=1):
+                # Progress on stderr, data on stdout, so redirecting the
+                # results still shows which task is running.
+                print(
+                    f"{PROGRAM}: [{position}/{len(tasks)}] {task.task_id}",
+                    file=sys.stderr,
+                )
+                record = service.execute(task)
+                records.append(record)
+                _print_line(record)
+    except DatabaseBusy as error:
+        print(f"{PROGRAM}: {error}", file=sys.stderr)
+        return EXIT_HARNESS_FAILED
+    except KeyboardInterrupt:
+        # The service has already written the in-flight run ABORTED and kept
+        # its workspace. Every task before it is a real measurement sitting in
+        # `records`, and discarding those because the operator stopped the
+        # ninth is the behaviour this catch exists to prevent.
+        interrupted = True
+        print(
+            f"{PROGRAM}: aborted after {len(records)} of {len(tasks)}",
+            file=sys.stderr,
+        )
+
+    for summary in summarise(records):
+        _print_summary(summary, planned=len(tasks))
+    return _bench_exit_code(records, planned=len(tasks), interrupted=interrupted)
+
+
 def run_task(args: argparse.Namespace) -> int:
     try:
         task = load_task(args.task_file)
@@ -461,6 +641,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_fixture_hash(args.directory, args.manifest)
     if args.command == "run":
         return run_task(args)
+    if args.command == "bench":
+        return bench_tasks(args)
     if args.command == "show":
         return show_run(args)
     if args.command == "list":

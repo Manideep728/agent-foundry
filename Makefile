@@ -14,8 +14,10 @@ RUNNER_BUILD_DIR  ?= $(RUNNER_SRC)/build
 RUNNER_IMAGE      ?= afrunner:local
 RUNNER_JOBS       ?= $(shell nproc 2>/dev/null || echo 2)
 
+BENCH_ARGS ?=
+
 .PHONY: help sync test lint fmt typecheck check run clean \
-        runner-configure runner-build runner-test runner-image doctor
+        runner-configure runner-build runner-test runner-image doctor bench
 
 ## help: list the documented targets
 help:
@@ -64,6 +66,10 @@ runner-image:
 ## doctor: check that the container runtime enforces the validation limits
 doctor:
 	uv run af doctor --image $(RUNNER_IMAGE)
+
+## bench: evaluate every task in tasks/ and summarise each suite
+bench:
+	uv run af bench --image $(RUNNER_IMAGE) $(BENCH_ARGS)
 
 ## check: everything CI runs
 check: lint typecheck test
