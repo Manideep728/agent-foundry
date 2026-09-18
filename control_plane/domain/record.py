@@ -53,6 +53,28 @@ class RunRecord:
     patch_bytes: int = 0
     patch_is_empty: bool | None = None
 
+    agent_id: str | None = None
+    provider_id: str | None = None
+    model_id: str | None = None
+    """Which agent, provider and model the run was configured to use.
+
+    Three fields because no two of them determine the third: the single-shot
+    agent and the tool loop can drive the same model through the same provider,
+    and merging those two into one rate is the mistake a benchmark most easily
+    makes. Together they are the grouping key a summary uses.
+
+    Written when the run is created rather than derived from `invocations`
+    afterwards. The invocations say what answered and stay the better evidence
+    wherever there are any, but a run that failed on its way to the first call
+    has none -- and those are the runs a harness-reliability figure is about.
+    A configuration that could not be named for exactly the runs that failed
+    would put every failure into one anonymous bucket.
+
+    None only for a run stored before the harness recorded this. No sentinel
+    string, for the reason `image_digest` gives: an unrecorded configuration
+    must not satisfy a filter looking for a real one.
+    """
+
     invocations: tuple[ModelInvocation, ...] = field(default_factory=tuple)
     total_cost_micros: MicroUsd = ZERO_MICRO_USD
     agent_ms: int | None = None
@@ -144,6 +166,16 @@ class RunRecord:
             value = getattr(self, name)
             if value is not None and value < 0:
                 raise PreconditionViolated(f"{name} must be >= 0")
+
+        # All three or none. A half-named configuration -- the agent without
+        # the model -- is a wiring bug, and it would group as its own row in
+        # every benchmark table rather than failing anywhere.
+        named = (self.agent_id, self.provider_id, self.model_id)
+        self._require(
+            all(part is None for part in named)
+            or all(part not in (None, "") for part in named),
+            "a run names its whole configuration or none of it",
+        )
 
         # None means "no image". The empty string means an adapter looked and
         # wrote down whatever it got, which is the one answer this must not

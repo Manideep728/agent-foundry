@@ -33,7 +33,7 @@ from control_plane.domain.validation import (
 )
 from control_plane.services.errors import ConcurrentModification, RunAlreadyExists
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _SCHEMA = (
     """
@@ -70,6 +70,9 @@ CREATE TABLE runs (
   workspace_path     TEXT,
   image_digest       TEXT,
   agent_note         TEXT,
+  agent_id           TEXT,
+  provider_id        TEXT,
+  model_id           TEXT,
   CHECK ((state = 'failed') = (failure_kind IS NOT NULL)),
   CHECK (updated_at_unix_ms >= created_at_unix_ms),
   CHECK (pid1 IN (0, 1))
@@ -187,6 +190,20 @@ _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             # Nullable too: almost every run has nothing to say here, and
             # "" would not be distinguishable from a reason nobody wrote.
             "ALTER TABLE runs ADD COLUMN agent_note TEXT",
+        ),
+    ),
+    (
+        5,
+        (
+            # Which agent, provider and model the run was configured to use.
+            # Nullable for the usual reason: every value that could be
+            # backfilled here would be a guess. The rows already stored were
+            # produced by several configurations and the database never wrote
+            # down which, so NULL is the only true answer and the summary
+            # groups those runs apart rather than folding them into one.
+            "ALTER TABLE runs ADD COLUMN agent_id TEXT",
+            "ALTER TABLE runs ADD COLUMN provider_id TEXT",
+            "ALTER TABLE runs ADD COLUMN model_id TEXT",
         ),
     ),
 )
@@ -336,8 +353,9 @@ class SqliteRunRepository:
                     "INSERT INTO runs "
                     "(run_id, task_id, suite, state, created_at_unix_ms, "
                     " updated_at_unix_ms, fixture_sha256, runner_id, "
-                    " runner_version, arch, pid1, workspace_path) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    " runner_version, arch, pid1, workspace_path, "
+                    " agent_id, provider_id, model_id) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         record.run.run_id.value,
                         record.run.task_id.value,
@@ -354,6 +372,13 @@ class SqliteRunRepository:
                         # the directory before the run can die leaving one
                         # behind, or the recovery scan has nothing to delete.
                         record.workspace_path,
+                        # Also at creation. A run that dies before the agent is
+                        # reached is exactly the run a reliability figure is
+                        # about, and it must still say which configuration was
+                        # being measured when it died.
+                        record.agent_id,
+                        record.provider_id,
+                        record.model_id,
                     ),
                 )
         except sqlite3.IntegrityError as error:
@@ -611,6 +636,9 @@ class SqliteRunRepository:
             workspace_path=row["workspace_path"],
             image_digest=row["image_digest"],
             agent_note=row["agent_note"],
+            agent_id=row["agent_id"],
+            provider_id=row["provider_id"],
+            model_id=row["model_id"],
         )
 
     def _read_report(self, run_id: RunId) -> ValidationReport | None:

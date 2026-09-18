@@ -149,3 +149,36 @@ def test_an_outcome_that_matches_the_score_is_accepted() -> None:
     stored = record(outcome=AgentOutcome.NO_PATCH_PRODUCED)
 
     assert stored.outcome is AgentOutcome.NO_PATCH_PRODUCED
+
+
+def test_a_run_names_its_whole_configuration_or_none_of_it() -> None:
+    """A half-named configuration is a wiring bug that nothing else catches.
+
+    It does not violate any type, and it does not look wrong in a row. It
+    surfaces as an extra line in a benchmark table -- one agent, no model --
+    that a reader has to work out is the same configuration as the line above.
+    """
+    with pytest.raises(PreconditionViolated, match="whole configuration"):
+        record(
+            outcome=AgentOutcome.NO_PATCH_PRODUCED,
+            agent_id="tools",
+            provider_id="ollama",
+        )
+
+
+def test_an_unrecorded_configuration_is_all_three_missing() -> None:
+    # A run stored before the harness wrote this down. None, never "".
+    stored = record(outcome=AgentOutcome.NO_PATCH_PRODUCED)
+
+    assert (stored.agent_id, stored.provider_id, stored.model_id) == (None,) * 3
+
+
+def test_a_fully_named_configuration_is_accepted() -> None:
+    stored = record(
+        outcome=AgentOutcome.NO_PATCH_PRODUCED,
+        agent_id="tools",
+        provider_id="ollama",
+        model_id="qwen2.5-coder:7b",
+    )
+
+    assert stored.agent_id == "tools"

@@ -139,7 +139,9 @@ class SilentAgent:
     agent says about itself.
     """
 
+    agent_id = "stub-agent"
     provider_id = "stub"
+    model_id = "stub-1"
 
     def __init__(self, outcome: AgentOutcome | None) -> None:
         self._outcome = outcome
@@ -193,7 +195,9 @@ def test_every_invocation_an_agent_reports_is_recorded(tmp_path: Path) -> None:
     """A multi-turn agent's cost is the sum of its calls, not its last one."""
 
     class TwoCallAgent:
+        agent_id = "stub-agent"
         provider_id = "stub"
+        model_id = "stub-1"
 
         def edit(self, workspace: Path, task: TaskDefinition) -> AgentResult:
             def call(cost: int) -> ModelInvocation:
@@ -220,7 +224,9 @@ def test_every_invocation_an_agent_reports_is_recorded(tmp_path: Path) -> None:
 
 def test_an_agent_that_raises_is_an_agent_error(tmp_path: Path) -> None:
     class ExplodingAgent:
+        agent_id = "stub-agent"
         provider_id = "exploding"
+        model_id = "stub-1"
 
         def edit(self, workspace: Path, task: TaskDefinition) -> object:
             raise AgentError("rate limit exhausted")
@@ -563,7 +569,9 @@ def test_a_run_on_a_runner_with_no_image_records_none(tmp_path: Path) -> None:
 class MalformedAgent:
     """An agent whose reply could not be read as an edit."""
 
+    agent_id = "stub-agent"
     provider_id = "stub"
+    model_id = "stub-1"
 
     def __init__(self, reply: str, reason: str) -> None:
         self._reply = reply
@@ -795,3 +803,52 @@ def test_a_run_that_failed_during_validation_still_names_its_image(
     assert record.run.failure is not None
     assert record.run.failure.failed_from is RunState.VALIDATING
     assert record.image_digest == DIGEST
+
+
+# --- the configuration a run was measuring ----------------------------------
+
+
+def test_a_run_records_which_agent_provider_and_model_produced_it(
+    tmp_path: Path,
+) -> None:
+    service, repo = build(tmp_path)
+
+    record = service.execute(load_task(TASK_FILE))
+
+    assert record.agent_id == "fake"
+    assert record.provider_id == "fake"
+    assert record.model_id == "scripted"
+    stored = repo.get(record.run.run_id)
+    assert stored is not None
+    assert (stored.agent_id, stored.provider_id, stored.model_id) == (
+        "fake",
+        "fake",
+        "scripted",
+    )
+    repo.close()
+
+
+def test_a_run_that_never_reached_the_model_still_names_its_configuration(
+    tmp_path: Path,
+) -> None:
+    """The reason the configuration is read off the port, not the invocations.
+
+    A run that failed on its way to the first call has no invocations, so a
+    label derived from them is None -- and these are precisely the runs a
+    harness-reliability figure is about. Deriving it would file every failure
+    under one anonymous configuration, and the summary would then report a
+    reliability number for a benchmark nobody could name.
+    """
+    service, repo = build(tmp_path)
+    broken = load_task(TASK_FILE)
+    object.__setattr__(broken, "fixture_sha256", "f" * 64)
+
+    record = service.execute(broken)
+
+    assert record.invocations == ()
+    assert (record.agent_id, record.provider_id, record.model_id) == (
+        "fake",
+        "fake",
+        "scripted",
+    )
+    repo.close()

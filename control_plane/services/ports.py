@@ -133,9 +133,32 @@ class AgentPort(Protocol):
 
     It returns usage, not a patch. Capturing the patch is a separate concern,
     so an agent implementation cannot misreport what it changed.
+
+    The three identity properties are a benchmark's grouping key, and they are
+    three because no two of them determine the third. The single-shot agent and
+    the tool loop can drive the same model through the same provider, and the
+    difference between them is the comparison this project exists to make --
+    grouping on `(provider, model)` alone merges those into one rate that
+    describes neither.
     """
 
     @property
+    def agent_id(self) -> str:
+        """Which strategy this is: how the model is driven, not which model."""
+        ...
+
+    @property
     def provider_id(self) -> str: ...
+
+    @property
+    def model_id(self) -> str:
+        """Which model this agent will ask.
+
+        What was configured, which is why it is read here rather than only off
+        the invocations. The invocations say what actually answered and are the
+        better evidence wherever there are any; a run that died on its way to
+        the first call has none, and "no model" is not the truth about it.
+        """
+        ...
 
     def edit(self, workspace: Path, task: TaskDefinition) -> AgentResult: ...

@@ -33,6 +33,8 @@ from control_plane.domain.task import TaskDefinition
 from control_plane.services.errors import AgentError
 from control_plane.services.ports import AgentResult
 
+AGENT_ID = "single-shot"
+
 DEFAULT_MAX_PROMPT_BYTES = 200_000
 """A ceiling on the repository text put into one prompt.
 
@@ -96,11 +98,20 @@ class SingleShotAgent:
         self._max_prompt_bytes = max_prompt_bytes
 
     @property
+    def agent_id(self) -> str:
+        return AGENT_ID
+
+    @property
     def provider_id(self) -> str:
-        # The provider is the model's, not this wrapper's. A report that said
-        # "single-shot" would hide which model produced the number, and D6
-        # requires every run to name the adapter behind it.
+        # The provider is the model's, not this wrapper's. A report naming only
+        # the strategy would hide which model produced the number, and D6
+        # requires every run to name the adapter behind it. `agent_id` above is
+        # how the strategy gets named without displacing that.
         return self._client.provider_id
+
+    @property
+    def model_id(self) -> str:
+        return self._client.model_id
 
     def edit(self, workspace: Path, task: TaskDefinition) -> AgentResult:
         prompt = self._build_prompt(workspace, task)

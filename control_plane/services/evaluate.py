@@ -385,6 +385,12 @@ class EvaluationService:
             fixture_sha256=task.fixture_sha256,
             runner_id=self._runner.runner_id,
             runner_version=self._runner.runner_version,
+            # Read off the port, not off the invocations. Asked before the
+            # agent runs, so the record names the configuration even on the
+            # paths where the model was never reached.
+            agent_id=self._agent.agent_id,
+            provider_id=self._agent.provider_id,
+            model_id=self._agent.model_id,
             arch=report.arch if report is not None else UNKNOWN_ARCH,
             pid1=report.pid1 if report is not None else False,
             # Not guarded on `report is not None`, unlike arch and pid1. The

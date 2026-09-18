@@ -29,6 +29,7 @@ from control_plane.domain.ports import Clock
 from control_plane.domain.task import TaskDefinition
 from control_plane.services.ports import AgentResult
 
+AGENT_ID = "fake"
 PROVIDER_ID = "fake"
 MODEL_ID = "scripted"
 
@@ -82,8 +83,16 @@ class FakeAgent:
         self._price = price or TokenPrice.free(MODEL_ID)
 
     @property
+    def agent_id(self) -> str:
+        return AGENT_ID
+
+    @property
     def provider_id(self) -> str:
         return PROVIDER_ID
+
+    @property
+    def model_id(self) -> str:
+        return MODEL_ID
 
     def edit(self, workspace: Path, task: TaskDefinition) -> AgentResult:
         started = self._clock.monotonic_ms()

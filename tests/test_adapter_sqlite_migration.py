@@ -225,6 +225,28 @@ def test_a_run_with_no_report_keeps_its_unknown_environment(tmp_path: Path) -> N
     assert read(path, "SELECT arch FROM runs WHERE run_id = 'r2'") == "unknown"
 
 
+def test_the_upgrade_leaves_an_older_runs_configuration_unnamed(
+    tmp_path: Path,
+) -> None:
+    """The v5 step adds columns and backfills nothing, deliberately.
+
+    The rows already in a database were produced by several configurations and
+    the database never wrote down which. Any default -- the current agent, the
+    commonest model -- would put runs into a benchmark row they were not part
+    of, and be indistinguishable afterwards from a run that really used it.
+    NULL is the only true answer, and it groups apart rather than blending in.
+    """
+    path = tmp_path / "af.sqlite3"
+    build_v1(path)
+    insert_v1_run(path, stored_arch="unknown", report_arch="x86_64")
+
+    with SqliteRunRepository(path):
+        pass
+
+    for column in ("agent_id", "provider_id", "model_id"):
+        assert read(path, f"SELECT {column} FROM runs WHERE run_id = 'r1'") is None
+
+
 def test_a_migrated_database_matches_a_fresh_one(tmp_path: Path) -> None:
     """A file's structure must not depend on which build created it.
 

@@ -48,6 +48,8 @@ from control_plane.domain.task import TaskDefinition
 from control_plane.services.errors import AgentError
 from control_plane.services.ports import AgentResult
 
+AGENT_ID = "tools"
+
 DEFAULT_MAX_TURNS = 12
 """Turns before the loop stops and reports what the model managed.
 
@@ -226,8 +228,16 @@ class ToolUseAgent:
         self._max_turns = max_turns
 
     @property
+    def agent_id(self) -> str:
+        return AGENT_ID
+
+    @property
     def provider_id(self) -> str:
         return self._client.provider_id
+
+    @property
+    def model_id(self) -> str:
+        return self._client.model_id
 
     def edit(self, workspace: Path, task: TaskDefinition) -> AgentResult:
         space = _Workspace(root=workspace, hidden=frozenset(task.hidden_paths))
