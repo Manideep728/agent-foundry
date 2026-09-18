@@ -173,9 +173,12 @@ def test_fixture_resolution_stays_inside_the_fixtures_root() -> None:
 def test_load_tasks_reads_a_directory() -> None:
     tasks = load_tasks(REPO / "tasks")
     assert [str(t.task_id) for t in tasks] == [
+        "cache-eviction",
         "csv-quoted-fields",
         "interval-merge",
         "pagination-last-page",
+        "path-normalise",
         "retry-backoff",
+        "semver-compare",
         "template-render",
     ]

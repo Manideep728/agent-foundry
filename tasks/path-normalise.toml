@@ -1,0 +1,28 @@
+schema_version = 1
+
+[task]
+id = "path-normalise"
+suite = "synthetic"
+description = """
+paths.normalise.normalise must collapse a relative path textually, and refuse one that climbs out of the base. A `..` with nothing left to cancel is currently ignored instead of refused, so `../x` quietly normalises to `x` and reports a path as being inside the base when it is not.
+"""
+
+[fixture]
+id = "path-normalise"
+sha256 = "f5e1ddb282d0546bf0e911e5c53ab7dffee4f7cfc265d870e6ce7df03125951f"
+# Kept out of the agent's prompt (D18). test_collapse.py stays visible: the
+# ordinary collapsing already works, and it pins the rule that makes the
+# obvious over-correction wrong -- a `..` that stays inside the base is fine.
+hidden_paths = ["tests/test_escape.py"]
+
+[timeouts]
+per_command_ms = 30000
+total_ms = 120000
+
+[[commands]]
+role = "fail_to_pass"
+command = "python3 -m unittest tests.test_escape"
+
+[[commands]]
+role = "pass_to_pass"
+command = "python3 -m unittest tests.test_collapse"

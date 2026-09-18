@@ -1,0 +1,28 @@
+schema_version = 1
+
+[task]
+id = "cache-eviction"
+suite = "synthetic"
+description = """
+lru.cache.LruCache must treat a read as a use: an entry returned by get is the most recently used one, so it is not the next candidate for eviction. Only put currently refreshes an entry, so a value that was just read is discarded while an untouched one survives.
+"""
+
+[fixture]
+id = "cache-eviction"
+sha256 = "42c701274095403b79b8b5d84d37d739d15337d6a2c7a0925988605aca03b9cb"
+# Kept out of the agent's prompt (D18). test_basics.py stays visible: storing,
+# retrieving and capacity already work, and are what an existing regression
+# suite would cover.
+hidden_paths = ["tests/test_recency.py"]
+
+[timeouts]
+per_command_ms = 30000
+total_ms = 120000
+
+[[commands]]
+role = "fail_to_pass"
+command = "python3 -m unittest tests.test_recency"
+
+[[commands]]
+role = "pass_to_pass"
+command = "python3 -m unittest tests.test_basics"

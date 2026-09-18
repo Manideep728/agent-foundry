@@ -1,0 +1,28 @@
+schema_version = 1
+
+[task]
+id = "semver-compare"
+suite = "synthetic"
+description = """
+semver.compare.compare must order semantic versions. A version carrying a prerelease sorts below the same version without one, and two prereleases are compared identifier by identifier, numerically where an identifier is a number. The prerelease is currently ignored, so 1.0.0-alpha and 1.0.0 compare equal.
+"""
+
+[fixture]
+id = "semver-compare"
+sha256 = "6358cb32600182f97e266517eef617e99233dedd78198046c9047a186f795be8"
+# Kept out of the agent's prompt (D18). test_numeric.py stays visible: the
+# numeric ordering and the parser already work, and it also pins the rule that
+# makes the obvious wrong fix wrong -- comparing versions as plain text.
+hidden_paths = ["tests/test_prerelease.py"]
+
+[timeouts]
+per_command_ms = 30000
+total_ms = 120000
+
+[[commands]]
+role = "fail_to_pass"
+command = "python3 -m unittest tests.test_prerelease"
+
+[[commands]]
+role = "pass_to_pass"
+command = "python3 -m unittest tests.test_numeric"
