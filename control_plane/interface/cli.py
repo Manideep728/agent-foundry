@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from control_plane import __version__
@@ -67,6 +67,65 @@ AGENT_TOOLS = "tools"
 DEFAULT_MODEL = "qwen2.5-coder:3b"
 
 
+def _add_run_flags(parser: argparse.ArgumentParser) -> None:
+    """The flags any evaluation needs, shared by `run` and `bench`.
+
+    A function rather than argparse's `parents=`, because a shared parent
+    parser puts the same Action objects into two parsers -- a subtlety nobody
+    reading this should have to know about. What matters is that the two
+    subcommands cannot drift apart: a flag added to one is added to both.
+    """
+    parser.add_argument("--db", type=Path, default=DEFAULT_DB)
+    parser.add_argument("--runs", type=Path, default=DEFAULT_RUNS)
+    parser.add_argument("--fixtures", type=Path, default=DEFAULT_FIXTURES)
+    parser.add_argument("--solutions", type=Path, default=DEFAULT_SOLUTIONS)
+    parser.add_argument(
+        "--runner",
+        choices=(RUNNER_DOCKER, RUNNER_LOCAL),
+        default=RUNNER_DOCKER,
+        help=(
+            "docker validates inside the runner image; local runs the commands "
+            "on this machine with no isolation, for development only"
+        ),
+    )
+    parser.add_argument(
+        "--image",
+        default=DEFAULT_IMAGE,
+        help="the validation image for --runner docker (build it: make runner-image)",
+    )
+    parser.add_argument(
+        "--agent",
+        choices=(AGENT_FAKE, AGENT_OLLAMA, AGENT_TOOLS),
+        default=AGENT_FAKE,
+        help=(
+            "fake applies a known solution and calls no model, which is what "
+            "CI and offline development use; ollama sends the whole fixture in "
+            "one prompt and applies whatever comes back; tools gives the model "
+            "read and write tools and several turns to use them"
+        ),
+    )
+    parser.add_argument(
+        "--max-turns",
+        type=int,
+        default=DEFAULT_MAX_TURNS,
+        help=(
+            f"turn budget for --agent tools (default {DEFAULT_MAX_TURNS}); a "
+            f"model that never stops reading is ended and measured rather than "
+            f"left to hit the task timeout"
+        ),
+    )
+    parser.add_argument(
+        "--model",
+        default=DEFAULT_MODEL,
+        help=f"the model for --agent ollama (default {DEFAULT_MODEL})",
+    )
+    parser.add_argument(
+        "--ollama-url",
+        default=DEFAULT_BASE_URL,
+        help=f"where the ollama server is (default {DEFAULT_BASE_URL})",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=PROGRAM,
@@ -91,55 +150,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = subcommands.add_parser("run", help="evaluate one task")
     run.add_argument("task_file", type=Path)
-    run.add_argument("--db", type=Path, default=DEFAULT_DB)
-    run.add_argument("--runs", type=Path, default=DEFAULT_RUNS)
-    run.add_argument("--fixtures", type=Path, default=DEFAULT_FIXTURES)
-    run.add_argument("--solutions", type=Path, default=DEFAULT_SOLUTIONS)
-    run.add_argument(
-        "--runner",
-        choices=(RUNNER_DOCKER, RUNNER_LOCAL),
-        default=RUNNER_DOCKER,
-        help=(
-            "docker validates inside the runner image; local runs the commands "
-            "on this machine with no isolation, for development only"
-        ),
-    )
-    run.add_argument(
-        "--image",
-        default=DEFAULT_IMAGE,
-        help="the validation image for --runner docker (build it: make runner-image)",
-    )
-    run.add_argument(
-        "--agent",
-        choices=(AGENT_FAKE, AGENT_OLLAMA, AGENT_TOOLS),
-        default=AGENT_FAKE,
-        help=(
-            "fake applies a known solution and calls no model, which is what "
-            "CI and offline development use; ollama sends the whole fixture in "
-            "one prompt and applies whatever comes back; tools gives the model "
-            "read and write tools and several turns to use them"
-        ),
-    )
-    run.add_argument(
-        "--max-turns",
-        type=int,
-        default=DEFAULT_MAX_TURNS,
-        help=(
-            f"turn budget for --agent tools (default {DEFAULT_MAX_TURNS}); a "
-            f"model that never stops reading is ended and measured rather than "
-            f"left to hit the task timeout"
-        ),
-    )
-    run.add_argument(
-        "--model",
-        default=DEFAULT_MODEL,
-        help=f"the model for --agent ollama (default {DEFAULT_MODEL})",
-    )
-    run.add_argument(
-        "--ollama-url",
-        default=DEFAULT_BASE_URL,
-        help=f"where the ollama server is (default {DEFAULT_BASE_URL})",
-    )
+    _add_run_flags(run)
 
     show = subcommands.add_parser("show", help="print a stored run")
     show.add_argument("run_id")
@@ -245,6 +256,82 @@ def _print_record(record: RunRecord) -> None:
         print(f"  workspace   {record.workspace_path}")
 
 
+def _build_runners(
+    args: argparse.Namespace, clock: SystemClock
+) -> tuple[ValidationRunner, DockerRunner]:
+    """The runner the flags asked for, and the Docker runner recovery needs.
+
+    Two values, because they answer different questions. The second is built
+    whichever runner validates, since recovery removes containers left behind
+    by *earlier* Docker runs even when this invocation is local.
+
+    The isolation warning is printed here, which is once per invocation rather
+    than once per task. Eight copies of it in a benchmark is how a warning
+    becomes wallpaper.
+    """
+    docker = DockerRunner(DockerConfig(image=args.image))
+    runner: ValidationRunner = (
+        docker if args.runner == RUNNER_DOCKER else LocalRunner(clock)
+    )
+    if not runner.isolated:
+        # On stderr, so an unisolated run is never mistaken for a measured one.
+        print(
+            f"{PROGRAM}: warning: running with {runner.runner_id}, which provides "
+            f"no isolation. Commands execute as you, with your network and "
+            f"filesystem. Development use only.",
+            file=sys.stderr,
+        )
+    return runner, docker
+
+
+def _recover(
+    repository: SqliteRunRepository,
+    workspaces: WorkspaceFactory,
+    clock: SystemClock,
+    remove_container: Callable[[RunId], None],
+) -> None:
+    """Mark abandoned runs interrupted, and say on stderr what was cleaned up.
+
+    Recovery removes containers left by earlier Docker runs whichever runner
+    this invocation uses, and it is idempotent -- a second pass finds nothing,
+    because the runs it touched are now terminal. So a suite calls it once
+    before its first task rather than before each one.
+    """
+    for entry in recover_unfinished(repository, workspaces, clock, remove_container):
+        print(
+            f"{PROGRAM}: marked {entry.run_id} interrupted ({entry.action.value})",
+            file=sys.stderr,
+        )
+        if entry.cleanup_error is not None:
+            print(
+                f"{PROGRAM}: cleanup for {entry.run_id} failed: {entry.cleanup_error}",
+                file=sys.stderr,
+            )
+
+
+def _build_service(
+    args: argparse.Namespace,
+    repository: SqliteRunRepository,
+    workspaces: WorkspaceFactory,
+    runner: ValidationRunner,
+    clock: SystemClock,
+) -> EvaluationService:
+    """One service for the whole invocation.
+
+    Every dependency is invocation-scoped and `execute` writes no state back
+    onto the service, so one instance drives a whole suite.
+    """
+    return EvaluationService(
+        repository=repository,
+        runner=runner,
+        agent=_build_agent(args, clock),
+        workspaces=workspaces,
+        clock=clock,
+        ids=UuidIdGenerator(),
+        fixtures_root=args.fixtures,
+    )
+
+
 def _recover_and_evaluate(
     args: argparse.Namespace,
     task: TaskDefinition,
@@ -254,32 +341,8 @@ def _recover_and_evaluate(
 ) -> RunRecord:
     with SqliteRunRepository(args.db) as repository:
         workspaces = WorkspaceFactory(args.runs)
-        # Recovery removes containers left by earlier Docker runs, whichever
-        # runner this invocation uses.
-        recovered = recover_unfinished(
-            repository, workspaces, clock, docker.remove_container
-        )
-        for entry in recovered:
-            print(
-                f"{PROGRAM}: marked {entry.run_id} interrupted ({entry.action.value})",
-                file=sys.stderr,
-            )
-            if entry.cleanup_error is not None:
-                print(
-                    f"{PROGRAM}: cleanup for {entry.run_id} failed: "
-                    f"{entry.cleanup_error}",
-                    file=sys.stderr,
-                )
-
-        service = EvaluationService(
-            repository=repository,
-            runner=runner,
-            agent=_build_agent(args, clock),
-            workspaces=workspaces,
-            clock=clock,
-            ids=UuidIdGenerator(),
-            fixtures_root=args.fixtures,
-        )
+        _recover(repository, workspaces, clock, docker.remove_container)
+        service = _build_service(args, repository, workspaces, runner, clock)
         return service.execute(task)
 
 
@@ -311,20 +374,7 @@ def run_task(args: argparse.Namespace) -> int:
         return EXIT_USAGE
 
     clock = SystemClock()
-    docker = DockerRunner(DockerConfig(image=args.image))
-    runner: ValidationRunner = (
-        docker if args.runner == RUNNER_DOCKER else LocalRunner(clock)
-    )
-
-    if not runner.isolated:
-        # Printed every time, on stderr, so an unisolated run is never mistaken
-        # for a measured one.
-        print(
-            f"{PROGRAM}: warning: running with {runner.runner_id}, which provides "
-            f"no isolation. Commands execute as you, with your network and "
-            f"filesystem. Development use only.",
-            file=sys.stderr,
-        )
+    runner, docker = _build_runners(args, clock)
 
     # Held from before recovery until the run is stored. Recovery assumes every
     # unfinished run is abandoned, which is only true while no other af run
