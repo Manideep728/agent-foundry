@@ -437,3 +437,41 @@ against, which is the position a developer given a bug report is in.
 
 **What would change it.** An oracle-setting benchmark, where showing the tests
 is the point and the numbers are labelled accordingly.
+
+---
+
+## D19 — The real-repository suite is deferred, on integration cost
+
+*2026-09-17*
+
+**Context.** D7 made the second benchmark suite conditional on verifying that
+its environments are available and that its task schema maps cleanly. That
+verification had not been done.
+
+**Decision.** Both claims are confirmed, and the suite is still deferred to a
+later release.
+
+**What the check found.** The dataset carries everything the task schema needs,
+and its per-instance container images are published and usable: one was pulled
+and run with the network disabled, its repository is present at exactly the
+commit the dataset names, and a real test from that instance executes offline.
+So availability and schema fit are not the obstacle.
+
+The obstacle is that this harness identifies a task by the content hash of a
+local fixture directory, which it copies into a workspace and diffs afterwards.
+A real-repository task is a commit inside a prebuilt image, with no local
+fixture at all. Adopting it means task identity becomes a commit, the patch
+comes from version control rather than from a manifest comparison, and every
+instance needs its own image carrying the supervisor. A further detail decides
+it: those images ship without the test changes that expose the defect, so the
+tests a task is graded on pass until the harness applies them — a step the
+hand-written suite has no equivalent of.
+
+**Consequence.** That is a change to the core model rather than an adapter
+beside it, so it is scheduled as its own work rather than added to the current
+release. The hand-written suite is unaffected and remains the committed scope.
+
+**What would change it.** Nothing about the dataset, which is suitable. It
+changes when the task model can express a task whose identity is a commit
+rather than a content hash.
+
