@@ -209,10 +209,16 @@ def _print_record(record: RunRecord) -> None:
         print("  TASK DEFECT an empty patch resolved this task; it measures nothing")
 
     if record.agent_ms is not None or record.validation_ms is not None:
-        print(
-            f"  duration    agent {record.agent_ms}ms   "
-            f"validation {record.validation_ms}ms"
+        # Rendered a phase at a time. A run whose agent finished and whose
+        # validation never started has a real agent duration and no validation
+        # one, and printing "validation Nonems" for it would be worse than
+        # either number. That combination became reachable when the runner
+        # failure paths started keeping the agent result.
+        agent = "-" if record.agent_ms is None else f"{record.agent_ms}ms"
+        validation = (
+            "-" if record.validation_ms is None else f"{record.validation_ms}ms"
         )
+        print(f"  duration    agent {agent}   validation {validation}")
     if record.invocations:
         provider = record.invocations[0].provider_id
         model = record.invocations[0].model_id

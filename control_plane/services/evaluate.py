@@ -164,13 +164,31 @@ class EvaluationService:
                     )
                 )
             except RunnerUnavailable as error:
+                # The agent has already run and already spent, so its result
+                # travels into the record even though validation produced
+                # nothing. Dropping it recorded a cost of zero for the failure
+                # category most likely to have cost something, and a benchmark
+                # cannot report money spent for no measurement if the money is
+                # not in the row.
                 record = self._fail(
-                    run, task, FailureCategory.INFRASTRUCTURE_FAILED, str(error)
+                    run,
+                    task,
+                    FailureCategory.INFRASTRUCTURE_FAILED,
+                    str(error),
+                    patch=patch,
+                    agent_result=agent_result,
+                    agent_ms=agent_ms,
                 )
                 return record
             except RunnerFailed as error:
                 record = self._fail(
-                    run, task, FailureCategory.RUNNER_FAILED, str(error)
+                    run,
+                    task,
+                    FailureCategory.RUNNER_FAILED,
+                    str(error),
+                    patch=patch,
+                    agent_result=agent_result,
+                    agent_ms=agent_ms,
                 )
                 return record
             validation_ms = self._clock.monotonic_ms() - validation_started

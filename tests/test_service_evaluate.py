@@ -119,6 +119,7 @@ def test_a_fixture_that_does_not_match_its_pin_fails_before_spending_anything(
 
     assert record.run.state is RunState.FAILED
     assert record.run.failure is not None
+    assert record.run.failure is not None
     assert record.run.failure.kind is FailureCategory.FIXTURE_HASH_MISMATCH
     assert record.run.failure.failed_from is RunState.PREPARING
     assert record.invocations == ()  # nothing was paid for
@@ -272,6 +273,7 @@ def test_a_runner_that_produces_no_result_is_a_runner_failure(
     service, repo = build(tmp_path, runner=BrokenRunner())
     record = service.execute(task())
 
+    assert record.run.failure is not None
     assert record.run.failure is not None
     assert record.run.failure.kind is FailureCategory.RUNNER_FAILED
     repo.close()
@@ -621,3 +623,83 @@ def test_a_run_whose_reply_was_read_writes_no_reply_file(tmp_path: Path) -> None
     stored = repo.get(record.run.run_id)
     assert stored is not None
     assert stored.agent_note is None
+
+
+# --- what a run keeps when the runner never answered ------------------------
+
+
+class DeadDockerRunner:
+    """Docker is unreachable, after the agent has already run and spent."""
+
+    runner_id = "docker"
+    runner_version = "docker 0"
+    isolated = True
+    image_digest = None
+
+    def run(self, request: ValidationRequest) -> ValidationReport:
+        raise RunnerUnavailable("cannot connect to the Docker daemon")
+
+
+class SilentRunnerFailure:
+    """The supervisor wrote nothing back, after the agent had run."""
+
+    runner_id = "docker"
+    runner_version = "docker 0"
+    isolated = True
+    image_digest = None
+
+    def run(self, request: ValidationRequest) -> ValidationReport:
+        raise RunnerFailed("result.json was truncated")
+
+
+def test_a_docker_outage_still_records_what_the_agent_spent(tmp_path: Path) -> None:
+    """The model ran and cost money; the container never started.
+
+    `_fail` accepts the patch, the agent result and the agent duration, and the
+    two runner-failure paths passed none of them -- so a run where the model
+    definitely spent tokens recorded no invocations and a cost of zero. That
+    is the one failure category most likely to have spent something, and the
+    benchmark line for money spent without a measurement would read zero for
+    exactly the case it exists to surface.
+    """
+    service, repo = build(tmp_path, runner=DeadDockerRunner())
+    record = service.execute(task())
+
+    assert record.run.failure is not None
+    assert record.run.failure.kind is FailureCategory.INFRASTRUCTURE_FAILED
+    assert record.invocations, "the agent ran, so its invocations must survive"
+    # Tokens rather than money: a locally hosted model costs zero, which is a
+    # measured fact. The tokens are what prove the model actually ran, and the
+    # cost column is only meaningful once a priced provider is behind it.
+    assert record.invocations[0].usage.total_tokens > 0
+    assert record.agent_ms is not None
+
+    stored = repo.get(record.run.run_id)
+    assert stored is not None
+    assert stored.total_cost_micros == record.total_cost_micros
+
+
+def test_a_runner_failure_still_records_what_the_agent_spent(tmp_path: Path) -> None:
+    # The same hole, one exception along.
+    service, _ = build(tmp_path, runner=SilentRunnerFailure())
+    record = service.execute(task())
+
+    assert record.run.failure is not None
+    assert record.run.failure.kind is FailureCategory.RUNNER_FAILED
+    assert record.invocations
+    assert record.invocations[0].usage.total_tokens > 0
+
+
+def test_a_run_that_failed_before_the_agent_spends_nothing(tmp_path: Path) -> None:
+    # The complement, so the fix cannot be "always attach an agent result":
+    # a run that never reached the agent has genuinely spent nothing.
+    broken = load_task(TASK_FILE)
+    object.__setattr__(broken, "fixture_sha256", "f" * 64)
+    service, _ = build(tmp_path)
+
+    record = service.execute(broken)
+
+    assert record.run.failure is not None
+    assert record.run.failure.kind is FailureCategory.FIXTURE_HASH_MISMATCH
+    assert record.invocations == ()
+    assert record.total_cost_micros == 0
