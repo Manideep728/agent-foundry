@@ -237,6 +237,7 @@ class ToolUseAgent:
         ]
         invocations: list[ModelInvocation] = []
         wrote_anything = False
+        tools_called = 0
         text_calls = 0
 
         for _ in range(self._max_turns):
@@ -250,12 +251,24 @@ class ToolUseAgent:
                     text_calls += 1
 
             if not tool_calls:
-                # The model answered in prose. If it has already written
-                # something that is the end of the job; if it has not, it
-                # talked instead of working, which is a malformed run.
-                if wrote_anything:
+                # The model answered in prose, which ends the loop either way.
+                # What it means depends on whether it ever used a tool.
+                #
+                # malformed_output is a statement about the harness being
+                # unable to read the model, and it is only true when nothing
+                # was ever read. A model that listed files, read them and then
+                # said it was finished has been understood perfectly; whether
+                # that produced a patch is the score's business, and an empty
+                # one classifies as no_patch_produced. Reporting that as
+                # malformed instead blames the harness for a decision the
+                # model made, and inflates the one rate that must not read
+                # wrong.
+                if tools_called or wrote_anything:
                     return AgentResult(
-                        tuple(invocations), outcome_detail=_note(text_calls)
+                        tuple(invocations),
+                        outcome_detail=_note(
+                            text_calls, tools_called, wrote=wrote_anything
+                        ),
                     )
                 return AgentResult(
                     tuple(invocations),
@@ -269,18 +282,22 @@ class ToolUseAgent:
             )
             for call in tool_calls:
                 answer, wrote = self._run_tool(space, call)
+                tools_called += 1
                 wrote_anything = wrote_anything or wrote
                 messages.append(Message(MessageRole.TOOL, answer, tool_name=call.name))
 
-        # Out of turns. Whatever was written is a real patch and is scored as
-        # one; only a loop that never wrote anything is malformed.
-        if wrote_anything:
-            return AgentResult(tuple(invocations), outcome_detail=_note(text_calls))
+        # Out of turns, which is only reachable by calling a tool on every one
+        # of them: any turn that produced no call returned above. So the model
+        # was read on every turn and this is never malformed -- it ran out of
+        # budget, which the note records because the outcome cannot.
         return AgentResult(
             tuple(invocations),
-            outcome=AgentOutcome.MALFORMED_OUTPUT,
-            raw_reply=None,
-            outcome_detail=f"used all {self._max_turns} turns without writing a file",
+            outcome_detail=_note(
+                text_calls,
+                tools_called,
+                wrote=wrote_anything,
+                ending=f"stopped after the {self._max_turns} turn budget",
+            ),
         )
 
     def _opening(self, space: _Workspace, task: TaskDefinition) -> str:
@@ -328,16 +345,32 @@ class ToolUseAgent:
 _TOOL_NAMES = frozenset(tool.name for tool in TOOLS)
 
 
-def _note(text_calls: int) -> str | None:
-    """What to record about *how* the model asked for its tools.
+def _note(
+    text_calls: int, tools_called: int, *, wrote: bool, ending: str | None = None
+) -> str | None:
+    """What to record about how the model worked, when there is anything to say.
 
-    Reported rather than smoothed over. If a model never uses the structured
-    channel, its runs are not comparable with one that does, and a fallback
-    that left no trace would hide exactly that.
+    Silent on an ordinary successful run, deliberately. A note attached to
+    every run is a field readers learn to skip, which is the same reason the
+    image digest line is printed only when it has something to report.
+
+    It speaks up for three things. How the model asked for its tools, because a
+    model that never uses the structured channel is not comparable with one
+    that does. How the loop ended, when the outcome cannot carry it -- running
+    out of budget and stopping deliberately score identically. And how many
+    tools were called when nothing was written, which is the whole difference
+    between a model that investigated and declined and one that did nothing.
     """
-    if text_calls == 0:
-        return None
-    return f"{text_calls} turn(s) asked for tools as text rather than tool calls"
+    parts: list[str] = []
+    if ending is not None:
+        parts.append(ending)
+    if text_calls:
+        parts.append(
+            f"{text_calls} turn(s) asked for tools as text rather than tool calls"
+        )
+    if tools_called and not wrote:
+        parts.append(f"{tools_called} tool call(s) but no file written")
+    return "; ".join(parts) if parts else None
 
 
 def _tool_calls_in_text(text: str) -> tuple[ToolCall, ...]:

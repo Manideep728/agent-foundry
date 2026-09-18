@@ -190,20 +190,6 @@ def test_a_loop_that_wrote_something_and_then_stalled_is_not_malformed(
     assert result.outcome is None
 
 
-def test_a_loop_that_never_wrote_anything_runs_out_and_says_so(
-    tmp_path: Path,
-) -> None:
-    result, _, _ = run(
-        tmp_path,
-        [calls(ToolCall(LIST_FILES, {})), calls(ToolCall(LIST_FILES, {}))],
-        max_turns=2,
-    )
-
-    assert result.outcome is AgentOutcome.MALFORMED_OUTPUT
-    assert result.outcome_detail is not None
-    assert "without writing a file" in result.outcome_detail
-
-
 def test_the_turn_budget_is_honoured(tmp_path: Path) -> None:
     # Without a budget a model that keeps reading runs until the task's total
     # timeout, and "timed out" says nothing about the model.
@@ -244,7 +230,9 @@ def test_a_write_outside_the_workspace_is_refused(tmp_path: Path, path: str) -> 
     )
 
     assert not (repo.parent.parent / "escaped.py").exists()
-    assert result.outcome is AgentOutcome.MALFORMED_OUTPUT
+    # Not malformed: the call was read and refused on its path. The model was
+    # understood and produced no patch, which is what no_patch_produced means.
+    assert result.outcome is None
 
 
 def test_a_symlink_out_of_the_workspace_is_refused(tmp_path: Path) -> None:
@@ -461,3 +449,61 @@ def test_a_fenced_tool_call_is_read(tmp_path: Path) -> None:
     _, repo, _ = run(tmp_path, [says(fenced), says("done")])
 
     assert (repo / "csvkit" / "fields.py").read_text() == "ok\n"
+
+
+# --- what "malformed" actually means ----------------------------------------
+
+
+def test_a_model_that_used_its_tools_and_then_stopped_is_not_malformed(
+    tmp_path: Path,
+) -> None:
+    """Measured against qwen2.5-coder:7b on 2026-09-17, four turns.
+
+    It listed the files, read two of them, then said the code looked correct
+    and stopped. The loop reported malformed_output with the note "the model
+    never called a tool" -- and it had called three.
+
+    malformed_output is a statement about the harness being unable to read the
+    model. Here the model was read perfectly and chose not to edit, which is
+    an empty patch and classifies as no_patch_produced. Conflating the two
+    blames the harness for the model's decision and inflates the one rate the
+    agent pipeline exists to measure honestly.
+    """
+    result, _, _ = run(
+        tmp_path,
+        [
+            calls(ToolCall(LIST_FILES, {})),
+            calls(ToolCall(READ_FILE, {"path": "csvkit/fields.py"})),
+            says("This already looks correct to me, so I am making no changes."),
+        ],
+    )
+
+    assert result.outcome is None
+    assert result.outcome_detail is not None
+    assert "never called a tool" not in result.outcome_detail
+    assert "2 tool call(s)" in result.outcome_detail
+
+
+def test_a_model_that_never_called_a_tool_is_still_malformed(tmp_path: Path) -> None:
+    # The genuine case the branch exists for: nothing was read, so nothing can
+    # be said about what the model decided.
+    result, _, _ = run(tmp_path, [says("You should fix the parser.")])
+
+    assert result.outcome is AgentOutcome.MALFORMED_OUTPUT
+    assert result.outcome_detail == "the model never called a tool"
+
+
+def test_running_out_of_turns_after_using_tools_is_not_malformed(
+    tmp_path: Path,
+) -> None:
+    # Same rule at the budget boundary. A loop that read files for its whole
+    # budget was understood; it simply did not finish.
+    result, _, _ = run(
+        tmp_path,
+        [calls(ToolCall(LIST_FILES, {})), calls(ToolCall(LIST_FILES, {}))],
+        max_turns=2,
+    )
+
+    assert result.outcome is None
+    assert result.outcome_detail is not None
+    assert "turn budget" in result.outcome_detail
