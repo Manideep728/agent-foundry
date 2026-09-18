@@ -63,6 +63,26 @@ it -- which is correct, because it produced no measurement.
 """
 
 
+def _reached_validation(run: EvaluationRun) -> bool:
+    """Whether this run got as far as asking the runner to validate.
+
+    The gate on `image_digest`. The Docker runner caches the digest of the
+    image it last validated in, deliberately, so a run that dies *during*
+    validation still names the image it died in. Across a suite that cache
+    outlives the run it describes, and the next task to fail before validation
+    -- a fixture hash mismatch, a workspace it could not create, an agent that
+    raised -- would inherit the previous task is provenance.
+
+    That is the stale arch and pid1 columns again, and it is closed the same
+    way: a record carries an environment fact only when the run was in a
+    position to observe it. Whether it got that far is the service is
+    knowledge, not the runner is, which is why the gate lives here.
+    """
+    if run.state in (RunState.VALIDATING, RunState.SCORED):
+        return True
+    return run.failure is not None and run.failure.failed_from is RunState.VALIDATING
+
+
 class EvaluationService:
     def __init__(
         self,
@@ -207,7 +227,15 @@ class EvaluationService:
             # An abort is expected operator behaviour, not a defect. Kept out
             # of FAILED so harness reliability is not polluted by every ^C.
             aborted = run.abort(self._clock.now_unix_ms())
-            self._repo.finish(self._base_record(aborted, task), expected=run.state)
+            # `abort()` carries no failed_from -- a non-FAILED run may not hold
+            # a HarnessFailure -- so the pre-abort run is the only thing that
+            # still knows how far this got.
+            self._repo.finish(
+                self._base_record(
+                    aborted, task, reached_validation=_reached_validation(run)
+                ),
+                expected=run.state,
+            )
             raise
         finally:
             # Keyed off the record that was actually produced, not off `run`:
@@ -346,6 +374,7 @@ class EvaluationService:
         agent_ms: int | None = None,
         validation_ms: int | None = None,
         task_defect: bool = False,
+        reached_validation: bool | None = None,
     ) -> RunRecord:
         invocations = agent_result.invocations if agent_result is not None else ()
         unified = patch.unified_diff if patch is not None else None
@@ -363,7 +392,15 @@ class EvaluationService:
             # container has been started for this run -- so guarding it here
             # would empty the column on exactly the failure paths the pre-run
             # inspect exists to cover.
-            image_digest=self._runner.image_digest,
+            image_digest=(
+                self._runner.image_digest
+                if (
+                    _reached_validation(run)
+                    if reached_validation is None
+                    else reached_validation
+                )
+                else None
+            ),
             agent_note=agent_result.outcome_detail if agent_result else None,
             report=report,
             score=score_result,

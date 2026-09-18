@@ -119,7 +119,6 @@ def test_a_fixture_that_does_not_match_its_pin_fails_before_spending_anything(
 
     assert record.run.state is RunState.FAILED
     assert record.run.failure is not None
-    assert record.run.failure is not None
     assert record.run.failure.kind is FailureCategory.FIXTURE_HASH_MISMATCH
     assert record.run.failure.failed_from is RunState.PREPARING
     assert record.invocations == ()  # nothing was paid for
@@ -703,3 +702,96 @@ def test_a_run_that_failed_before_the_agent_spends_nothing(tmp_path: Path) -> No
     assert record.run.failure.kind is FailureCategory.FIXTURE_HASH_MISMATCH
     assert record.invocations == ()
     assert record.total_cost_micros == 0
+
+
+# --- the image a run may name -----------------------------------------------
+
+
+DIGEST = "sha256:" + "b" * 64
+
+
+class CachingImagedRunner(LocalRunner):
+    """Caches its digest across runs, exactly as DockerRunner does.
+
+    DockerRunner resolves the digest at the top of `run()` and keeps it on the
+    instance, so a task that never calls `run()` reads whatever the previous
+    task left there. Modelled rather than stubbed, because the defect lives in
+    the lifetime of that value and a stub without the lifetime proves nothing.
+    """
+
+    _digest: str | None = None
+
+    @property
+    def image_digest(self) -> str | None:
+        return self._digest
+
+    def run(self, request: ValidationRequest) -> ValidationReport:
+        self._digest = DIGEST
+        return super().run(request)
+
+
+class DeadImagedRunner:
+    """Names an image, then fails once validation has started."""
+
+    runner_id = "docker"
+    runner_version = "docker 0"
+    isolated = True
+    image_digest = DIGEST
+
+    def run(self, request: ValidationRequest) -> ValidationReport:
+        raise RunnerUnavailable("the daemon went away mid-run")
+
+
+def _hash_mismatch() -> TaskDefinition:
+    broken = load_task(TASK_FILE)
+    object.__setattr__(broken, "fixture_sha256", "f" * 64)
+    return broken
+
+
+def test_a_run_that_never_validated_names_no_image(tmp_path: Path) -> None:
+    """A run that never started a container has no image to name.
+
+    The digest is read unconditionally so that a run failing *during*
+    validation still names the image it failed in. That is right, and it is
+    only safe because the value is scoped to a run -- which stops being true
+    the moment one runner drives a whole suite.
+    """
+    service, repo = build(tmp_path, runner=ImagedRunner(RealClock()))
+
+    record = service.execute(_hash_mismatch())
+
+    assert record.run.failure is not None
+    assert record.run.failure.kind is FailureCategory.FIXTURE_HASH_MISMATCH
+    assert record.image_digest is None
+    stored = repo.get(record.run.run_id)
+    assert stored is not None
+    assert stored.image_digest is None
+
+
+def test_a_shared_runner_does_not_lend_its_image_to_the_next_task(
+    tmp_path: Path,
+) -> None:
+    # The suite case. One service, one runner, two tasks: the second fails
+    # before validation and must not inherit the first task's provenance.
+    service, _ = build(tmp_path, runner=CachingImagedRunner(RealClock()))
+
+    first = service.execute(load_task(TASK_FILE))
+    second = service.execute(_hash_mismatch())
+
+    assert first.image_digest == DIGEST
+    assert second.image_digest is None
+
+
+def test_a_run_that_failed_during_validation_still_names_its_image(
+    tmp_path: Path,
+) -> None:
+    # The complement, so the gate cannot be over-tightened to "only when there
+    # is a report" -- which would empty the column on exactly the
+    # infrastructure failures the pre-run inspect exists to cover.
+    service, _ = build(tmp_path, runner=DeadImagedRunner())
+
+    record = service.execute(load_task(TASK_FILE))
+
+    assert record.run.failure is not None
+    assert record.run.failure.failed_from is RunState.VALIDATING
+    assert record.image_digest == DIGEST
