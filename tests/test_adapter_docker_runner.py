@@ -63,6 +63,39 @@ def _value_after(argv: list[str], flag: str) -> str:
 # --- the command line ------------------------------------------------------
 
 
+def test_every_bind_source_is_an_absolute_path(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Docker refuses a relative bind source, and the default runs dir is one.
+
+    `--runs` defaults to `Path("runs")`, so every command in the README --
+    `af run tasks/...`, `make bench` -- built a relative mount and every run
+    from a clean checkout was recorded `infrastructure_failed`. Nothing caught
+    it because every test and every development command passed an absolute
+    `--runs` under tmp_path.
+
+    Asserted on the argv rather than left to an integration test, like the
+    `--network none` invariant above, so it fails without Docker present.
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "runs" / "out" / "logs").mkdir(parents=True)
+    (tmp_path / "runs" / "repo").mkdir(parents=True)
+    relative = replace(
+        _request(tmp_path / "runs"),
+        workdir=Path("runs/repo"),
+        output_dir=Path("runs/out"),
+        log_dir=Path("runs/out/logs"),
+    )
+
+    argv = build_argv(relative, DockerConfig())
+
+    sources = [
+        part.split("source=", 1)[1].split(",", 1)[0]
+        for part in argv
+        if part.startswith("--mount=")
+    ]
+    assert sources, "the container mounts nothing"
+    assert all(Path(source).is_absolute() for source in sources), sources
+
+
 def test_the_container_has_no_network_and_no_capabilities(tmp_path: Path) -> None:
     # A project invariant: validation runs with --network none, asserted on the
     # argv rather than trusted to an integration test.

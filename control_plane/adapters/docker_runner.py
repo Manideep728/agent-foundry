@@ -190,9 +190,16 @@ def _bind(source: Path, target: str, *, read_only: bool) -> str:
     # --mount, not -v: -v silently creates a missing source directory as root,
     # where --mount refuses to start. A comma would split the --mount value
     # into a different option, so a path holding one is refused outright.
-    if "," in str(source):
-        raise RunnerFailed(f"cannot bind-mount {source}: the path contains a comma")
-    spec = f"--mount=type=bind,source={source},target={target}"
+    #
+    # Resolved here, not by the caller. Docker refuses a relative bind source
+    # outright -- "mount path must be absolute" -- and the constraint belongs
+    # to Docker, not to whoever chose the runs directory. The local runner has
+    # no such rule, so a CLI that absolutised every path would be encoding this
+    # runner's requirement in a layer that cannot see it.
+    absolute = source.resolve()
+    if "," in str(absolute):
+        raise RunnerFailed(f"cannot bind-mount {absolute}: the path contains a comma")
+    spec = f"--mount=type=bind,source={absolute},target={target}"
     return f"{spec},readonly" if read_only else spec
 
 
