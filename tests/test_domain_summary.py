@@ -13,7 +13,7 @@ from control_plane.domain.outcomes import AgentOutcome, FailureCategory
 from control_plane.domain.record import RunRecord
 from control_plane.domain.scoring import Score
 from control_plane.domain.states import EvaluationRun, RunState
-from control_plane.domain.summary import spread, summarise
+from control_plane.domain.summary import Configuration, spread, summarise
 from control_plane.domain.task import Suite
 from control_plane.domain.validation import (
     SCHEMA_VERSION,
@@ -74,10 +74,15 @@ def a_score(*, resolved: bool = True, p2p_total: int = 1) -> Score:
     )
 
 
-def an_invocation(cost: int = 0) -> ModelInvocation:
+AGENT = "single-shot"
+PROVIDER = "ollama"
+MODEL = "qwen2.5-coder:7b"
+
+
+def an_invocation(cost: int = 0, model: str = MODEL) -> ModelInvocation:
     return ModelInvocation(
-        provider_id="ollama",
-        model_id="qwen2.5-coder:7b",
+        provider_id=PROVIDER,
+        model_id=model,
         usage=ModelUsage(input_tokens=10, output_tokens=5),
         cost=MicroUsd(cost),
         latency_ms=1,
@@ -105,6 +110,8 @@ def scored(
     validation_ms: int = 50,
     cost: int = 0,
     p2p_total: int = 1,
+    agent: str | None = AGENT,
+    model: str = MODEL,
 ) -> RunRecord:
     return RunRecord(
         run=_run(run_id, RunState.SCORED),
@@ -118,14 +125,19 @@ def scored(
         score=a_score(resolved=resolved, p2p_total=p2p_total),
         outcome=outcome,
         patch_is_empty=not resolved and outcome is AgentOutcome.NO_PATCH_PRODUCED,
-        invocations=(an_invocation(cost),),
+        agent_id=agent,
+        provider_id=PROVIDER if agent else None,
+        model_id=model if agent else None,
+        invocations=(an_invocation(cost, model),),
         total_cost_micros=MicroUsd(cost),
         agent_ms=agent_ms,
         validation_ms=validation_ms,
     )
 
 
-def failed(run_id: str = "run-0002", *, cost: int = 0) -> RunRecord:
+def failed(
+    run_id: str = "run-0002", *, cost: int = 0, agent: str | None = AGENT
+) -> RunRecord:
     return RunRecord(
         run=_run(run_id, RunState.FAILED),
         suite=Suite.SYNTHETIC,
@@ -134,13 +146,16 @@ def failed(run_id: str = "run-0002", *, cost: int = 0) -> RunRecord:
         runner_version="stub 0",
         arch="unknown",
         pid1=False,
+        agent_id=agent,
+        provider_id=PROVIDER if agent else None,
+        model_id=MODEL if agent else None,
         invocations=(an_invocation(cost),),
         total_cost_micros=MicroUsd(cost),
         agent_ms=9_999,
     )
 
 
-def aborted(run_id: str = "run-0003") -> RunRecord:
+def aborted(run_id: str = "run-0003", *, agent: str | None = AGENT) -> RunRecord:
     return RunRecord(
         run=_run(run_id, RunState.ABORTED),
         suite=Suite.SYNTHETIC,
@@ -149,6 +164,9 @@ def aborted(run_id: str = "run-0003") -> RunRecord:
         runner_version="stub 0",
         arch="unknown",
         pid1=False,
+        agent_id=agent,
+        provider_id=PROVIDER if agent else None,
+        model_id=MODEL if agent else None,
     )
 
 
@@ -272,9 +290,80 @@ def test_a_failed_run_is_listed_with_its_category_and_detail() -> None:
     assert entry.run_id == "run-0002"
 
 
-def test_the_provider_and_model_are_read_from_the_invocations() -> None:
-    # D6: a report states which implementation produced each run, and the flag
-    # says what was asked for where the record says what answered.
+def test_a_summary_names_the_configuration_it_covers() -> None:
+    # D6: a report states which implementation produced each run.
     (summary,) = summarise([scored()])
 
-    assert summary.labels == (("ollama", "qwen2.5-coder:7b"),)
+    assert summary.configuration == Configuration(AGENT, PROVIDER, MODEL)
+
+
+def test_two_agents_driving_one_model_are_summarised_apart() -> None:
+    """The comparison the suite exists to make, and the one a blend destroys.
+
+    The single-shot agent and the tool loop share a provider and a model, so a
+    key of `(provider, model)` merges them. Measured on this project: the same
+    7B model resolves 5 of 8 tasks single-shot and 0 of 8 through the loop.
+    Blended that reads `resolved 5/16`, which is true of neither and hides the
+    finding completely.
+    """
+    runs = [
+        scored("run-0001", agent="single-shot", resolved=True),
+        scored(
+            "run-0002",
+            agent="tools",
+            resolved=False,
+            outcome=AgentOutcome.NO_PATCH_PRODUCED,
+        ),
+    ]
+
+    single, tools = summarise(runs)
+
+    assert single.configuration.agent_id == "single-shot"
+    assert single.resolved == 1
+    assert tools.configuration.agent_id == "tools"
+    assert tools.resolved == 0
+
+
+def test_one_agent_against_two_models_is_summarised_apart() -> None:
+    # The other half of the key. 3b and 7b are different measurements.
+    runs = [
+        scored("run-0001", model="qwen2.5-coder:3b"),
+        scored("run-0002", model="qwen2.5-coder:7b"),
+    ]
+
+    small, large = summarise(runs)
+
+    assert small.configuration.model_id == "qwen2.5-coder:3b"
+    assert large.configuration.model_id == "qwen2.5-coder:7b"
+    assert (small.measured, large.measured) == (1, 1)
+
+
+def test_summaries_come_back_in_a_fixed_order() -> None:
+    # A report whose sections move between two runs cannot be diffed.
+    runs = [scored("run-0001", agent="tools"), scored("run-0002", agent="fake")]
+
+    forwards = [s.configuration.sort_key for s in summarise(runs)]
+    backwards = [s.configuration.sort_key for s in summarise(list(reversed(runs)))]
+
+    assert forwards == backwards == sorted(forwards)
+
+
+def test_a_run_stored_before_the_columns_existed_keeps_what_answered() -> None:
+    """The migration leaves the columns NULL, and the invocations survive.
+
+    Reporting those runs as "unrecorded" would throw away a provider and a
+    model the database still holds. Only the strategy was never written down.
+    """
+    (summary,) = summarise([scored(agent=None)])
+
+    assert summary.configuration == Configuration(None, PROVIDER, MODEL)
+    assert not summary.configuration.is_named
+
+
+def test_an_unnamed_configuration_does_not_join_a_named_one() -> None:
+    # "We do not know what produced these" is not evidence for any particular
+    # answer, so folding it into the one named row would corrupt that row.
+    summaries = summarise([aborted("run-0001", agent=None), scored("run-0002")])
+
+    assert len(summaries) == 2
+    assert summaries[0].configuration == Configuration(None, None, None)

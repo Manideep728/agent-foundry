@@ -51,6 +51,47 @@ class Durations:
 
 
 @dataclass(frozen=True, slots=True)
+class Configuration:
+    """Which agent, provider and model a set of runs was measuring.
+
+    Three parts, because no two of them determine the third. The single-shot
+    agent and the tool loop drive the same model through the same provider and
+    score very differently, so a key of `(provider, model)` merges the one
+    comparison the suite exists to make.
+
+    Any part is None only for a run stored before the harness recorded this.
+    Such a run groups on its own rather than joining a named configuration:
+    "we do not know what produced these" is a different statement from any
+    particular answer, and merging it into one would corrupt that row instead.
+    """
+
+    agent_id: str | None
+    provider_id: str | None
+    model_id: str | None
+
+    @property
+    def is_named(self) -> bool:
+        """Whether this run says what produced it."""
+        return self.agent_id is not None
+
+    @property
+    def sort_key(self) -> tuple[str, str, str]:
+        """A total order, so the same runs summarise in the same order.
+
+        None sorts first, as the empty string. A report whose sections move
+        between two runs over the same database cannot be diffed.
+        """
+        return (
+            self.agent_id or "",
+            self.provider_id or "",
+            self.model_id or "",
+        )
+
+
+UNRECORDED = Configuration(None, None, None)
+
+
+@dataclass(frozen=True, slots=True)
 class Unmeasured:
     """A run that produced no measurement, and why."""
 
@@ -66,6 +107,7 @@ class SuiteSummary:
     """What one suite's runs showed. One suite, never a total across them."""
 
     suite: Suite
+    configuration: Configuration
     runs: int
     measured: int
     aborted: int
@@ -87,7 +129,6 @@ class SuiteSummary:
     agent_ms: Durations | None
     validation_ms: Durations | None
 
-    labels: tuple[tuple[str, str], ...]
     image_digests: tuple[str, ...]
 
     def __post_init__(self) -> None:
@@ -131,17 +172,24 @@ def spread(values: Iterable[int]) -> Durations | None:
     )
 
 
-def _label(record: RunRecord) -> tuple[str, str] | None:
-    """Which provider and model produced a run (D6).
+def configuration_of(record: RunRecord) -> Configuration:
+    """Which configuration a run belongs to (D6).
 
-    Read from the invocations rather than from a flag, because the flag says
-    what was asked for and the record says what answered. A run that failed
-    before the agent ran has no invocations and so no label, which is honest.
+    The record's own columns first. They are written before the agent runs, so
+    a run that failed on its way to the model still names what was being
+    measured -- and those are exactly the runs a reliability figure is about.
+
+    The invocations are the fallback, for runs stored before the harness
+    recorded the columns. They say what actually answered, which recovers the
+    provider and the model honestly; the strategy that drove them was never
+    written down and stays None rather than being guessed at.
     """
-    if not record.invocations:
-        return None
-    first = record.invocations[0]
-    return first.provider_id, first.model_id
+    if record.agent_id is not None:
+        return Configuration(record.agent_id, record.provider_id, record.model_id)
+    if record.invocations:
+        first = record.invocations[0]
+        return Configuration(None, first.provider_id, first.model_id)
+    return UNRECORDED
 
 
 def _distinct(values: Iterable[str | None]) -> tuple[str, ...]:
@@ -153,24 +201,41 @@ def _distinct(values: Iterable[str | None]) -> tuple[str, ...]:
 
 
 def summarise(records: Iterable[RunRecord]) -> tuple[SuiteSummary, ...]:
-    """One summary per suite that appears, in `Suite` declaration order.
+    """One summary per suite and configuration, in a fixed order.
 
-    Grouped rather than totalled. D7 forbids averaging a synthetic fixture with
-    a real repository, and a function that *can* blend them eventually will --
-    so the grouping is structural rather than a rule someone has to remember.
-    Order comes from the enum rather than from the records, so the same set of
-    runs summarises identically whichever one happens to be first.
+    Grouped rather than totalled, on both axes. D7 forbids averaging a
+    synthetic fixture with a real repository and D6 forbids blending providers,
+    and a function that *can* blend them eventually will -- so the grouping is
+    structural rather than a rule someone has to remember.
+
+    The configuration is half of the key, not a label printed beside one. A
+    database holding a single-shot run and a tool-loop run of the same model is
+    the ordinary case the moment anything reports on stored runs rather than on
+    the runs one command just produced, and one `resolved 5/16` across them
+    describes neither.
+
+    Suite order comes from the enum and configuration order from `sort_key`,
+    so the same set of runs summarises identically whichever one is first.
     """
     collected = tuple(records)
     summaries = []
     for suite in Suite:
         in_suite = tuple(r for r in collected if r.suite is suite)
-        if in_suite:
-            summaries.append(_summarise_one(suite, in_suite))
+        by_configuration: dict[Configuration, list[RunRecord]] = {}
+        for record in in_suite:
+            by_configuration.setdefault(configuration_of(record), []).append(record)
+        for configuration in sorted(by_configuration, key=lambda c: c.sort_key):
+            summaries.append(
+                _summarise_one(
+                    suite, configuration, tuple(by_configuration[configuration])
+                )
+            )
     return tuple(summaries)
 
 
-def _summarise_one(suite: Suite, records: tuple[RunRecord, ...]) -> SuiteSummary:
+def _summarise_one(
+    suite: Suite, configuration: Configuration, records: tuple[RunRecord, ...]
+) -> SuiteSummary:
     scored = tuple(r for r in records if r.run.state is RunState.SCORED)
     aborted = tuple(r for r in records if r.run.state is RunState.ABORTED)
     failed = tuple(r for r in records if r.run.state is RunState.FAILED)
@@ -202,6 +267,7 @@ def _summarise_one(suite: Suite, records: tuple[RunRecord, ...]) -> SuiteSummary
 
     return SuiteSummary(
         suite=suite,
+        configuration=configuration,
         runs=len(records),
         measured=len(scored),
         aborted=len(aborted),
@@ -231,11 +297,6 @@ def _summarise_one(suite: Suite, records: tuple[RunRecord, ...]) -> SuiteSummary
         agent_ms=spread(r.agent_ms for r in scored if r.agent_ms is not None),
         validation_ms=spread(
             r.validation_ms for r in scored if r.validation_ms is not None
-        ),
-        labels=tuple(
-            dict.fromkeys(
-                label for label in (_label(r) for r in records) if label is not None
-            )
         ),
         image_digests=_distinct(r.image_digest for r in records),
     )

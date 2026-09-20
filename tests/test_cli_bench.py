@@ -178,16 +178,20 @@ def test_bench_beside_a_live_run_is_refused(
     assert "another af run" in capsys.readouterr().err
 
 
-def test_the_summary_names_the_model_that_produced_the_runs(
+def test_the_summary_names_the_configuration_that_produced_the_runs(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # D6: results from different providers are never combined, which starts
-    # with saying which one produced these.
+    """D6: results from different providers are never combined.
+
+    All three parts, because the agent and the model vary independently: the
+    single-shot agent and the tool loop drive the same model, and naming only
+    the model would print two rows a reader cannot tell apart.
+    """
     directory = suite_of(tmp_path, "pagination-last-page")
 
     main(bench_args(tmp_path, directory))
 
-    assert "model         fake/scripted" in capsys.readouterr().out
+    assert "config        fake/fake/scripted" in capsys.readouterr().out
 
 
 def test_bench_defaults_to_the_tasks_directory() -> None:

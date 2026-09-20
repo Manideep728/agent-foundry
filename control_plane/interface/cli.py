@@ -38,7 +38,12 @@ from control_plane.domain.ids import RunId
 from control_plane.domain.outcomes import FailureCategory
 from control_plane.domain.record import RunRecord
 from control_plane.domain.states import RunState
-from control_plane.domain.summary import Durations, SuiteSummary, summarise
+from control_plane.domain.summary import (
+    Configuration,
+    Durations,
+    SuiteSummary,
+    summarise,
+)
 from control_plane.domain.task import TaskDefinition
 from control_plane.interface.doctor import run_doctor
 from control_plane.services.evaluate import EvaluationService
@@ -391,6 +396,23 @@ def _print_line(record: RunRecord) -> None:
     print(f"{record.run.run_id}  {record.run.task_id!s:<24} {outcome}")
 
 
+def describe(configuration: Configuration) -> str:
+    """One line naming a configuration, for any surface that renders one.
+
+    The strategy first, because it is what a reader most often wants to
+    compare and what two rows of the same model differ by.
+    """
+    if not configuration.is_named:
+        if configuration.provider_id is not None:
+            # Stored before the harness recorded the strategy. The provider and
+            # model are still known, and printing them beats "unrecorded".
+            return f"?/{configuration.provider_id}/{configuration.model_id}"
+        return "unrecorded"
+    return (
+        f"{configuration.agent_id}/{configuration.provider_id}/{configuration.model_id}"
+    )
+
+
 def _print_durations(label: str, durations: object) -> None:
     if durations is None:
         return
@@ -410,13 +432,14 @@ def _print_summary(summary: SuiteSummary, *, planned: int) -> None:
         f"{summary.measured} measured of {attempted} attempted"
     )
 
-    # D6: a report states which implementation produced each run. More than one
-    # pair prints them all, because a blended report is what D6 forbids.
-    for provider, model in summary.labels:
-        # "model", not "agent": the duration rows below are named for the
-        # agent and validation *phases*, and one label meaning two things in
-        # one block is how a reader stops trusting either.
-        print(f"  model         {provider}/{model}")
+    # D6: a report states which implementation produced each run. One line,
+    # because the configuration is the grouping key -- a block covering two of
+    # them cannot be built.
+    #
+    # "config", not "agent". The duration rows below are named for the agent
+    # and validation *phases*, and one label meaning two things in one block
+    # is how a reader stops trusting either.
+    print(f"  config        {describe(summary.configuration)}")
     for digest in summary.image_digests:
         print(f"  image         {digest}")
 
