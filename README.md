@@ -14,10 +14,11 @@ run twice produces two comparable records.
 
 ## Status
 
-Phase 6. Five tasks run end to end: the harness verifies a fixture against its
-pinned content hash, copies it to an isolated workspace, invokes an agent,
-captures the patch, executes the repository's own tests inside a container,
-scores the result and stores it.
+Phase 8. Eight tasks run end to end, in one command: the harness verifies a
+fixture against its pinned content hash, copies it to an isolated workspace,
+invokes an agent, captures the patch, executes the repository's own tests
+inside a container, scores the result, stores it, and writes a report over
+everything it has stored.
 
 `afrunner` is the C++ execution supervisor. It reads a command file,
 runs each line under `/bin/sh -c` in its own process group, captures both
@@ -55,8 +56,8 @@ older one is opened. A database written by a newer build is refused rather than
 read, because a field may have changed meaning and guessing produces plausible
 wrong data.
 
-Five benchmark tasks exist, of deliberately varied difficulty. No benchmark
-results are published.
+Eight benchmark tasks exist, of deliberately varied difficulty and defect
+shape. No benchmark results are published.
 
 Design decisions are in [docs/DECISIONS.md](docs/DECISIONS.md). The interface
 between the control plane and the supervisor is in
@@ -204,10 +205,43 @@ Interrupting a suite prints the summary for the tasks that finished and exits
 separate from a harness failure so that cancelling a suite does not look like
 unreliability.
 
+## Write a report
+
+`af report` summarises every run in a database as Markdown, one section per
+suite and configuration.
+
+```
+$ uv run af report --out report.md
+wrote report.md
+```
+
+`--out -` writes to stdout instead. The report reads only and takes no run
+lock, so one can be taken while a suite is running.
+
+Each section names the configuration that produced it, then the counts, the
+cost, the latency ranges, the environment that validated the runs, and a row
+per task. A run that produced no measurement is listed with the task, the
+failure and the reason, because a harness-failure count nobody can trace to a
+cause cannot be acted on. Money spent by those runs is reported on its own line
+and is not added to the measured total.
+
+A run that had not finished when the report was written is named and excluded
+from every figure, rather than quietly shrinking the denominator. The next
+`af run` recovers it.
+
+Two reports over the same database differ only where the measurements differ,
+so a change between two benchmarks is a diff.
+
 ## Agents
 
 Three agents exist behind one interface, so they are comparable on the same
 suite rather than each having its own.
+
+Every run records which agent, provider and model produced it, and a summary
+groups on all three. Two of them are not enough: the single-shot agent and the
+tool loop drive the same model through the same provider, so a report keyed on
+the provider and the model alone would merge the one comparison worth making
+into a rate describing neither.
 
 `--agent fake` is the default. It applies a known solution from
 `tasks/solutions/` and calls no model, so the pipeline runs offline and in CI.
@@ -245,8 +279,8 @@ af run tasks/template-render.toml --agent tools --max-turns 8
 
 The C++ supervisor, the Python control plane and CLI, Docker-isolated
 validation, test-based scoring, SQLite storage with in-place schema upgrades,
-five benchmark tasks and two local-model agents exist. The first release also
-needs report generation and a hosted-provider adapter.
+eight benchmark tasks, three agents and Markdown report generation exist. The
+first release also needs a hosted-provider adapter.
 
 Distributed execution, automatic pull requests, and a web interface are outside
 the first release.

@@ -38,14 +38,10 @@ from control_plane.domain.ids import RunId
 from control_plane.domain.outcomes import FailureCategory
 from control_plane.domain.record import RunRecord
 from control_plane.domain.states import RunState
-from control_plane.domain.summary import (
-    Configuration,
-    Durations,
-    SuiteSummary,
-    summarise,
-)
+from control_plane.domain.summary import Durations, SuiteSummary, summarise
 from control_plane.domain.task import TaskDefinition
 from control_plane.interface.doctor import run_doctor
+from control_plane.interface.report import describe, render, unfinished
 from control_plane.services.evaluate import EvaluationService
 from control_plane.services.ports import AgentPort, ValidationRunner
 from control_plane.services.recovery import recover_unfinished
@@ -62,6 +58,7 @@ DEFAULT_RUNS = Path("runs")
 DEFAULT_FIXTURES = Path("tasks/fixtures")
 DEFAULT_SOLUTIONS = Path("tasks/solutions")
 DEFAULT_TASKS = Path("tasks")
+DEFAULT_REPORT = Path("report.md")
 DEFAULT_IMAGE = "afrunner:local"
 
 RUNNER_DOCKER = "docker"
@@ -175,6 +172,25 @@ def build_parser() -> argparse.ArgumentParser:
     show = subcommands.add_parser("show", help="print a stored run")
     show.add_argument("run_id")
     show.add_argument("--db", type=Path, default=DEFAULT_DB)
+
+    report = subcommands.add_parser(
+        "report",
+        help="write a Markdown report over the stored runs",
+        description=(
+            "Summarise every run in the database, one section per suite and "
+            "configuration, and write it as Markdown. Reads only: it takes no "
+            "run lock, so a report can be taken while a suite is running, and "
+            "any run still in flight is named and excluded rather than "
+            "counted."
+        ),
+    )
+    report.add_argument("--db", type=Path, default=DEFAULT_DB)
+    report.add_argument(
+        "--out",
+        type=Path,
+        default=DEFAULT_REPORT,
+        help="where to write it; - writes to stdout",
+    )
 
     listing = subcommands.add_parser("list", help="list stored runs")
     listing.add_argument("--db", type=Path, default=DEFAULT_DB)
@@ -396,23 +412,6 @@ def _print_line(record: RunRecord) -> None:
     print(f"{record.run.run_id}  {record.run.task_id!s:<24} {outcome}")
 
 
-def describe(configuration: Configuration) -> str:
-    """One line naming a configuration, for any surface that renders one.
-
-    The strategy first, because it is what a reader most often wants to
-    compare and what two rows of the same model differ by.
-    """
-    if not configuration.is_named:
-        if configuration.provider_id is not None:
-            # Stored before the harness recorded the strategy. The provider and
-            # model are still known, and printing them beats "unrecorded".
-            return f"?/{configuration.provider_id}/{configuration.model_id}"
-        return "unrecorded"
-    return (
-        f"{configuration.agent_id}/{configuration.provider_id}/{configuration.model_id}"
-    )
-
-
 def _print_durations(label: str, durations: object) -> None:
     if durations is None:
         return
@@ -629,6 +628,46 @@ def show_run(args: argparse.Namespace) -> int:
     return _exit_code_for(record)
 
 
+def write_report(args: argparse.Namespace) -> int:
+    if not args.db.exists():
+        print(f"{PROGRAM}: no database at {args.db}", file=sys.stderr)
+        return EXIT_USAGE
+
+    with SqliteRunRepository(args.db) as repository:
+        # Every run, not the listing default. A report whose denominator was
+        # silently capped at 50 would look complete and be wrong.
+        records = repository.list_runs(limit=None)
+
+    if not records:
+        # Never EXIT_MEASURED, for the reason `bench` gives: a report of
+        # nothing that exits 0 is a green CI job asserting that zero tasks
+        # passed.
+        print(f"{PROGRAM}: no runs in {args.db}", file=sys.stderr)
+        return EXIT_USAGE
+
+    text = render(
+        records,
+        generated_at_unix_ms=SystemClock().now_unix_ms(),
+        source=str(args.db),
+    )
+
+    pending = unfinished(records)
+    if pending:
+        print(
+            f"{PROGRAM}: {len(pending)} run(s) had not finished and are "
+            f"excluded; the next af run recovers them",
+            file=sys.stderr,
+        )
+
+    if str(args.out) == "-":
+        sys.stdout.write(text)
+    else:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(text, encoding="utf-8")
+        print(f"wrote {args.out}")
+    return EXIT_MEASURED
+
+
 def list_runs(args: argparse.Namespace) -> int:
     if not args.db.exists():
         print(f"{PROGRAM}: no database at {args.db}", file=sys.stderr)
@@ -668,6 +707,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return bench_tasks(args)
     if args.command == "show":
         return show_run(args)
+    if args.command == "report":
+        return write_report(args)
     if args.command == "list":
         return list_runs(args)
     if args.command == "doctor":

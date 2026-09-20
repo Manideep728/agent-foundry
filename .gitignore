@@ -21,10 +21,11 @@ runs/
 artifacts/
 workspaces/
 
-# Generated reports. reports/ holds templates only -- rendered benchmark
-# output is a build product and is regenerated from the database.
-reports/out/
-*.report.html
+# Generated reports. `af report` renders Markdown from the database, so a
+# report is a build product: regenerate it rather than committing one.
+report.md
+*.report.md
+reports/
 
 # Databases. SQLite is the MVP source of truth for completed runs, but the
 # file itself is local state, not source.

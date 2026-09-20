@@ -560,10 +560,18 @@ class SqliteRunRepository:
         ).fetchone()
         return None if row is None else self._hydrate(row)
 
-    def list_runs(self, limit: int = 50) -> tuple[RunRecord, ...]:
+    def list_runs(self, limit: int | None = 50) -> tuple[RunRecord, ...]:
+        """The most recent runs, newest first. None means every one of them.
+
+        A report needs all of them, and a default limit silently truncating it
+        would produce a table that looks complete and is not -- the denominator
+        shrinking with no indication that it had.
+        """
         rows = self._conn.execute(
             "SELECT * FROM runs ORDER BY created_at_unix_ms DESC, run_id DESC LIMIT ?",
-            (limit,),
+            # SQLite reads a negative LIMIT as no limit, which keeps this one
+            # statement rather than branching into two that could drift.
+            (-1 if limit is None else limit,),
         ).fetchall()
         return tuple(self._hydrate(row) for row in rows)
 
