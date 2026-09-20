@@ -308,4 +308,4 @@ will not be averaged together.
 
 ## Licence
 
-Not yet chosen.
+MIT. See [LICENSE](LICENSE).

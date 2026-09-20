@@ -3,6 +3,8 @@ name = "agentfoundry"
 description = "Reproducible execution and evaluation harness for AI coding agents"
 requires-python = ">=3.12"
 dynamic = ["version"]
+license = "MIT"
+license-files = ["LICENSE"]
 
 # Intentionally empty. The control plane targets the standard library for v1:
 # dataclasses, tomllib, sqlite3, argparse, subprocess. A provider SDK arrives
