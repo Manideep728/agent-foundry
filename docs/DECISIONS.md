@@ -475,3 +475,40 @@ release. The hand-written suite is unaffected and remains the committed scope.
 changes when the task model can express a task whose identity is a commit
 rather than a content hash.
 
+## D20 — A measurement is grouped by the agent, the provider and the model
+
+A summary reports one row per suite and configuration, and a configuration is
+all three of the agent, the provider and the model. None may be dropped.
+
+Two of them are not enough. The single-shot agent and the tool loop drive the
+same model through the same provider, so a key of provider and model alone
+merges them — and they are the comparison the project keeps both agents to
+make. Measured here, the same model resolves five of eight tasks single-shot
+and none of them through the loop; blended, that is five of sixteen, a figure
+true of neither.
+
+The configuration is recorded on the run when the run is created, not derived
+from the model calls it made. A run that failed on its way to the model made no
+calls, and those are exactly the runs a reliability figure is about; a derived
+key would file every one of them under no configuration at all. Where a run
+predates the columns, the calls it did make still name the provider and the
+model, and the strategy stays unrecorded rather than guessed.
+
+## D21 — The report is Markdown, and reading a database takes no lock
+
+`af report` renders every stored run as Markdown. Markdown because a report is
+read where it is written and two reports over the same database differ only
+where the measurements differ, so a change between benchmarks is a diff. HTML
+needs a viewer and does not compare; JSON restates the database and leaves the
+aggregation to whoever reads it.
+
+Reporting acquires no run lock. The lock exists because an evaluation starts by
+treating every unfinished run as abandoned, which is safe only while nothing
+else evaluates. A reader changes nothing, and locking would prevent looking at
+a long suite while it runs, which is when a report is most useful.
+
+A run that has not finished is named and excluded from every figure. Counting
+it would put a run with no result into a rate; dropping it in silence would
+shrink the denominator whenever a process died, so the benchmark would look
+better the more often it broke.
+
