@@ -129,7 +129,8 @@ run 20260917-030423-1d5f524b  csv-quoted-fields  [synthetic]
   cost        0 micro-USD  (fake/scripted)
   patch       1391 bytes
   runner      afrunner in docker image afrunner:local  pid1=True arch=x86_64
-  image       sha256:f1d7ad1eab4534bc1dc5ef1a6899f15a1e0da6e97ab7bfe667b092c9e2f81407
+  image       sha256:fe2c76d56069c2a6ae482dca7c5da29dd2d77331a29389f31916d0c4e5c9824e
+  workspace   runs/20260920-085144-004f6725
 ```
 
 `--image` selects a different validation image. `--runner local` skips Docker
@@ -164,11 +165,12 @@ summarises each suite separately.
 $ uv run af bench
 af: [1/8] cache-eviction
 ...
-20260918-040122-14353bc5  cache-eviction           clean_patch
+20260920-085212-1c350a5e  csv-quoted-fields        clean_patch
 ...
 
 suite synthetic  8 task(s)  8 measured of 8 attempted
-  model         fake/scripted
+  config        fake/fake/scripted
+  image         sha256:fe2c76d56069c2a6ae482dca7c5da29dd2d77331a29389f31916d0c4e5c9824e
   resolved      8/8
   regressed     0/8
                 clean_patch              8
@@ -179,8 +181,13 @@ suite synthetic  8 task(s)  8 measured of 8 attempted
                 malformed_output         0
   cost          0 micro-USD over 8 measured run(s)
   agent         min 0ms  median 0ms  max 1ms
-  validation    min 64ms  median 65ms  max 97ms
+  validation    min 856ms  median 914ms  max 1047ms
 ```
+
+`config` names all three of the agent, the provider and the model, because a
+summary covers exactly one of those and two of them do not identify it: the
+single-shot agent and the tool loop drive the same model through the same
+provider.
 
 The whole suite holds one database lock, so nothing else may evaluate against
 that database while it runs. It exits `0` only when **every** task produced a
@@ -294,13 +301,19 @@ the first release.
   Linux-only by design.
 - **`--runner local` is not a sandbox.** Point it only at fixtures whose
   contents are already trusted.
-- **`--agent tools` has no end-to-end measurement yet.** The loop is tested
-  against a scripted model, but the 3B model developed against advertises
-  tool-calling support and then writes its tool calls into the message body,
-  often as text that is not valid JSON. Every real run of it so far is scored
-  `malformed_output`. A larger model is the next step; no attempt is made to
-  repair malformed calls, because guessing at one produces a plausible patch
-  from a misread reply, which is worse than refusing it.
+- **`--agent tools` has not produced a patch.** Against a local 7B model it
+  lists the files, reads two or three and then stops without writing, so its
+  runs score `no_patch_produced`. The same model edits successfully when it is
+  handed the files in a single prompt, so the loop, the system prompt and the
+  model are all candidates and none of them has been isolated. The prompt has
+  never been tuned.
+- **Tool calls arrive as text, not on the tool channel.** Both local models
+  tried advertise tool-calling support and then write the call into the message
+  body; the smaller one emits JSON that does not parse. The harness reads the
+  text channel but does not repair a malformed call, because guessing at one
+  produces a plausible patch from a misread reply, which is worse than refusing
+  it. A refused reply scores `malformed_output` and the text is kept beside the
+  patch.
 
 Benchmark numbers, when they exist, will name the machine that produced them
 and be reported as ranges across runs. Results from different model providers
