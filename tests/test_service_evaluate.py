@@ -852,3 +852,37 @@ def test_a_run_that_never_reached_the_model_still_names_its_configuration(
         "scripted",
     )
     repo.close()
+
+
+# --- what a run keeps when it does not finish --------------------------------
+
+
+def test_an_agent_that_raised_still_records_how_long_it_took(tmp_path: Path) -> None:
+    """The duration was measured after the except block, so it never existed.
+
+    The failure this matters for is the model that never answers: the client
+    gives up after its timeout, and the one number that describes what
+    happened -- how long the harness waited -- was the number the row did not
+    keep. Observed on 2026-09-20, when a task recorded agent_error with no
+    duration beside it.
+    """
+
+    class SlowExplodingAgent:
+        agent_id = "stub-agent"
+        provider_id = "exploding"
+        model_id = "stub-1"
+
+        def edit(self, workspace: Path, task: TaskDefinition) -> object:
+            raise AgentError("ollama did not answer within 300s")
+
+    service, repo = build(tmp_path, agent=SlowExplodingAgent())
+    record = service.execute(task())
+
+    assert record.run.failure is not None
+    assert record.run.failure.kind is FailureCategory.AGENT_ERROR
+    assert record.agent_ms is not None
+
+    stored = repo.get(record.run.run_id)
+    assert stored is not None
+    assert stored.agent_ms == record.agent_ms
+    repo.close()

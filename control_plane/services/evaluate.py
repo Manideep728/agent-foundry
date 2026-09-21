@@ -117,6 +117,7 @@ class EvaluationService:
 
         workspace = None
         record: RunRecord | None = None
+        agent_ms: int | None = None
         try:
             run = self._advance(run, RunState.PREPARING)
 
@@ -149,11 +150,24 @@ class EvaluationService:
             run = self._advance(run, RunState.AGENT_RUNNING)
             agent_started = self._clock.monotonic_ms()
             try:
-                agent_result = self._agent.edit(workspace.repo, task)
+                try:
+                    agent_result = self._agent.edit(workspace.repo, task)
+                finally:
+                    # Nested, because `except` runs before `finally`: measured
+                    # here, the duration exists on the failure path too. The
+                    # one failure whose cause *is* the duration -- a model that
+                    # never answered within the client's timeout -- was the one
+                    # that recorded no duration at all.
+                    agent_ms = self._clock.monotonic_ms() - agent_started
             except AgentError as error:
-                record = self._fail(run, task, FailureCategory.AGENT_ERROR, str(error))
+                record = self._fail(
+                    run,
+                    task,
+                    FailureCategory.AGENT_ERROR,
+                    str(error),
+                    agent_ms=agent_ms,
+                )
                 return record
-            agent_ms = self._clock.monotonic_ms() - agent_started
 
             # Captured before validation runs, so the test artefacts validation
             # writes cannot reach the patch even if an exclusion rule slips.
