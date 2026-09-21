@@ -112,6 +112,7 @@ def scored(
     p2p_total: int = 1,
     agent: str | None = AGENT,
     model: str = MODEL,
+    prompt_id: str | None = None,
 ) -> RunRecord:
     return RunRecord(
         run=_run(run_id, RunState.SCORED),
@@ -128,6 +129,7 @@ def scored(
         agent_id=agent,
         provider_id=PROVIDER if agent else None,
         model_id=model if agent else None,
+        prompt_id=prompt_id,
         invocations=(an_invocation(cost, model),),
         total_cost_micros=MicroUsd(cost),
         agent_ms=agent_ms,
@@ -367,3 +369,37 @@ def test_an_unnamed_configuration_does_not_join_a_named_one() -> None:
 
     assert len(summaries) == 2
     assert summaries[0].configuration == Configuration(None, None, None)
+
+
+def test_two_prompts_of_one_model_summarise_apart() -> None:
+    """The reason the prompt is in the key at all.
+
+    Measured on 2026-09-20: `llama3.2:3b` writes nothing under `tools-v1` and
+    produces patches under `tools-v2`. Merged into one row those are one rate
+    describing neither, which is the blended-summary defect with the agent
+    swapped for the prompt.
+    """
+    summaries = summarise(
+        [
+            scored(
+                "run-0001",
+                prompt_id="tools-v1",
+                resolved=False,
+                outcome=AgentOutcome.NO_PATCH_PRODUCED,
+            ),
+            scored("run-0002", prompt_id="tools-v2", resolved=True),
+        ]
+    )
+
+    assert len(summaries) == 2
+    assert [s.configuration.prompt_id for s in summaries] == ["tools-v1", "tools-v2"]
+    assert [s.resolved for s in summaries] == [0, 1]
+
+
+def test_a_run_with_no_prompt_groups_apart_from_one_with_a_prompt() -> None:
+    # "This agent reads no instructions" is a different statement from any
+    # particular prompt, so it may not join one.
+    summaries = summarise([scored(prompt_id=None), scored(prompt_id="tools-v2")])
+
+    assert len(summaries) == 2
+    assert summaries[0].configuration.prompt_id is None

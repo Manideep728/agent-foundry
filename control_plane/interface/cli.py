@@ -25,6 +25,13 @@ from control_plane.adapters.fake_agent import FakeAgent
 from control_plane.adapters.fixtures import digest_tree
 from control_plane.adapters.local_runner import LocalRunner
 from control_plane.adapters.ollama_client import DEFAULT_BASE_URL, OllamaClient
+from control_plane.adapters.prompts import (
+    DEFAULT_SINGLE_SHOT_PROMPT,
+    DEFAULT_TOOL_PROMPT,
+    VARIANTS,
+    PromptVariant,
+    variant,
+)
 from control_plane.adapters.run_lock import DatabaseBusy, exclusive_run_lock
 from control_plane.adapters.single_shot_agent import SingleShotAgent
 from control_plane.adapters.sqlite_repo import SqliteRunRepository
@@ -116,6 +123,16 @@ def _add_run_flags(parser: argparse.ArgumentParser) -> None:
             f"turn budget for --agent tools (default {DEFAULT_MAX_TURNS}); a "
             f"model that never stops reading is ended and measured rather than "
             f"left to hit the task timeout"
+        ),
+    )
+    parser.add_argument(
+        "--prompt",
+        default=None,
+        help=(
+            "the named prompt variant to send (default: "
+            f"{DEFAULT_TOOL_PROMPT} for --agent tools, "
+            f"{DEFAULT_SINGLE_SHOT_PROMPT} for --agent ollama). "
+            f"Known: {', '.join(sorted(VARIANTS))}"
         ),
     )
     parser.add_argument(
@@ -391,15 +408,42 @@ def _build_agent(args: argparse.Namespace, clock: SystemClock) -> AgentPort:
     """
     if args.agent == AGENT_OLLAMA:
         return SingleShotAgent(
-            OllamaClient(args.model, base_url=args.ollama_url), clock
+            OllamaClient(args.model, base_url=args.ollama_url),
+            clock,
+            prompt=_prompt(args, DEFAULT_SINGLE_SHOT_PROMPT),
         )
     if args.agent == AGENT_TOOLS:
         return ToolUseAgent(
             OllamaClient(args.model, base_url=args.ollama_url),
             clock,
             max_turns=args.max_turns,
+            prompt=_prompt(args, DEFAULT_TOOL_PROMPT),
         )
     return FakeAgent(args.solutions, clock)
+
+
+def _prompt(args: argparse.Namespace, fallback: str) -> PromptVariant:
+    return variant(args.prompt or fallback)
+
+
+def _prompt_problem(args: argparse.Namespace) -> str | None:
+    """Why the --prompt flag cannot be honoured, if it cannot.
+
+    Checked before a run is created, so a typo costs nothing. Resolved inside
+    the agent instead, it would create a row and spend tokens before failing,
+    and leave an unfinished run behind for the recovery scan.
+    """
+    if args.prompt is None:
+        return None
+    if args.agent == AGENT_FAKE:
+        # Refused rather than ignored. A flag that silently does nothing would
+        # let a whole suite be recorded under a prompt nothing ever sent.
+        return f"--agent {AGENT_FAKE} sends no prompt, so --prompt cannot apply"
+    try:
+        variant(args.prompt)
+    except DomainError as error:
+        return str(error)
+    return None
 
 
 def _print_line(record: RunRecord) -> None:
@@ -511,6 +555,11 @@ def _bench_exit_code(
 
 
 def bench_tasks(args: argparse.Namespace) -> int:
+    problem = _prompt_problem(args)
+    if problem is not None:
+        print(f"{PROGRAM}: {problem}", file=sys.stderr)
+        return EXIT_USAGE
+
     try:
         tasks = load_tasks(args.directory)
     except DomainError as error:
@@ -569,6 +618,11 @@ def bench_tasks(args: argparse.Namespace) -> int:
 
 
 def run_task(args: argparse.Namespace) -> int:
+    problem = _prompt_problem(args)
+    if problem is not None:
+        print(f"{PROGRAM}: {problem}", file=sys.stderr)
+        return EXIT_USAGE
+
     try:
         task = load_task(args.task_file)
     except DomainError as error:

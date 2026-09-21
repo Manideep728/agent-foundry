@@ -14,7 +14,12 @@ from control_plane.adapters.fake_agent import FakeAgent
 from control_plane.adapters.single_shot_agent import SingleShotAgent
 from control_plane.adapters.system import SystemClock
 from control_plane.adapters.tool_use_agent import DEFAULT_MAX_TURNS, ToolUseAgent
-from control_plane.interface.cli import _build_agent, build_parser, main
+from control_plane.interface.cli import (
+    EXIT_USAGE,
+    _build_agent,
+    build_parser,
+    main,
+)
 from tests.docker_support import IMAGE, requires_image
 
 REPO = Path(__file__).resolve().parent.parent
@@ -254,3 +259,73 @@ def test_the_turn_budget_has_a_default() -> None:
     args = build_parser().parse_args(["run", str(TASK_FILE), "--agent", "tools"])
 
     assert args.max_turns == DEFAULT_MAX_TURNS
+
+
+def test_an_unknown_prompt_is_a_usage_error_before_any_run_is_created(
+    tmp_path: Path,
+) -> None:
+    """A typo must cost nothing.
+
+    Resolved inside the agent, an unknown name would create the row and spend
+    tokens before failing, and leave an unfinished run for the recovery scan
+    to clean up.
+    """
+    db = tmp_path / "af.sqlite3"
+
+    code = main(
+        [
+            "run",
+            str(TASK_FILE),
+            "--agent",
+            "tools",
+            "--prompt",
+            "tools-v9",
+            "--db",
+            str(db),
+            "--runs",
+            str(tmp_path / "runs"),
+        ]
+    )
+
+    assert code == EXIT_USAGE
+    assert not db.exists(), "no database, so certainly no run"
+
+
+def test_a_prompt_on_an_agent_that_sends_none_is_refused(tmp_path: Path) -> None:
+    # The fake agent reads no instructions. Accepting the flag would record a
+    # whole suite under a prompt that nothing ever sent.
+    code = main(
+        [
+            "run",
+            str(TASK_FILE),
+            "--agent",
+            "fake",
+            "--prompt",
+            "tools-v2",
+            "--db",
+            str(tmp_path / "af.sqlite3"),
+            "--runs",
+            str(tmp_path / "runs"),
+        ]
+    )
+
+    assert code == EXIT_USAGE
+
+
+def test_the_tools_flag_builds_the_loop_with_the_prompt_it_was_given() -> None:
+    args = build_parser().parse_args(
+        ["run", "t.toml", "--agent", "tools", "--prompt", "tools-v2"]
+    )
+
+    agent = _build_agent(args, SystemClock())
+
+    assert isinstance(agent, ToolUseAgent)
+    assert agent.prompt_id == "tools-v2"
+
+
+def test_an_agent_built_with_no_prompt_flag_uses_the_shipped_one() -> None:
+    args = build_parser().parse_args(["run", "t.toml", "--agent", "tools"])
+
+    agent = _build_agent(args, SystemClock())
+
+    assert agent.prompt_id == "tools-v1"

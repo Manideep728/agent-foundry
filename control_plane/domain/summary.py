@@ -68,6 +68,14 @@ class Configuration:
     agent_id: str | None
     provider_id: str | None
     model_id: str | None
+    prompt_id: str | None = None
+    """Which named prompt drove the model, when one did.
+
+    A fourth part, added 2026-09-20 for the same reason the first three are
+    three. One model under two prompts went from writing nothing to writing
+    patches; merged, the two are a rate true of neither. An agent that asks no
+    model anything has None here and groups apart from one that does.
+    """
 
     @property
     def is_named(self) -> bool:
@@ -75,7 +83,7 @@ class Configuration:
         return self.agent_id is not None
 
     @property
-    def sort_key(self) -> tuple[str, str, str]:
+    def sort_key(self) -> tuple[str, str, str, str]:
         """A total order, so the same runs summarise in the same order.
 
         None sorts first, as the empty string. A report whose sections move
@@ -85,10 +93,11 @@ class Configuration:
             self.agent_id or "",
             self.provider_id or "",
             self.model_id or "",
+            self.prompt_id or "",
         )
 
 
-UNRECORDED = Configuration(None, None, None)
+UNRECORDED = Configuration(None, None, None, None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,10 +194,18 @@ def configuration_of(record: RunRecord) -> Configuration:
     written down and stays None rather than being guessed at.
     """
     if record.agent_id is not None:
-        return Configuration(record.agent_id, record.provider_id, record.model_id)
+        return Configuration(
+            record.agent_id,
+            record.provider_id,
+            record.model_id,
+            record.prompt_id,
+        )
     if record.invocations:
+        # A run stored before the columns existed. The invocations say what
+        # answered, and no invocation has ever carried a prompt, so the prompt
+        # stays None rather than being guessed from today's default.
         first = record.invocations[0]
-        return Configuration(None, first.provider_id, first.model_id)
+        return Configuration(None, first.provider_id, first.model_id, None)
     return UNRECORDED
 
 

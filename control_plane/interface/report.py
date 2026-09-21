@@ -42,10 +42,16 @@ def describe(configuration: Configuration) -> str:
     and the difference a reader most often came to compare.
     """
     if configuration.agent_id is not None:
-        return (
+        named = (
             f"{configuration.agent_id}/"
             f"{configuration.provider_id}/{configuration.model_id}"
         )
+        # Appended only when there is one, so an agent that asks no model
+        # anything, and every row stored before prompts were named, render
+        # exactly as they did before.
+        if configuration.prompt_id is not None:
+            return f"{named} [{configuration.prompt_id}]"
+        return named
     if configuration.provider_id is not None:
         # Stored before the harness recorded the strategy. The provider and the
         # model survive on the invocations, and printing them beats discarding
