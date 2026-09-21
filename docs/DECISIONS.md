@@ -531,3 +531,39 @@ The cost is real and is not hidden. Four genuine tool requests from that model
 are recorded as a run that asked for nothing, so its stored outcomes are a
 floor on what it intended. No figure taken from that model may be described as
 the model producing nothing.
+
+## D23 — A prompt is part of a measurement's identity
+
+A run records the named prompt its agent sent, and a summary groups on it
+beside the agent, the provider and the model. Two prompts are two rows.
+
+The prompt moves a result further than the model choice does. Measured here,
+one model under one prompt never edits a file, and under another writes patches
+for five of seven tasks. A key that omitted the prompt would merge those into
+one rate describing neither, which is the defect D20 exists to prevent.
+
+A named variant is frozen once a run has recorded it, and a variant is the
+system text together with the tool descriptions. A test pins a digest of each
+one, so changing a shipped prompt fails the build and the fix is a new name.
+Without that, a tuned description would change what the model reads while the
+recorded name stayed the same, and the stored rows would be wrong rather than
+incomplete.
+
+## D24 — A deferred suite keeps a content hash, not a commit
+
+The real-repository suite stays deferred. The reason is narrower than it was.
+
+A task's identity does not have to become a commit. A task may name a source
+commit, the harness may check that commit out into the fixture position, and
+the existing content hash may then be taken over the result. `.git` is already
+excluded from the hash and from the copy, so two clones of one commit still
+agree, and `fixture_sha256` stays NOT NULL with no migration. That matters:
+making it nullable needs a full table rebuild, which the migration rules
+forbid.
+
+What remains is the real cost, and it is not identity. Each instance needs its
+own validation image with the runner inside it, the validation commands must
+name the environment's interpreter rather than `python3`, and the failing tests
+arrive in a separate patch that has to be applied after the agent has finished
+and before validation starts. The harness already captures the patch before
+validation, so the place to apply it is clean; the work around it is not.
