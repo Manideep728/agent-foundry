@@ -20,9 +20,15 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from control_plane import __version__
+from control_plane.adapters.dispatch_json import encode as encode_message
 from control_plane.adapters.docker_runner import DockerConfig, DockerRunner
 from control_plane.adapters.fake_agent import FakeAgent
 from control_plane.adapters.fixtures import digest_tree
+from control_plane.adapters.kafka_bus import (
+    DEFAULT_BOOTSTRAP,
+    KafkaPublisher,
+    KafkaUnavailable,
+)
 from control_plane.adapters.local_runner import LocalRunner
 from control_plane.adapters.ollama_client import DEFAULT_BASE_URL, OllamaClient
 from control_plane.adapters.prompts import (
@@ -51,6 +57,12 @@ from control_plane.domain.summary import Durations, SuiteSummary, summarise
 from control_plane.domain.task import TaskDefinition
 from control_plane.interface.doctor import run_doctor
 from control_plane.interface.report import describe, render, unfinished
+from control_plane.services.dispatch import (
+    TASK_RUNS_TOPIC,
+    DispatchIncomplete,
+    RunConfiguration,
+    dispatch,
+)
 from control_plane.services.evaluate import EvaluationService
 from control_plane.services.ports import AgentPort, ValidationRunner
 from control_plane.services.recovery import recover_unfinished
@@ -80,27 +92,17 @@ AGENT_TOOLS = "tools"
 DEFAULT_MODEL = "qwen2.5-coder:3b"
 
 
-def _add_run_flags(parser: argparse.ArgumentParser) -> None:
-    """The flags any evaluation needs, shared by `run` and `bench`.
+def _add_agent_flags(parser: argparse.ArgumentParser) -> None:
+    """The flags that say *what* to measure, rather than where to put it.
 
-    A function rather than argparse's `parents=`, because a shared parent
-    parser puts the same Action objects into two parsers -- a subtlety nobody
-    reading this should have to know about. What matters is that the two
-    subcommands cannot drift apart: a flag added to one is added to both.
+    Separate from `_add_run_flags` because `dispatch` needs exactly these and
+    none of the others: it writes no database, makes no workspace and runs no
+    validation, so `--db` and `--runs` would be flags it accepted and ignored.
+    Split rather than duplicated -- two lists of the same flags would drift,
+    and the drift would be a dispatcher that sends a configuration no worker
+    can be given.
     """
-    parser.add_argument("--db", type=Path, default=DEFAULT_DB)
-    parser.add_argument("--runs", type=Path, default=DEFAULT_RUNS)
-    parser.add_argument("--fixtures", type=Path, default=DEFAULT_FIXTURES)
     parser.add_argument("--solutions", type=Path, default=DEFAULT_SOLUTIONS)
-    parser.add_argument(
-        "--runner",
-        choices=(RUNNER_DOCKER, RUNNER_LOCAL),
-        default=RUNNER_DOCKER,
-        help=(
-            "docker validates inside the runner image; local runs the commands "
-            "on this machine with no isolation, for development only"
-        ),
-    )
     parser.add_argument(
         "--image",
         default=DEFAULT_IMAGE,
@@ -160,6 +162,29 @@ def _add_run_flags(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_run_flags(parser: argparse.ArgumentParser) -> None:
+    """The flags any evaluation needs, shared by `run` and `bench`.
+
+    A function rather than argparse's `parents=`, because a shared parent
+    parser puts the same Action objects into two parsers -- a subtlety nobody
+    reading this should have to know about. What matters is that the two
+    subcommands cannot drift apart: a flag added to one is added to both.
+    """
+    parser.add_argument("--db", type=Path, default=DEFAULT_DB)
+    parser.add_argument("--runs", type=Path, default=DEFAULT_RUNS)
+    parser.add_argument("--fixtures", type=Path, default=DEFAULT_FIXTURES)
+    parser.add_argument(
+        "--runner",
+        choices=(RUNNER_DOCKER, RUNNER_LOCAL),
+        default=RUNNER_DOCKER,
+        help=(
+            "docker validates inside the runner image; local runs the commands "
+            "on this machine with no isolation, for development only"
+        ),
+    )
+    _add_agent_flags(parser)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=PROGRAM,
@@ -210,6 +235,37 @@ def build_parser() -> argparse.ArgumentParser:
             "stop the suite before the first task it could not afford to "
             "finish. Counted over this invocation, not over the database: a "
             "budget belongs to an experiment, not to a file"
+        ),
+    )
+
+    dispatch_parser = subcommands.add_parser(
+        "dispatch",
+        help="publish every task in a directory as work for a worker pool",
+        description=(
+            "Publish one message per task to the work topic and exit. This "
+            "command measures nothing and writes no database: it decides what "
+            "is to be measured, and `af worker` does the measuring. The run "
+            "identifiers are minted here, so a message redelivered to a worker "
+            "is recognisable as the same run rather than counted twice."
+        ),
+    )
+    dispatch_parser.add_argument(
+        "directory", type=Path, nargs="?", default=DEFAULT_TASKS
+    )
+    _add_agent_flags(dispatch_parser)
+    dispatch_parser.add_argument(
+        "--bootstrap",
+        default=DEFAULT_BOOTSTRAP,
+        help=f"the Kafka broker to publish to (default {DEFAULT_BOOTSTRAP})",
+    )
+    dispatch_parser.add_argument(
+        "--repeats",
+        type=int,
+        default=1,
+        help=(
+            "how many runs to dispatch per task (default 1). Two identical "
+            "suites have disagreed on individual tasks at temperature 0, so a "
+            "per-task figure needs repeats before it carries a range"
         ),
     )
 
@@ -722,6 +778,80 @@ def run_task(args: argparse.Namespace) -> int:
     return _exit_code_for(record)
 
 
+def dispatch_tasks(args: argparse.Namespace) -> int:
+    """Publish a suite as work, and print what was published.
+
+    Nothing is measured here and no database is opened, so there is no lock to
+    take: the contention this project guards against is two processes writing
+    runs, and a dispatcher writes none.
+    """
+    problem = _prompt_problem(args)
+    if problem is not None:
+        print(f"{PROGRAM}: {problem}", file=sys.stderr)
+        return EXIT_USAGE
+
+    if args.repeats < 1:
+        print(
+            f"{PROGRAM}: --repeats must be at least 1, got {args.repeats}",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+
+    try:
+        tasks = load_tasks(args.directory)
+    except DomainError as error:
+        print(f"{PROGRAM}: {error}", file=sys.stderr)
+        return EXIT_USAGE
+    if not tasks:
+        # The same rule as `bench`: dispatching nothing and exiting 0 is a
+        # green command that sent no work.
+        print(f"{PROGRAM}: no task files in {args.directory}", file=sys.stderr)
+        return EXIT_USAGE
+
+    clock = SystemClock()
+    # Built and then read, not constructed to be used. The agent owns the
+    # mapping from the flags to the identity a benchmark groups on, and
+    # reading it here keeps that mapping in one place. Building costs nothing:
+    # no agent opens a connection in its constructor.
+    agent = _build_agent(args, clock)
+    configuration = RunConfiguration(
+        agent_id=agent.agent_id,
+        provider_id=agent.provider_id,
+        model_id=agent.model_id,
+        prompt_id=agent.prompt_id,
+        image=args.image,
+    )
+
+    try:
+        publisher = KafkaPublisher(TASK_RUNS_TOPIC, args.bootstrap)
+        messages = dispatch(
+            tasks,
+            configuration,
+            publisher,
+            UuidIdGenerator(),
+            clock,
+            encode_message,
+            repeats=args.repeats,
+        )
+    except (KafkaUnavailable, DispatchIncomplete) as error:
+        print(f"{PROGRAM}: {error}", file=sys.stderr)
+        return EXIT_HARNESS_FAILED
+
+    # Data on stdout, progress on stderr, so redirecting the identifiers still
+    # shows what happened. The identifiers are the useful output: they are what
+    # `af show` takes once a worker has stored the run.
+    for message in messages:
+        print(f"{message.run_id}\t{message.task_id}")
+    print(
+        f"{PROGRAM}: dispatched {len(messages)} run(s) for {len(tasks)} task(s) "
+        f"to {TASK_RUNS_TOPIC} at {args.bootstrap}",
+        file=sys.stderr,
+    )
+    # Zero means every message reached the broker. It does not mean anything
+    # was measured; no measurement exists until a worker stores one.
+    return EXIT_MEASURED
+
+
 def show_run(args: argparse.Namespace) -> int:
     if not args.db.exists():
         print(f"{PROGRAM}: no database at {args.db}", file=sys.stderr)
@@ -816,6 +946,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_task(args)
     if args.command == "bench":
         return bench_tasks(args)
+    if args.command == "dispatch":
+        return dispatch_tasks(args)
     if args.command == "show":
         return show_run(args)
     if args.command == "report":

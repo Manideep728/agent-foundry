@@ -12,15 +12,21 @@ from pathlib import Path
 
 import pytest
 
+from control_plane.adapters.dispatch_json import decode, encode
 from control_plane.domain.ids import RunId, TaskId
-from control_plane.domain.task import Suite
+from control_plane.domain.task import Suite, TaskDefinition
 from control_plane.services.dispatch import (
     RUN_RESULTS_TOPIC,
     SCHEMA_VERSION,
     TASK_RUNS_TOPIC,
+    DispatchIncomplete,
     IncompatibleMessage,
+    RunConfiguration,
     TaskRunMessage,
+    dispatch,
 )
+from tests.bus_fakes import FakeTopic
+from tests.fakes import FakeClock, FakeIdGenerator
 from tests.test_domain_task import VALID_SHA, make_task
 
 TOPICS_SCRIPT = Path(__file__).resolve().parent.parent / "infra/kafka/topics.sh"
@@ -125,3 +131,165 @@ def test_a_topic_name_contains_no_dot_or_underscore(topic: str) -> None:
     """
     assert "." not in topic
     assert "_" not in topic
+
+
+class UnflushableTopic(FakeTopic):
+    """A broker that never acknowledges. Models a dispatch that did not land."""
+
+    def __init__(self, outstanding: int) -> None:
+        super().__init__()
+        self._outstanding = outstanding
+
+    def flush(self, timeout_s: float) -> int:
+        super().flush(timeout_s)
+        return self._outstanding
+
+
+def make_configuration(**overrides: object) -> RunConfiguration:
+    fields: dict[str, object] = {
+        "agent_id": "single-shot",
+        "provider_id": "ollama",
+        "model_id": "qwen2.5-coder:7b",
+        "prompt_id": "tools-v2",
+        "image": "afrunner:local",
+    }
+    fields.update(overrides)
+    return RunConfiguration(**fields)  # type: ignore[arg-type]
+
+
+def three_tasks() -> list[TaskDefinition]:
+    return [
+        make_task(task_id=TaskId("alpha-001"), fixture_id="alpha"),
+        make_task(task_id=TaskId("beta-001"), fixture_id="beta"),
+        make_task(task_id=TaskId("gamma-001"), fixture_id="gamma"),
+    ]
+
+
+def run_dispatch(
+    tasks: list[TaskDefinition],
+    topic: FakeTopic,
+    **kwargs: object,
+) -> tuple[TaskRunMessage, ...]:
+    return dispatch(
+        tasks,
+        make_configuration(),
+        topic,
+        FakeIdGenerator(),
+        FakeClock(),
+        encode,
+        **kwargs,  # type: ignore[arg-type]
+    )
+
+
+def test_one_message_is_published_for_each_task() -> None:
+    topic = FakeTopic()
+
+    sent = run_dispatch(three_tasks(), topic)
+
+    assert len(sent) == 3
+    assert len(topic.delivered) == 3
+    assert [m.task_id.value for m in sent] == ["alpha-001", "beta-001", "gamma-001"]
+
+
+def test_what_is_published_decodes_to_what_was_returned() -> None:
+    """The returned messages must describe the bytes, not a parallel record."""
+    topic = FakeTopic()
+
+    sent = run_dispatch(three_tasks(), topic)
+
+    assert [decode(d.value) for d in topic.delivered] == list(sent)
+
+
+def test_every_message_carries_the_configuration() -> None:
+    """A worker reads these instead of its own flags, so they must be present."""
+    topic = FakeTopic()
+
+    sent = run_dispatch(three_tasks(), topic)
+
+    for message in sent:
+        assert message.agent_id == "single-shot"
+        assert message.model_id == "qwen2.5-coder:7b"
+        assert message.prompt_id == "tools-v2"
+        assert message.image == "afrunner:local"
+
+
+def test_each_message_carries_the_fixture_hash_of_its_own_task() -> None:
+    topic = FakeTopic()
+    tasks = three_tasks()
+
+    sent = run_dispatch(tasks, topic)
+
+    assert [m.fixture_sha256 for m in sent] == [t.fixture_sha256 for t in tasks]
+
+
+def test_repeats_produce_separate_runs_of_the_same_task() -> None:
+    """Each repeat is its own measurement, so each needs its own identifier."""
+    topic = FakeTopic()
+
+    sent = run_dispatch(three_tasks(), topic, repeats=2)
+
+    assert len(sent) == 6
+    assert len({m.run_id.value for m in sent}) == 6
+    assert [m.task_id.value for m in sent].count("alpha-001") == 2
+
+
+def test_repeats_of_one_task_share_a_partition() -> None:
+    """Repeats are keyed by task, so a range is read from one partition."""
+    topic = FakeTopic()
+
+    run_dispatch([make_task(task_id=TaskId("alpha-001"))], topic, repeats=4)
+
+    assert len({d.partition for d in topic.delivered}) == 1
+
+
+def test_the_dispatch_is_flushed() -> None:
+    """Without a flush the process can exit before the broker has the work."""
+    topic = FakeTopic()
+
+    run_dispatch(three_tasks(), topic)
+
+    assert topic.flush_calls != []
+
+
+def test_an_unacknowledged_dispatch_is_an_error_naming_the_count() -> None:
+    topic = UnflushableTopic(outstanding=2)
+
+    with pytest.raises(DispatchIncomplete, match="2 of 3 messages"):
+        run_dispatch(three_tasks(), topic)
+
+
+def test_no_repeats_is_refused() -> None:
+    with pytest.raises(ValueError, match="at least 1"):
+        run_dispatch(three_tasks(), FakeTopic(), repeats=0)
+
+
+def test_dispatching_nothing_publishes_nothing() -> None:
+    topic = FakeTopic()
+
+    assert run_dispatch([], topic) == ()
+    assert topic.delivered == ()
+
+
+class TickingClock(FakeClock):
+    """Moves a second every time it is read, so two reads cannot coincide."""
+
+    def now_unix_ms(self) -> int:
+        value = super().now_unix_ms()
+        self.advance(1000)
+        return value
+
+
+def test_each_message_is_timestamped_when_it_is_built() -> None:
+    """One timestamp for the whole suite would hide how long work waited."""
+    sent = dispatch(
+        three_tasks(),
+        make_configuration(),
+        FakeTopic(),
+        FakeIdGenerator(),
+        TickingClock(),
+        encode,
+    )
+
+    stamps = [m.dispatched_at_ms for m in sent]
+    assert stamps == sorted(stamps)
+    assert len(set(stamps)) == 3

@@ -29,11 +29,13 @@ encoding lives in `adapters/dispatch_json.py` and the client in
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
 from control_plane.domain.errors import DomainError
 from control_plane.domain.ids import RunId, TaskId
+from control_plane.domain.ports import Clock, IdGenerator
 from control_plane.domain.task import Suite, TaskDefinition
 
 TASK_RUNS_TOPIC = "agentfoundry-task-runs"
@@ -233,3 +235,88 @@ class MessageConsumer(Protocol):
         holds its partitions until the broker gives up on it.
         """
         ...
+
+
+@dataclass(frozen=True, slots=True)
+class RunConfiguration:
+    """What every message in one dispatch says about how to measure.
+
+    Read from a built agent rather than from the flags a second time. The
+    mapping from `--agent ollama --model qwen2.5-coder:7b` to the identity
+    trio already exists inside the agent, and a dispatcher that re-derived it
+    would be a second place that knows -- with the first bug being the two
+    disagreeing about what was measured.
+    """
+
+    agent_id: str
+    provider_id: str
+    model_id: str
+    prompt_id: str | None
+    image: str
+
+
+class DispatchIncomplete(Exception):
+    """The broker did not acknowledge every message before the timeout."""
+
+
+def dispatch(
+    tasks: Sequence[TaskDefinition],
+    configuration: RunConfiguration,
+    publisher: MessagePublisher,
+    ids: IdGenerator,
+    clock: Clock,
+    encode: Callable[[TaskRunMessage], bytes],
+    *,
+    repeats: int = 1,
+    flush_timeout_s: float = 30.0,
+) -> tuple[TaskRunMessage, ...]:
+    """Publish one message per task per repeat, and return what was sent.
+
+    `encode` is injected rather than imported. A service may use an adapter's
+    interface and not an adapter, and the wire format is an adapter.
+
+    `repeats` exists for the reproducibility question this project has open:
+    two identical suites disagreed on two of seven tasks at temperature 0.
+    Repeats are nearly free to dispatch and expensive to run, so the decision
+    of how many belongs here, at the point where the work is created, and each
+    repeat gets its own `run_id` because each is a separate measurement.
+
+    Raises `DispatchIncomplete` if the broker does not acknowledge everything.
+    The messages already returned may still have been delivered, so the error
+    names a count and does not claim the dispatch did nothing.
+    """
+    if repeats < 1:
+        raise ValueError(f"repeats must be at least 1, got {repeats}")
+
+    published: list[TaskRunMessage] = []
+    for task in tasks:
+        for _ in range(repeats):
+            message = TaskRunMessage(
+                run_id=ids.new_run_id(),
+                task_id=task.task_id,
+                suite=task.suite,
+                fixture_sha256=task.fixture_sha256,
+                agent_id=configuration.agent_id,
+                provider_id=configuration.provider_id,
+                model_id=configuration.model_id,
+                prompt_id=configuration.prompt_id,
+                image=configuration.image,
+                # Read per message, not once per dispatch. The gap between
+                # this and the worker's own clock is the queue latency, and a
+                # single timestamp for the whole suite would make the last
+                # task look as though it waited as long as the first.
+                dispatched_at_ms=clock.now_unix_ms(),
+            )
+            publisher.publish(message.partition_key, encode(message))
+            published.append(message)
+
+    # Publishing is asynchronous: nothing is on the broker until this returns
+    # zero. A dispatcher that exited without flushing would print a suite it
+    # had not actually sent.
+    outstanding = publisher.flush(flush_timeout_s)
+    if outstanding:
+        raise DispatchIncomplete(
+            f"{outstanding} of {len(published)} messages were not acknowledged "
+            f"within {flush_timeout_s:g}s; some work may still have been sent"
+        )
+    return tuple(published)
