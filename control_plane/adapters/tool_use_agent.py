@@ -38,17 +38,20 @@ from control_plane.adapters.prompts import (
     PromptVariant,
     variant,
 )
+from control_plane.domain.budget import is_exhausted, validate_ceiling
 from control_plane.domain.errors import DomainError
 from control_plane.domain.fixture import is_excluded, validate_fixture_path
 from control_plane.domain.model import (
     Message,
     MessageRole,
+    MicroUsd,
     ModelClient,
     ModelInvocation,
     ModelResponse,
     TokenPrice,
     ToolCall,
     cost_micros,
+    total_micros,
 )
 from control_plane.domain.outcomes import AgentOutcome
 from control_plane.domain.ports import Clock
@@ -168,14 +171,17 @@ class ToolUseAgent:
         price: TokenPrice | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
         prompt: PromptVariant | None = None,
+        run_ceiling: MicroUsd | None = None,
     ) -> None:
         if max_turns < 1:
             raise ValueError("max_turns must be at least 1")
+        validate_ceiling(run_ceiling, "run_ceiling")
         self._client = client
         self._clock = clock
         self._price = price or TokenPrice.free(client.model_id)
         self._prompt = prompt or DEFAULT_PROMPT
         self._max_turns = max_turns
+        self._run_ceiling = run_ceiling
 
     @property
     def agent_id(self) -> str:
@@ -205,6 +211,26 @@ class ToolUseAgent:
         text_calls = 0
 
         for _ in range(self._max_turns):
+            spent = total_micros(call.cost for call in invocations)
+            if is_exhausted(spent, self._run_ceiling):
+                # A stop rule, reported the way the turn budget is: the run
+                # stays a measurement, and the money it spent stays visible.
+                # A failure category here would assert the harness broke, take
+                # the run out of the benchmark, and hide the spending that the
+                # ceiling exists to bound.
+                return AgentResult(
+                    tuple(invocations),
+                    outcome_detail=_note(
+                        text_calls,
+                        tools_called,
+                        wrote=wrote_anything,
+                        ending=(
+                            f"stopped at the {self._run_ceiling} micro-USD "
+                            f"run ceiling, having spent {spent}"
+                        ),
+                    ),
+                )
+
             response, invocation = self._call(messages)
             invocations.append(invocation)
 

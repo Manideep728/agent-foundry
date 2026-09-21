@@ -24,14 +24,19 @@ from control_plane.adapters.prompts import (
 from control_plane.adapters.task_toml import load_task
 from control_plane.adapters.tool_use_agent import ToolUseAgent
 from control_plane.adapters.workspace import WorkspaceFactory
+from control_plane.domain.errors import PreconditionViolated
 from control_plane.domain.ids import RunId
 from control_plane.domain.model import (
     Message,
     MessageRole,
+    MicroUsd,
+    MicroUsdPerMTok,
     ModelResponse,
     ModelUsage,
+    TokenPrice,
     ToolCall,
     ToolSpec,
+    total_micros,
 )
 from control_plane.domain.outcomes import AgentOutcome
 from control_plane.domain.task import TaskDefinition
@@ -595,3 +600,78 @@ def test_a_loop_with_no_prompt_named_uses_the_shipped_one(tmp_path: Path) -> Non
     )
 
     assert agent.prompt_id == DEFAULT_TOOL_PROMPT == "tools-v1"
+
+
+# --- the spend ceiling -------------------------------------------------------
+
+
+PRICED = TokenPrice(
+    model_id="stub-1",
+    input_per_mtok=MicroUsdPerMTok(1_000_000),
+    output_per_mtok=MicroUsdPerMTok(5_000_000),
+)
+"""Enough that a scripted turn costs a round 35 micro-USD.
+
+Every local model is free, so a test that used the real price would assert
+nothing: the ceiling would never be reached however many turns ran.
+"""
+
+
+def test_a_loop_stops_when_the_run_ceiling_is_reached(tmp_path: Path) -> None:
+    """Checked before a call, not after it.
+
+    Each scripted turn costs 35. With a ceiling of 50 the loop may make the
+    first call (nothing spent) and the second (35 spent), and must not make the
+    third. Checking after the call instead would always spend one call past
+    the number the operator gave.
+    """
+    task, repo = prepared(tmp_path)
+    client = ScriptedClient([calls(ToolCall(LIST_FILES, {}))] * 5)
+    agent = ToolUseAgent(
+        client,
+        FakeClock(),
+        price=PRICED,
+        max_turns=12,
+        run_ceiling=MicroUsd(50),
+    )
+
+    result = agent.edit(repo, task)
+
+    assert len(result.invocations) == 2
+    assert total_micros(call.cost for call in result.invocations) == 70
+
+
+def test_the_note_says_the_run_stopped_on_budget(tmp_path: Path) -> None:
+    # The run stays a measurement, so the only place the reason can live is
+    # the note. Without it a ceiling stop is indistinguishable from a model
+    # that simply stopped asking for tools.
+    task, repo = prepared(tmp_path)
+    agent = ToolUseAgent(
+        ScriptedClient([calls(ToolCall(LIST_FILES, {}))] * 5),
+        FakeClock(),
+        price=PRICED,
+        run_ceiling=MicroUsd(50),
+    )
+
+    result = agent.edit(repo, task)
+
+    assert result.outcome is None, "a ceiling stop is not a harness failure"
+    assert result.outcome_detail is not None
+    assert "run ceiling" in result.outcome_detail
+
+
+def test_a_free_model_is_never_stopped_by_a_ceiling(tmp_path: Path) -> None:
+    # Today every local model is free, so the ceiling must cost those runs
+    # nothing at all.
+    result, _, _ = run(
+        tmp_path,
+        [calls(ToolCall(LIST_FILES, {})), says("done")],
+        run_ceiling=MicroUsd(1),
+    )
+
+    assert len(result.invocations) == 2
+
+
+def test_a_ceiling_of_zero_is_refused_by_the_loop() -> None:
+    with pytest.raises(PreconditionViolated, match="positive"):
+        ToolUseAgent(ScriptedClient([]), FakeClock(), run_ceiling=MicroUsd(0))

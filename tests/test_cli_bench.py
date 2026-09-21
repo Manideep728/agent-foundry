@@ -13,7 +13,10 @@ from pathlib import Path
 import pytest
 
 from control_plane.adapters.run_lock import exclusive_run_lock
+from control_plane.domain.model import MicroUsd, ModelInvocation, ModelUsage
+from control_plane.interface import cli
 from control_plane.interface.cli import build_parser, main
+from control_plane.services.ports import AgentResult
 
 REPO = Path(__file__).resolve().parent.parent
 TASKS = REPO / "tasks"
@@ -200,14 +203,113 @@ def test_bench_defaults_to_the_tasks_directory() -> None:
     assert args.directory == Path("tasks")
 
 
+BENCH_ONLY = {"max_bench_micros"}
+"""Flags that describe a suite and would do nothing on a single run.
+
+Listed, and named, so that adding to it is a decision someone takes on purpose
+rather than a drift the guard below stopped catching. A suite ceiling on
+`af run` would be a flag that silently does nothing: the operator believes a
+limit is in force, and none is.
+"""
+
+
 def test_bench_and_run_accept_the_same_evaluation_flags() -> None:
     """A flag added to one subcommand must be added to the other.
 
     They share `_add_run_flags` precisely so they cannot drift; this is what
-    says so if someone adds a flag to `run` directly.
+    says so if someone adds a flag to `run` directly. The one deliberate
+    exception is named above rather than allowed in general.
     """
     run = build_parser().parse_args(["run", "x.toml"])
     bench = build_parser().parse_args(["bench"])
 
     shared = set(vars(run)) - {"task_file", "command"}
-    assert shared == set(vars(bench)) - {"directory", "command"}
+    assert shared == set(vars(bench)) - {"directory", "command"} - BENCH_ONLY
+
+
+# --- the suite ceiling -------------------------------------------------------
+
+
+class SpendingAgent:
+    """Changes nothing and charges 100 micro-USD a run.
+
+    Every model this project can run locally is free, so a ceiling could not be
+    reached by any real agent available here. The stub is what makes the rule
+    testable before a paid provider exists.
+    """
+
+    agent_id = "stub"
+    provider_id = "stub"
+    model_id = "stub-1"
+    prompt_id = None
+
+    def edit(self, workspace: Path, task: object) -> AgentResult:
+        return AgentResult(
+            (
+                ModelInvocation(
+                    provider_id="stub",
+                    model_id="stub-1",
+                    usage=ModelUsage(input_tokens=1_000, output_tokens=0),
+                    cost=MicroUsd(100),
+                    latency_ms=1,
+                ),
+            )
+        )
+
+
+def test_a_benchmark_stops_before_the_task_that_would_break_the_ceiling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Three tasks, 250 allowed, 100 a run: the third never starts.
+
+    Not "stop once over budget". Starting the third task means either
+    abandoning it half-way or spending 300 of an allowed 250, and refusing to
+    begin is the only choice that keeps both numbers true.
+    """
+    monkeypatch.setattr(cli, "_build_agent", lambda args, clock: SpendingAgent())
+    directory = suite_of(
+        tmp_path, "csv-quoted-fields", "interval-merge", "path-normalise"
+    )
+
+    code = main(
+        [
+            *bench_args(tmp_path, directory),
+            "--max-bench-micros",
+            "250",
+            "--max-run-micros",
+            "100",
+        ]
+    )
+
+    assert code == 1, "a suite that measured fewer tasks than it planned is not green"
+    assert "stopping before" in capsys.readouterr().err
+
+
+def test_a_suite_within_its_ceiling_runs_every_task(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The complement: the ceiling must not end a suite it can afford.
+    monkeypatch.setattr(cli, "_build_agent", lambda args, clock: SpendingAgent())
+    directory = suite_of(tmp_path, "csv-quoted-fields", "interval-merge")
+
+    code = main(
+        [
+            *bench_args(tmp_path, directory),
+            "--max-bench-micros",
+            "10000",
+            "--max-run-micros",
+            "100",
+        ]
+    )
+
+    assert code == 0
+
+
+def test_a_ceiling_of_zero_is_a_usage_error(tmp_path: Path) -> None:
+    # Zero reads as both "spend nothing" and "no limit", so it is refused
+    # rather than guessed at -- before any run is created.
+    directory = suite_of(tmp_path, "csv-quoted-fields")
+
+    code = main([*bench_args(tmp_path, directory), "--max-bench-micros", "0"])
+
+    assert code == 2

@@ -39,9 +39,11 @@ from control_plane.adapters.system import SystemClock, UuidIdGenerator
 from control_plane.adapters.task_toml import load_task, load_tasks
 from control_plane.adapters.tool_use_agent import DEFAULT_MAX_TURNS, ToolUseAgent
 from control_plane.adapters.workspace import WorkspaceFactory
+from control_plane.domain.budget import can_start_another_run, validate_ceiling
 from control_plane.domain.errors import DomainError
 from control_plane.domain.fixture import manifest_bytes
 from control_plane.domain.ids import RunId
+from control_plane.domain.model import MicroUsd, total_micros
 from control_plane.domain.outcomes import FailureCategory
 from control_plane.domain.record import RunRecord
 from control_plane.domain.states import RunState
@@ -136,6 +138,17 @@ def _add_run_flags(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "--max-run-micros",
+        type=int,
+        default=None,
+        help=(
+            "stop one run once it has spent this many micro-USD. The loop "
+            "reports what it managed; the run stays a measurement. Overshoot "
+            "is bounded by one model call, because the cost of a call is not "
+            "known until it returns"
+        ),
+    )
+    parser.add_argument(
         "--model",
         default=DEFAULT_MODEL,
         help=f"the model for --agent ollama (default {DEFAULT_MODEL})",
@@ -185,6 +198,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     bench.add_argument("directory", type=Path, nargs="?", default=DEFAULT_TASKS)
     _add_run_flags(bench)
+    # Deliberately not in `_add_run_flags`, which exists so the two subcommands
+    # cannot drift apart. A suite ceiling on `af run` would be a flag that
+    # silently does nothing, which is the failure the TOML loader's
+    # unknown-key rule exists to prevent one level up.
+    bench.add_argument(
+        "--max-bench-micros",
+        type=int,
+        default=None,
+        help=(
+            "stop the suite before the first task it could not afford to "
+            "finish. Counted over this invocation, not over the database: a "
+            "budget belongs to an experiment, not to a file"
+        ),
+    )
 
     show = subcommands.add_parser("show", help="print a stored run")
     show.add_argument("run_id")
@@ -418,12 +445,17 @@ def _build_agent(args: argparse.Namespace, clock: SystemClock) -> AgentPort:
             clock,
             max_turns=args.max_turns,
             prompt=_prompt(args, DEFAULT_TOOL_PROMPT),
+            run_ceiling=_ceiling(args.max_run_micros),
         )
     return FakeAgent(args.solutions, clock)
 
 
 def _prompt(args: argparse.Namespace, fallback: str) -> PromptVariant:
     return variant(args.prompt or fallback)
+
+
+def _ceiling(value: int | None) -> MicroUsd | None:
+    return None if value is None else MicroUsd(value)
 
 
 def _prompt_problem(args: argparse.Namespace) -> str | None:
@@ -433,6 +465,14 @@ def _prompt_problem(args: argparse.Namespace) -> str | None:
     the agent instead, it would create a row and spend tokens before failing,
     and leave an unfinished run behind for the recovery scan.
     """
+    try:
+        validate_ceiling(_ceiling(args.max_run_micros), "--max-run-micros")
+        validate_ceiling(
+            _ceiling(getattr(args, "max_bench_micros", None)), "--max-bench-micros"
+        )
+    except DomainError as error:
+        return str(error)
+
     if args.prompt is None:
         return None
     if args.agent == AGENT_FAKE:
@@ -589,6 +629,23 @@ def bench_tasks(args: argparse.Namespace) -> int:
             service = _build_service(args, repository, workspaces, runner, clock)
 
             for position, task in enumerate(tasks, start=1):
+                spent = total_micros(r.total_cost_micros for r in records)
+                if not can_start_another_run(
+                    spent,
+                    _ceiling(args.max_bench_micros),
+                    _ceiling(args.max_run_micros),
+                ):
+                    # Stopped, not failed. The exit code already says a suite
+                    # that measured fewer tasks than it planned is not green,
+                    # so no fourth code is needed to carry the reason.
+                    print(
+                        f"{PROGRAM}: stopping before {task.task_id}: "
+                        f"{spent} micro-USD spent of "
+                        f"{args.max_bench_micros} allowed",
+                        file=sys.stderr,
+                    )
+                    break
+
                 # Progress on stderr, data on stdout, so redirecting the
                 # results still shows which task is running.
                 print(
