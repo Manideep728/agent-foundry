@@ -886,3 +886,59 @@ def test_an_agent_that_raised_still_records_how_long_it_took(tmp_path: Path) -> 
     assert stored is not None
     assert stored.agent_ms == record.agent_ms
     repo.close()
+
+
+class AbortingRunner:
+    runner_id = "aborting"
+    runner_version = "aborting 0.0.0"
+    isolated = True
+    image_digest = None
+
+    def run(self, request: ValidationRequest) -> ValidationReport:
+        raise KeyboardInterrupt
+
+
+def test_an_abort_after_the_agent_ran_records_what_it_spent(tmp_path: Path) -> None:
+    """A ^C during validation threw away the agent's work and its cost.
+
+    The abort path built its record from the run alone, so a run that had
+    already called the model stored no invocations, no patch and no duration.
+    It is the same defect as the two runner-failure paths, on the one path a
+    benchmark operator triggers by hand -- and the only failure shape that
+    hides money that was really spent.
+    """
+    service, repo = build(tmp_path, runner=AbortingRunner())
+
+    with pytest.raises(KeyboardInterrupt):
+        service.execute(task())
+
+    stored = repo.get(FakeIdGenerator().new_run_id())
+    assert stored is not None
+    assert stored.run.state is RunState.ABORTED
+    assert stored.invocations, "the agent ran, so its invocations must survive"
+    assert stored.agent_ms is not None
+    assert stored.patch_sha256 is not None
+    repo.close()
+
+
+def test_an_abort_before_the_agent_ran_records_nothing_spent(tmp_path: Path) -> None:
+    # The complement, so the fix cannot become "always attach an agent result".
+    class AbortingAgent:
+        agent_id = "stub-agent"
+        provider_id = "aborting"
+        model_id = "stub-1"
+
+        def edit(self, workspace: Path, task: TaskDefinition) -> object:
+            raise KeyboardInterrupt
+
+    service, repo = build(tmp_path, agent=AbortingAgent())
+
+    with pytest.raises(KeyboardInterrupt):
+        service.execute(task())
+
+    stored = repo.get(FakeIdGenerator().new_run_id())
+    assert stored is not None
+    assert stored.run.state is RunState.ABORTED
+    assert stored.invocations == ()
+    assert stored.total_cost_micros == 0
+    repo.close()

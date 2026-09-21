@@ -117,7 +117,15 @@ class EvaluationService:
 
         workspace = None
         record: RunRecord | None = None
+        # Everything the run learns as it goes, hoisted so that a path leaving
+        # early still has it. An abort is the path that needed this: a ^C after
+        # the agent ran used to store a run that spent nothing and produced no
+        # patch, which is the only failure shape that hides money.
+        agent_result: AgentResult | None = None
         agent_ms: int | None = None
+        patch: Patch | None = None
+        report: ValidationReport | None = None
+        validation_ms: int | None = None
         try:
             run = self._advance(run, RunState.PREPARING)
 
@@ -246,7 +254,14 @@ class EvaluationService:
             # still knows how far this got.
             self._repo.finish(
                 self._base_record(
-                    aborted, task, reached_validation=_reached_validation(run)
+                    aborted,
+                    task,
+                    report=report,
+                    patch=patch,
+                    agent_result=agent_result,
+                    agent_ms=agent_ms,
+                    validation_ms=validation_ms,
+                    reached_validation=_reached_validation(run),
                 ),
                 expected=run.state,
             )
