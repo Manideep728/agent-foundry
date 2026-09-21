@@ -30,10 +30,22 @@ encoding lives in `adapters/dispatch_json.py` and the client in
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 
 from control_plane.domain.errors import DomainError
 from control_plane.domain.ids import RunId, TaskId
 from control_plane.domain.task import Suite, TaskDefinition
+
+TASK_RUNS_TOPIC = "agentfoundry-task-runs"
+RUN_RESULTS_TOPIC = "agentfoundry-run-results"
+"""The topic names, defined once here and created by `infra/kafka/topics.sh`.
+
+Hyphenated, never dotted. Kafka warns on any topic name containing a `.` or a
+`_`, because both become `_` in a metric name and two topics can collide
+there. A test asserts that the script creates exactly these names: topic
+auto-creation is off, so a drift between the two would not be a warning but a
+dispatcher that produces to a topic nobody consumes.
+"""
 
 SCHEMA_VERSION = 1
 """The version every message this build writes carries.
@@ -138,3 +150,86 @@ class TaskRunMessage:
                 f"{self.fixture_sha256} at the dispatcher; the two checkouts "
                 f"do not hold the same task"
             )
+
+
+@dataclass(frozen=True, slots=True)
+class RawDelivery:
+    """One message as it arrived, before anything tries to read it.
+
+    Bytes rather than a `TaskRunMessage`, because a message that cannot be
+    decoded still has to be acknowledged. A consumer that raised on bad bytes
+    would never commit past them, and the same message would be redelivered
+    for ever -- the poison message. Keeping the delivery and its decoding
+    separate lets the caller record the defect and commit anyway.
+
+    `partition` and `offset` identify the message in the log and are what
+    `commit` needs. They are also the only honest way to name a bad message in
+    a log line, since its contents are by definition unreadable.
+    """
+
+    partition: int
+    offset: int
+    key: bytes | None
+    value: bytes
+
+
+class MessagePublisher(Protocol):
+    """Sends bytes to one topic, chosen when the publisher is built.
+
+    The topic is bound at construction rather than passed per call, so there
+    is no argument to get wrong: a dispatcher holds a publisher for the work
+    topic and a worker holds one for the results topic, and neither can
+    publish to the other's.
+    """
+
+    def publish(self, key: bytes, value: bytes) -> None:
+        """Hand one message over. May return before the broker has it."""
+        ...
+
+    def flush(self, timeout_s: float) -> int:
+        """Wait for outstanding messages and return how many remain.
+
+        A non-zero return means the broker did not acknowledge everything in
+        time. It is a return value rather than an exception because the caller
+        knows what it dispatched and can say which work is in doubt; the
+        publisher only knows a count.
+        """
+        ...
+
+
+class MessageConsumer(Protocol):
+    """Reads bytes from one topic as a member of a consumer group.
+
+    Offsets are committed explicitly, never automatically. The order is the
+    whole contract: take the message, finish the work, make the result
+    durable, and only then commit. A consumer that committed on receipt would
+    lose any run whose worker died mid-task, which is at-most-once delivery
+    and the wrong trade for a measurement that costs minutes to produce.
+
+    The price of that order is duplicates, and they are not rare: a worker
+    that dies after publishing its result but before committing will see the
+    message again, and so will the worker that takes over its partition after
+    a rebalance. `TaskRunMessage.run_id` is minted by the dispatcher so that
+    the duplicate is recognisable rather than counted twice.
+    """
+
+    def poll(self, timeout_s: float) -> RawDelivery | None:
+        """Return the next message, or None if none arrived in time.
+
+        None is ordinary and means only that the topic was quiet. A caller
+        must not treat it as the end of the work.
+        """
+        ...
+
+    def commit(self, delivery: RawDelivery) -> None:
+        """Record that everything up to and including `delivery` is done."""
+        ...
+
+    def close(self) -> None:
+        """Leave the group and release the partitions.
+
+        Worth calling rather than relying on the session timeout: an orderly
+        departure lets the group rebalance at once, where an abandoned member
+        holds its partitions until the broker gives up on it.
+        """
+        ...

@@ -8,16 +8,22 @@ configurations as one.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from control_plane.domain.ids import RunId, TaskId
 from control_plane.domain.task import Suite
 from control_plane.services.dispatch import (
+    RUN_RESULTS_TOPIC,
     SCHEMA_VERSION,
+    TASK_RUNS_TOPIC,
     IncompatibleMessage,
     TaskRunMessage,
 )
 from tests.test_domain_task import VALID_SHA, make_task
+
+TOPICS_SCRIPT = Path(__file__).resolve().parent.parent / "infra/kafka/topics.sh"
 
 
 def make_message(**overrides: object) -> TaskRunMessage:
@@ -98,3 +104,24 @@ def test_a_negative_dispatch_time_is_rejected() -> None:
 def test_a_prompt_is_optional() -> None:
     """The fake agent reads no instructions; None is the honest answer."""
     assert make_message(prompt_id=None).prompt_id is None
+
+
+@pytest.mark.parametrize("topic", [TASK_RUNS_TOPIC, RUN_RESULTS_TOPIC])
+def test_the_setup_script_creates_the_topic_the_code_produces_to(topic: str) -> None:
+    """Auto-creation is off, so a drift here is not a warning but silence.
+
+    A dispatcher renamed on one side would produce to a topic that does not
+    exist and no worker consumes, and nothing in either file would say so.
+    """
+    assert topic in TOPICS_SCRIPT.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("topic", [TASK_RUNS_TOPIC, RUN_RESULTS_TOPIC])
+def test_a_topic_name_contains_no_dot_or_underscore(topic: str) -> None:
+    """Kafka warns on either, because both become '_' in a metric name.
+
+    A warning printed on every start is a warning nobody reads, so the names
+    avoid the characters rather than the project learning to ignore it.
+    """
+    assert "." not in topic
+    assert "_" not in topic

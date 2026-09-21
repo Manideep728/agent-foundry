@@ -57,6 +57,11 @@ markers = [
     # marker covers only the claim that a real server answers in the shape the
     # adapter expects.
     "ollama: requires a running Ollama server with the model pulled",
+    # These check that the real client and the real broker agree with what
+    # `tests/bus_fakes.py` models. The fake carries the semantics the rest of
+    # the suite depends on, so it is the thing that must be verified, not
+    # merely trusted.
+    "kafka: requires a Kafka broker on AF_KAFKA_BOOTSTRAP (default localhost:9092)",
 ]
 
 [tool.ruff]
@@ -81,3 +86,11 @@ warn_unreachable = true
 # The domain layer is pure logic; there is no excuse for an untyped def there,
 # and strict mode is enforced across the whole package rather than per-module.
 disallow_any_explicit = false
+
+# `confluent_kafka.admin` publishes `AdminClient` and `NewTopic` as its public
+# interface but does not re-export them explicitly, which strict mode refuses.
+# The gap is upstream, so it is stated once here rather than as an ignore on
+# every import.
+[[tool.mypy.overrides]]
+module = "confluent_kafka.*"
+implicit_reexport = true
