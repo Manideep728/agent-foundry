@@ -7,7 +7,7 @@ becoming a plausible wrong number.
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import MISSING, fields, replace
 from pathlib import Path
 
 import pytest
@@ -307,6 +307,126 @@ def test_a_task_defect_keeps_its_evidence(repo: SqliteRunRepository) -> None:
     assert stored.score is not None
     assert stored.report is not None
     assert stored.task_defect
+
+
+# --- everything the record carries -------------------------------------------
+
+
+CONFIGURATION: dict[str, object] = {
+    "agent_id": "tools",
+    "provider_id": "ollama",
+    "model_id": "llama3.2:3b",
+}
+"""What `create()` writes and `finish()` must not touch.
+
+The populated record below repeats it unchanged. A create-only column the two
+records disagree about would fail the round trip for the right reason in the
+wrong place.
+"""
+
+DERIVED_FIELDS = frozenset({"task_defect"})
+"""Fields that no valid record can move off their default.
+
+`task_defect` is `patch_is_empty and resolved`, so a record that carries it as
+True is a record with an empty patch. test_a_task_defect_keeps_its_evidence
+stores that shape on its own.
+"""
+
+
+def configured_run(repo: SqliteRunRepository) -> EvaluationRun:
+    """Create a run the way the service does, then take it to VALIDATING.
+
+    The created row holds the configuration and a guessed environment: no
+    container exists yet, so arch is a placeholder and there are no
+    measurements. Everything the finished record adds must therefore come from
+    `finish()`, or be lost.
+    """
+    run = new_run()
+    repo.create(base_record(run, arch="unknown", pid1=False, **CONFIGURATION))
+    for state, at in (
+        (RunState.PREPARING, EPOCH_MS + 1),
+        (RunState.AGENT_RUNNING, EPOCH_MS + 2),
+        (RunState.VALIDATING, EPOCH_MS + 3),
+    ):
+        previous = run.state
+        run = run.transition_to(state, at)
+        repo.advance(run, previous)
+    return run
+
+
+def fully_populated(run: EvaluationRun) -> RunRecord:
+    """A scored record with every field carrying a distinct, real value."""
+    invocation = ModelInvocation(
+        provider_id="ollama",
+        model_id="llama3.2:3b",
+        usage=ModelUsage(
+            input_tokens=432,
+            output_tokens=11,
+            cache_write_tokens=7,
+            cache_read_tokens=405,
+        ),
+        cost=MicroUsd(48_000),
+        latency_ms=286,
+    )
+    return base_record(
+        run.transition_to(RunState.SCORED, EPOCH_MS + 4),
+        # The environment the container reported, not the one create() guessed.
+        runner_version="afrunner 0.1.0",
+        arch="x86_64",
+        pid1=True,
+        report=a_report(),
+        score=a_score(),
+        outcome=AgentOutcome.CLEAN_PATCH,
+        patch_sha256="b" * 64,
+        patch_bytes=421,
+        patch_is_empty=False,
+        invocations=(invocation,),
+        total_cost_micros=MicroUsd(48_000),
+        agent_ms=1100,
+        validation_ms=1234,
+        workspace_path="/home/pendy/runs/run-0001",
+        image_digest="sha256:" + "c" * 64,
+        agent_note="3 tool call(s) but no file written",
+        **CONFIGURATION,
+    )
+
+
+def test_a_finished_run_reads_back_exactly_as_it_was_written(
+    repo: SqliteRunRepository,
+) -> None:
+    """The guard for a value computed correctly and then not written down.
+
+    Three defects have had this shape -- `arch` and `pid1`, `workspace_path`,
+    the agent result on two failure paths -- and each survived a suite that
+    asserted on fields the test chose. `RunRecord` is frozen and compares
+    structurally, so one equality covers every field there is, including the
+    fields added after this test was written.
+    """
+    record = fully_populated(configured_run(repo))
+
+    repo.finish(record, RunState.VALIDATING)
+
+    assert repo.get(RunId("run-0001")) == record
+
+
+def test_the_round_trip_record_leaves_no_field_at_its_default(
+    repo: SqliteRunRepository,
+) -> None:
+    """The hole in the test above: a field whose two sides are both None.
+
+    An equality check cannot tell a stored value from an unstored default when
+    the fixture never set the field. This makes the fixture prove it moved.
+    """
+    record = fully_populated(configured_run(repo))
+
+    for spec in fields(record):
+        if spec.name in DERIVED_FIELDS:
+            continue
+        value = getattr(record, spec.name)
+        if spec.default is not MISSING:
+            assert value != spec.default, f"{spec.name} is still its default"
+        elif spec.default_factory is not MISSING:
+            assert value != spec.default_factory(), f"{spec.name} is still its default"
 
 
 # --- the float guard ---------------------------------------------------------
