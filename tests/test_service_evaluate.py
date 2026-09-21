@@ -942,3 +942,84 @@ def test_an_abort_before_the_agent_ran_records_nothing_spent(tmp_path: Path) -> 
     assert stored.invocations == ()
     assert stored.total_cost_micros == 0
     repo.close()
+
+
+def incomplete_report() -> ValidationReport:
+    """A report whose second command never ran: the mismatch failure path."""
+    lines = task().command_file_lines()
+    return stub_report(
+        (
+            result(0, lines[0]),
+            result(
+                1,
+                lines[1],
+                outcome=CommandOutcome.NOT_RUN,
+                exit_code=None,
+                duration_ms=0,
+            ),
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("runner", "kind"),
+    [
+        (DeadDockerRunner(), FailureCategory.INFRASTRUCTURE_FAILED),
+        (SilentRunnerFailure(), FailureCategory.RUNNER_FAILED),
+        (StubRunner(incomplete_report()), FailureCategory.VALIDATION_INCOMPLETE),
+        (AbortingRunner(), None),
+    ],
+    ids=["docker-outage", "runner-failure", "validation-incomplete", "operator-abort"],
+)
+def test_a_failure_after_the_agent_ran_records_what_the_agent_spent(
+    tmp_path: Path, runner: object, kind: FailureCategory | None
+) -> None:
+    """Every path that ends a run after the model answered keeps its work.
+
+    Table-driven rather than one test for each path, because the defect is a
+    path that forgets an argument, and a new path is exactly what a set of
+    hand-written tests does not cover. Asserted on the stored row and never on
+    the returned record: all three defects of this shape were invisible to a
+    test that read the object in hand.
+    """
+    service, repo = build(tmp_path, runner=runner)
+
+    if kind is None:
+        with pytest.raises(KeyboardInterrupt):
+            service.execute(task())
+    else:
+        record = service.execute(task())
+        assert record.run.failure is not None
+        assert record.run.failure.kind is kind
+
+    stored = repo.get(FakeIdGenerator().new_run_id())
+    assert stored is not None
+    assert stored.invocations, "the agent ran, so its invocations must survive"
+    assert stored.agent_ms is not None
+    assert stored.total_cost_micros == sum(i.cost for i in stored.invocations)
+    repo.close()
+
+
+@pytest.mark.parametrize("break_task", ["fixture_hash", "missing_fixture"])
+def test_a_failure_before_the_agent_ran_records_no_spend(
+    tmp_path: Path, break_task: str
+) -> None:
+    # The complement. Without it the rule above degenerates into "attach an
+    # agent result everywhere", which reports spending for runs that never
+    # called a model.
+    broken = load_task(TASK_FILE)
+    if break_task == "fixture_hash":
+        object.__setattr__(broken, "fixture_sha256", "f" * 64)
+    else:
+        object.__setattr__(broken, "fixture_id", "no-such-fixture")
+    service, repo = build(tmp_path)
+
+    record = service.execute(broken)
+
+    stored = repo.get(record.run.run_id)
+    assert stored is not None
+    assert stored.run.state is RunState.FAILED
+    assert stored.invocations == ()
+    assert stored.total_cost_micros == 0
+    assert stored.agent_ms is None
+    repo.close()
