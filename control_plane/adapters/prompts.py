@@ -182,11 +182,14 @@ VARIANTS = MappingProxyType(
     {variant.prompt_id: variant for variant in (TOOLS_V1, TOOLS_V2, SINGLE_SHOT_V1)}
 )
 
-DEFAULT_TOOL_PROMPT = TOOLS_V1.prompt_id
+DEFAULT_TOOL_PROMPT = TOOLS_V2.prompt_id
 """What `--agent tools` uses when no prompt is named.
 
-Still `tools-v1`, until a measurement says otherwise. Making the untested
-prompt the default would silently change what every later run means.
+Moved from `tools-v1` on 2026-09-21, on the measurement pre-registered before
+it ran: `no_patch_produced` fell from 8 of 8 to 2 of 7, replicated over two
+suites. `resolved` is 0 under both, so this is a change in what the loop does,
+not in what it achieves -- and the default is the prompt under which the agent
+does something a benchmark can read.
 """
 
 DEFAULT_SINGLE_SHOT_PROMPT = SINGLE_SHOT_V1.prompt_id

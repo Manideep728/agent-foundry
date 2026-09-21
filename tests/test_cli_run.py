@@ -323,9 +323,9 @@ def test_the_tools_flag_builds_the_loop_with_the_prompt_it_was_given() -> None:
     assert agent.prompt_id == "tools-v2"
 
 
-def test_an_agent_built_with_no_prompt_flag_uses_the_shipped_one() -> None:
+def test_an_agent_built_with_no_prompt_flag_uses_the_measured_one() -> None:
     args = build_parser().parse_args(["run", "t.toml", "--agent", "tools"])
 
     agent = _build_agent(args, SystemClock())
 
-    assert agent.prompt_id == "tools-v1"
+    assert agent.prompt_id == "tools-v2"

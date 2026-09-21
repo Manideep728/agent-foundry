@@ -599,7 +599,7 @@ def test_a_loop_with_no_prompt_named_uses_the_shipped_one(tmp_path: Path) -> Non
         FakeClock(),
     )
 
-    assert agent.prompt_id == DEFAULT_TOOL_PROMPT == "tools-v1"
+    assert agent.prompt_id == DEFAULT_TOOL_PROMPT == "tools-v2"
 
 
 # --- the spend ceiling -------------------------------------------------------

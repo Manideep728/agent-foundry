@@ -255,8 +255,10 @@ into a rate describing neither.
 
 `--agent ollama` sends the task and the visible files to a local model in one
 prompt and applies the files it sends back. It runs at temperature 0 with a
-fixed seed: two runs of the same task against the same model produce
-byte-identical patches. Token counts are recorded and the cost is zero, which
+fixed seed. For the single-shot agent two runs of one task produce
+byte-identical patches. For the tool loop they do not: two suites over the same
+eight tasks, the same model and the same prompt gave the same totals and
+disagreed on two tasks (see Limitations). Token counts are recorded and the cost is zero, which
 is the honest figure for a model that cost nothing to call.
 
 `--agent tools` gives the model three tools -- list the files, read one, write
@@ -277,9 +279,17 @@ model does, so it is measured like anything else it does. The reply is kept
 next to the patch, with one line saying what was wrong with it, because a
 malformed-output rate nobody can inspect cannot be acted on.
 
+The system prompt is a named variant, chosen with `--prompt` and recorded on
+every run. `tools-v1` is the prompt the first tool-loop measurements were taken
+under; `tools-v2` is the default and is the one that produces patches. A
+summary groups on the prompt, so a comparison between two of them is two rows
+rather than one blended figure. A named variant is frozen: changing its text
+fails a test, and the fix is a new name.
+
 ```
 af run tasks/csv-quoted-fields.toml --agent ollama --model qwen2.5-coder:3b
 af run tasks/template-render.toml --agent tools --max-turns 8
+af bench --agent tools --model llama3.2:3b --prompt tools-v1
 ```
 
 ## Planned scope
@@ -301,19 +311,29 @@ the first release.
   Linux-only by design.
 - **`--runner local` is not a sandbox.** Point it only at fixtures whose
   contents are already trusted.
-- **`--agent tools` has not produced a patch.** Against a local 7B model it
-  lists the files, reads two or three and then stops without writing, so its
-  runs score `no_patch_produced`. The same model edits successfully when it is
-  handed the files in a single prompt, so the loop, the system prompt and the
-  model are all candidates and none of them has been isolated. The prompt has
-  never been tuned.
-- **Tool calls arrive as text, not on the tool channel.** Both local models
-  tried advertise tool-calling support and then write the call into the message
-  body; the smaller one emits JSON that does not parse. The harness reads the
-  text channel but does not repair a malformed call, because guessing at one
-  produces a plausible patch from a misread reply, which is worse than refusing
-  it. A refused reply scores `malformed_output` and the text is kept beside the
-  patch.
+- **`--agent tools` writes patches, and none of them is correct yet.** Under
+  the prompt `tools-v2` and `llama3.2:3b`, five of seven measured tasks produce
+  a patch and all five break a test that passed before. `resolved` is 0/7. The
+  prompt fixed the mechanism, not the repair.
+- **A tool-loop result is not reproducible at the task level.** Temperature is
+  zero and the seed is fixed, and two suites over the same eight tasks, the
+  same model and the same prompt still disagreed on two of them, while the
+  totals matched. Read the per-task rows as one sample each.
+- **The prompt is a measured variable, and it was tuned on this suite.** Every
+  run records the named prompt it used, and a summary groups on it, so two
+  prompts are two rows. The same eight tasks chose the prompt and then scored
+  it, so the figure is an upper bound on an unseen task.
+- **One task exceeds the client timeout.** `template-render` asks the model for
+  a whole file and has not answered inside 300 s in three attempts. It is
+  reported as `agent_error`, which produces no measurement, rather than as a
+  model failure.
+- **Tool calls do not always arrive on the tool channel.** `llama3.2:3b` uses
+  the documented `tool_calls` field; both `qwen2.5-coder` models write the call
+  into the message body instead, and the 3B one sends several JSON objects
+  separated by newlines. The harness reads one JSON value written as text and
+  refuses anything else, so those runs under-report what the model asked for.
+  Guessing at a malformed call produces a plausible patch from a misread reply,
+  which is worse than refusing it.
 
 Benchmark numbers, when they exist, will name the machine that produced them
 and be reported as ranges across runs. Results from different model providers
