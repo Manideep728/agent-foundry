@@ -348,3 +348,21 @@ def test_an_older_database_is_switched_to_wal(tmp_path: Path) -> None:
         pass
 
     assert read(path, "PRAGMA journal_mode") == "wal"
+
+
+def test_the_upgrade_leaves_an_older_runs_prompt_unnamed(tmp_path: Path) -> None:
+    """The v6 step backfills nothing, for the reason v5 did not either.
+
+    A stored run used whatever the prompt text was on the day it ran. Writing
+    `tools-v1` into those rows would claim they used a text this build can
+    show, which is exactly what cannot be known: the constant was edited in
+    place before it had a name. NULL groups apart instead of blending in.
+    """
+    path = tmp_path / "af.sqlite3"
+    build_v1(path)
+    insert_v1_run(path, stored_arch="unknown", report_arch="x86_64")
+
+    with SqliteRunRepository(path):
+        pass
+
+    assert read(path, "SELECT prompt_id FROM runs WHERE run_id = 'r1'") is None

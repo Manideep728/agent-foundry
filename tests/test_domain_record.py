@@ -182,3 +182,28 @@ def test_a_fully_named_configuration_is_accepted() -> None:
     )
 
     assert stored.agent_id == "tools"
+
+
+def test_a_record_may_name_a_configuration_without_a_prompt() -> None:
+    """The fake agent has a configuration and asks no model anything.
+
+    Folding the prompt into the all-three-or-none rule would make that state
+    unrepresentable, and the harness would have to invent a prompt name for an
+    agent that reads no instructions.
+    """
+    stored = record(
+        outcome=AgentOutcome.NO_PATCH_PRODUCED,
+        agent_id="fake",
+        provider_id="fake",
+        model_id="scripted",
+    )
+
+    assert stored.prompt_id is None
+
+
+def test_a_prompt_id_is_a_name_or_none_never_the_empty_string() -> None:
+    # The `image_digest` rule, one field over: an empty name would satisfy a
+    # filter looking for a real one, so a run with no prompt would be counted
+    # in a comparison between prompts.
+    with pytest.raises(PreconditionViolated, match="prompt_id"):
+        record(outcome=AgentOutcome.NO_PATCH_PRODUCED, prompt_id="")

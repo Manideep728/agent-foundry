@@ -75,6 +75,19 @@ class RunRecord:
     must not satisfy a filter looking for a real one.
     """
 
+    prompt_id: str | None = None
+    """Which named prompt the agent sent, when it sent one.
+
+    A fourth dimension of the configuration, and it earns its place the way the
+    other three did. Measured on 2026-09-20, one model under two prompts goes
+    from writing nothing to writing patches; merged into one row, those are a
+    rate describing neither, which is the defect D20 exists to prevent.
+
+    Deliberately not folded into the all-three-or-none rule above. The fake
+    agent has a configuration and no prompt, because it asks no model anything,
+    and that is a true state rather than an unrecorded one.
+    """
+
     invocations: tuple[ModelInvocation, ...] = field(default_factory=tuple)
     total_cost_micros: MicroUsd = ZERO_MICRO_USD
     agent_ms: int | None = None
@@ -180,6 +193,12 @@ class RunRecord:
         # None means "no image". The empty string means an adapter looked and
         # wrote down whatever it got, which is the one answer this must not
         # store as provenance.
+        self._require(
+            self.prompt_id != "",
+            "prompt_id is a name or None, never the empty string: an empty "
+            "name would satisfy a filter looking for a real one",
+        )
+
         self._require(
             self.image_digest != "",
             "image_digest is None or a digest, never the empty string",

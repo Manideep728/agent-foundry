@@ -142,6 +142,7 @@ class SilentAgent:
     agent_id = "stub-agent"
     provider_id = "stub"
     model_id = "stub-1"
+    prompt_id = None
 
     def __init__(self, outcome: AgentOutcome | None) -> None:
         self._outcome = outcome
@@ -198,6 +199,7 @@ def test_every_invocation_an_agent_reports_is_recorded(tmp_path: Path) -> None:
         agent_id = "stub-agent"
         provider_id = "stub"
         model_id = "stub-1"
+        prompt_id = None
 
         def edit(self, workspace: Path, task: TaskDefinition) -> AgentResult:
             def call(cost: int) -> ModelInvocation:
@@ -227,6 +229,7 @@ def test_an_agent_that_raises_is_an_agent_error(tmp_path: Path) -> None:
         agent_id = "stub-agent"
         provider_id = "exploding"
         model_id = "stub-1"
+        prompt_id = None
 
         def edit(self, workspace: Path, task: TaskDefinition) -> object:
             raise AgentError("rate limit exhausted")
@@ -572,6 +575,7 @@ class MalformedAgent:
     agent_id = "stub-agent"
     provider_id = "stub"
     model_id = "stub-1"
+    prompt_id = None
 
     def __init__(self, reply: str, reason: str) -> None:
         self._reply = reply
@@ -871,6 +875,7 @@ def test_an_agent_that_raised_still_records_how_long_it_took(tmp_path: Path) -> 
         agent_id = "stub-agent"
         provider_id = "exploding"
         model_id = "stub-1"
+        prompt_id = None
 
         def edit(self, workspace: Path, task: TaskDefinition) -> object:
             raise AgentError("ollama did not answer within 300s")
@@ -927,6 +932,7 @@ def test_an_abort_before_the_agent_ran_records_nothing_spent(tmp_path: Path) -> 
         agent_id = "stub-agent"
         provider_id = "aborting"
         model_id = "stub-1"
+        prompt_id = None
 
         def edit(self, workspace: Path, task: TaskDefinition) -> object:
             raise KeyboardInterrupt

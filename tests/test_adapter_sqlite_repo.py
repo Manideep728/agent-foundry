@@ -316,6 +316,7 @@ CONFIGURATION: dict[str, object] = {
     "agent_id": "tools",
     "provider_id": "ollama",
     "model_id": "llama3.2:3b",
+    "prompt_id": "tools-v2",
 }
 """What `create()` writes and `finish()` must not touch.
 

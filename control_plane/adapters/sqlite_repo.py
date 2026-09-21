@@ -34,7 +34,7 @@ from control_plane.domain.validation import (
 )
 from control_plane.services.errors import ConcurrentModification, RunAlreadyExists
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 _SCHEMA = (
     """
@@ -74,6 +74,7 @@ CREATE TABLE runs (
   agent_id           TEXT,
   provider_id        TEXT,
   model_id           TEXT,
+  prompt_id          TEXT,
   CHECK ((state = 'failed') = (failure_kind IS NOT NULL)),
   CHECK (updated_at_unix_ms >= created_at_unix_ms),
   CHECK (pid1 IN (0, 1))
@@ -152,8 +153,8 @@ _CREATE_SQL = (
     "(run_id, task_id, suite, state, created_at_unix_ms, "
     " updated_at_unix_ms, fixture_sha256, runner_id, "
     " runner_version, arch, pid1, workspace_path, "
-    " agent_id, provider_id, model_id) "
-    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+    " agent_id, provider_id, model_id, prompt_id) "
+    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
 )
 
 _ADVANCE_SQL = (
@@ -225,6 +226,7 @@ _FIELD_COLUMNS: Mapping[str, frozenset[str]] = MappingProxyType(
         "agent_id": frozenset({"agent_id"}),
         "provider_id": frozenset({"provider_id"}),
         "model_id": frozenset({"model_id"}),
+        "prompt_id": frozenset({"prompt_id"}),
         "total_cost_micros": frozenset({"total_cost_micros"}),
         "agent_ms": frozenset({"agent_ms"}),
         "validation_ms": frozenset({"validation_ms"}),
@@ -256,6 +258,7 @@ _CREATE_ONLY = frozenset(
         "agent_id",
         "provider_id",
         "model_id",
+        "prompt_id",
     }
 )
 """Columns written once, at creation, and never revised.
@@ -323,6 +326,17 @@ _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             "ALTER TABLE runs ADD COLUMN agent_id TEXT",
             "ALTER TABLE runs ADD COLUMN provider_id TEXT",
             "ALTER TABLE runs ADD COLUMN model_id TEXT",
+        ),
+    ),
+    (
+        6,
+        (
+            # The prompt a run was given. Recorded because it decides the
+            # measurement: one model under two prompts writes nothing and then
+            # writes patches. Backfilled to NULL on purpose -- a run stored
+            # before this column cannot be said to have used `tools-v1`, only
+            # to have used whatever the text was on that day.
+            "ALTER TABLE runs ADD COLUMN prompt_id TEXT",
         ),
     ),
 )
@@ -493,6 +507,7 @@ class SqliteRunRepository:
                         record.agent_id,
                         record.provider_id,
                         record.model_id,
+                        record.prompt_id,
                     ),
                 )
         except sqlite3.IntegrityError as error:
@@ -750,6 +765,7 @@ class SqliteRunRepository:
             agent_id=row["agent_id"],
             provider_id=row["provider_id"],
             model_id=row["model_id"],
+            prompt_id=row["prompt_id"],
         )
 
     def _read_report(self, run_id: RunId) -> ValidationReport | None:
