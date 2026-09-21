@@ -13,9 +13,10 @@ the guard real.
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import closing, suppress
 from pathlib import Path
+from types import MappingProxyType
 
 from control_plane.domain.ids import RunId, TaskId
 from control_plane.domain.model import MicroUsd, ModelInvocation, ModelUsage
@@ -144,6 +145,124 @@ CREATE TABLE model_invocations (
 
 
 _TABLES = ("runs", "validation_reports", "command_results", "model_invocations")
+
+
+_CREATE_SQL = (
+    "INSERT INTO runs "
+    "(run_id, task_id, suite, state, created_at_unix_ms, "
+    " updated_at_unix_ms, fixture_sha256, runner_id, "
+    " runner_version, arch, pid1, workspace_path, "
+    " agent_id, provider_id, model_id) "
+    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+)
+
+_ADVANCE_SQL = (
+    "UPDATE runs SET state = ?, updated_at_unix_ms = ?, "
+    "failure_kind = ?, failure_from = ?, failure_detail = ? "
+    "WHERE run_id = ? AND state = ?"
+)
+
+_FINISH_SQL = (
+    "UPDATE runs SET state = ?, updated_at_unix_ms = ?, "
+    "failure_kind = ?, failure_from = ?, failure_detail = ?, "
+    "runner_version = ?, arch = ?, pid1 = ?, "
+    "outcome = ?, resolved = ?, regressed = ?, f2p_passed = ?, "
+    "f2p_total = ?, p2p_passed = ?, p2p_total = ?, "
+    "timed_out_commands = ?, task_defect = ?, patch_sha256 = ?, "
+    "patch_bytes = ?, patch_is_empty = ?, total_cost_micros = ?, "
+    "agent_ms = ?, validation_ms = ?, workspace_path = ?, "
+    "image_digest = ?, agent_note = ? "
+    "WHERE run_id = ? AND state = ?"
+)
+"""The three statements that write `runs`, lifted out of their methods.
+
+Named so a test can read the column names back out of the SQL. Three bugs have
+now been a column missing from one of these lists while the value that belongs
+in it was computed correctly -- `arch` and `pid1`, `workspace_path` before
+them. A comment asking the next author to keep the lists in step is what was
+there when each of those shipped.
+"""
+
+
+_FIELD_COLUMNS: Mapping[str, frozenset[str]] = MappingProxyType(
+    {
+        # One `RunRecord` field does not mean one column: `run` carries the
+        # state machine and fans out to eight, `score` to seven.
+        "run": frozenset(
+            {
+                "run_id",
+                "task_id",
+                "state",
+                "created_at_unix_ms",
+                "updated_at_unix_ms",
+                "failure_kind",
+                "failure_from",
+                "failure_detail",
+            }
+        ),
+        "suite": frozenset({"suite"}),
+        "fixture_sha256": frozenset({"fixture_sha256"}),
+        "runner_id": frozenset({"runner_id"}),
+        "runner_version": frozenset({"runner_version"}),
+        "arch": frozenset({"arch"}),
+        "pid1": frozenset({"pid1"}),
+        "score": frozenset(
+            {
+                "resolved",
+                "regressed",
+                "f2p_passed",
+                "f2p_total",
+                "p2p_passed",
+                "p2p_total",
+                "timed_out_commands",
+            }
+        ),
+        "outcome": frozenset({"outcome"}),
+        "task_defect": frozenset({"task_defect"}),
+        "patch_sha256": frozenset({"patch_sha256"}),
+        "patch_bytes": frozenset({"patch_bytes"}),
+        "patch_is_empty": frozenset({"patch_is_empty"}),
+        "agent_id": frozenset({"agent_id"}),
+        "provider_id": frozenset({"provider_id"}),
+        "model_id": frozenset({"model_id"}),
+        "total_cost_micros": frozenset({"total_cost_micros"}),
+        "agent_ms": frozenset({"agent_ms"}),
+        "validation_ms": frozenset({"validation_ms"}),
+        "workspace_path": frozenset({"workspace_path"}),
+        "image_digest": frozenset({"image_digest"}),
+        "agent_note": frozenset({"agent_note"}),
+    }
+)
+"""Which columns of `runs` each `RunRecord` field reaches.
+
+Declared rather than derived, because the mapping is not one to one and a
+generator able to express it would be this same table spelled as code that
+emits SQL. Stating it once lets a test compare it against the record, against
+the table and against the statements above -- which is the guard the three
+bugs needed, and which no amount of care in the SQL itself provides.
+"""
+
+_CHILD_TABLE_FIELDS = frozenset({"report", "invocations"})
+"""Fields stored in a table of their own rather than in a `runs` column."""
+
+_CREATE_ONLY = frozenset(
+    {
+        "run_id",
+        "task_id",
+        "created_at_unix_ms",
+        "suite",
+        "fixture_sha256",
+        "runner_id",
+        "agent_id",
+        "provider_id",
+        "model_id",
+    }
+)
+"""Columns written once, at creation, and never revised.
+
+Identity and configuration: what the run is and what was being measured. Every
+other column describes what happened, so `finish()` must write it.
+"""
 
 
 # Ordered upgrade steps, each naming the version it produces. A step may add a
@@ -350,12 +469,7 @@ class SqliteRunRepository:
         try:
             with self._conn:
                 self._conn.execute(
-                    "INSERT INTO runs "
-                    "(run_id, task_id, suite, state, created_at_unix_ms, "
-                    " updated_at_unix_ms, fixture_sha256, runner_id, "
-                    " runner_version, arch, pid1, workspace_path, "
-                    " agent_id, provider_id, model_id) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    _CREATE_SQL,
                     (
                         record.run.run_id.value,
                         record.run.task_id.value,
@@ -390,9 +504,7 @@ class SqliteRunRepository:
         """Compare-and-swap the state, or raise."""
         with self._conn:
             cursor = self._conn.execute(
-                "UPDATE runs SET state = ?, updated_at_unix_ms = ?, "
-                "failure_kind = ?, failure_from = ?, failure_detail = ? "
-                "WHERE run_id = ? AND state = ?",
+                _ADVANCE_SQL,
                 (
                     run.state.value,
                     _measure("updated_at", run.updated_at_unix_ms),
@@ -427,16 +539,7 @@ class SqliteRunRepository:
         """
         with self._conn:
             cursor = self._conn.execute(
-                "UPDATE runs SET state = ?, updated_at_unix_ms = ?, "
-                "failure_kind = ?, failure_from = ?, failure_detail = ?, "
-                "runner_version = ?, arch = ?, pid1 = ?, "
-                "outcome = ?, resolved = ?, regressed = ?, f2p_passed = ?, "
-                "f2p_total = ?, p2p_passed = ?, p2p_total = ?, "
-                "timed_out_commands = ?, task_defect = ?, patch_sha256 = ?, "
-                "patch_bytes = ?, patch_is_empty = ?, total_cost_micros = ?, "
-                "agent_ms = ?, validation_ms = ?, workspace_path = ?, "
-                "image_digest = ?, agent_note = ? "
-                "WHERE run_id = ? AND state = ?",
+                _FINISH_SQL,
                 (
                     record.run.state.value,
                     _measure("updated_at", record.run.updated_at_unix_ms),
