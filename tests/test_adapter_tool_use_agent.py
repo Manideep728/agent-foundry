@@ -13,18 +13,21 @@ from pathlib import Path
 
 import pytest
 
-from control_plane.adapters.task_toml import load_task
-from control_plane.adapters.tool_use_agent import (
+from control_plane.adapters.prompts import (
+    DEFAULT_TOOL_PROMPT,
     LIST_FILES,
     READ_FILE,
     TOOLS,
+    VARIANTS,
     WRITE_FILE,
-    ToolUseAgent,
 )
+from control_plane.adapters.task_toml import load_task
+from control_plane.adapters.tool_use_agent import ToolUseAgent
 from control_plane.adapters.workspace import WorkspaceFactory
 from control_plane.domain.ids import RunId
 from control_plane.domain.model import (
     Message,
+    MessageRole,
     ModelResponse,
     ModelUsage,
     ToolCall,
@@ -541,3 +544,54 @@ def test_newline_separated_objects_are_prose_not_a_batch(tmp_path: Path) -> None
     # The write in the third object must not reach the workspace: a batch is
     # all prose or all calls, never the part the harness liked.
     assert (repo / "csvkit" / "fields.py").read_text() != "x"
+
+
+# --- the prompt a loop was built with ----------------------------------------
+
+
+def test_the_agent_reports_the_prompt_it_was_built_with(tmp_path: Path) -> None:
+    """The id must come from the variant, not from a default read twice.
+
+    `prompt_id` is what the run records. Were it a constant beside the
+    injection point, an agent built with `tools-v2` could record `tools-v1`,
+    and every measurement under the new prompt would be filed under the old
+    one -- the blended summary again, with no symptom.
+    """
+    agent = ToolUseAgent(
+        ScriptedClient([says("done")]),
+        FakeClock(),
+        prompt=VARIANTS["tools-v2"],
+    )
+
+    assert agent.prompt_id == "tools-v2"
+
+
+def test_the_system_prompt_sent_is_the_variant_that_was_asked_for(
+    tmp_path: Path,
+) -> None:
+    client = ScriptedClient([says("done")])
+    agent = ToolUseAgent(
+        client,
+        FakeClock(),
+        prompt=VARIANTS["tools-v2"],
+    )
+    task, repo = prepared(tmp_path)
+
+    agent.edit(repo, task)
+
+    system = client.conversations[0][0]
+    assert system.role is MessageRole.SYSTEM
+    assert system.content == VARIANTS["tools-v2"].system
+    assert client.tools_offered == VARIANTS["tools-v2"].tools
+
+
+def test_a_loop_with_no_prompt_named_uses_the_shipped_one(tmp_path: Path) -> None:
+    # The default stays `tools-v1` until a measurement moves it. A default that
+    # changed with the newest variant would silently change what every stored
+    # comparison means.
+    agent = ToolUseAgent(
+        ScriptedClient([says("done")]),
+        FakeClock(),
+    )
+
+    assert agent.prompt_id == DEFAULT_TOOL_PROMPT == "tools-v1"

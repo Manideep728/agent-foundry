@@ -161,4 +161,15 @@ class AgentPort(Protocol):
         """
         ...
 
+    @property
+    def prompt_id(self) -> str | None:
+        """Which named prompt this agent sends, when it sends one.
+
+        None for an agent that calls no model, which is an honest answer rather
+        than a legacy one: the fake agent applies a stored solution and reads
+        no instructions at all. Kept out of the identity trio above because an
+        agent may legitimately have a configuration and no prompt.
+        """
+        ...
+
     def edit(self, workspace: Path, task: TaskDefinition) -> AgentResult: ...

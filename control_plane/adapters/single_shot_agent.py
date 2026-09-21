@@ -17,6 +17,11 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from control_plane.adapters.prompts import (
+    DEFAULT_SINGLE_SHOT_PROMPT,
+    PromptVariant,
+    variant,
+)
 from control_plane.domain.errors import DomainError
 from control_plane.domain.fixture import is_excluded, validate_fixture_path
 from control_plane.domain.model import (
@@ -47,23 +52,7 @@ the model's confusion as a result.
 _BLOCK_START = re.compile(r"^`{3,}\s*path\s*=\s*(?P<path>[^\s`]+)\s*$")
 _BLOCK_END = re.compile(r"^`{3,}\s*$")
 
-_SYSTEM_PROMPT = """You repair a small software repository.
-
-You will be given a problem statement and the current contents of every file
-you are allowed to see. Return the complete new contents of each file you
-change, and nothing else.
-
-Use exactly this format for every file you change:
-
-```path=relative/path/to/file.py
-<the complete new contents of that file>
-```
-
-Rules:
-- Give the whole file, not a diff and not a fragment.
-- Use the file's path exactly as it was given to you.
-- Change as few files as possible.
-- Write no explanation outside the blocks."""
+DEFAULT_PROMPT = variant(DEFAULT_SINGLE_SHOT_PROMPT)
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,11 +79,13 @@ class SingleShotAgent:
         clock: Clock,
         *,
         price: TokenPrice | None = None,
+        prompt: PromptVariant | None = None,
         max_prompt_bytes: int = DEFAULT_MAX_PROMPT_BYTES,
     ) -> None:
         self._client = client
         self._clock = clock
         self._price = price or TokenPrice.free(client.model_id)
+        self._prompt = prompt or DEFAULT_PROMPT
         self._max_prompt_bytes = max_prompt_bytes
 
     @property
@@ -113,13 +104,17 @@ class SingleShotAgent:
     def model_id(self) -> str:
         return self._client.model_id
 
+    @property
+    def prompt_id(self) -> str:
+        return self._prompt.prompt_id
+
     def edit(self, workspace: Path, task: TaskDefinition) -> AgentResult:
         prompt = self._build_prompt(workspace, task)
 
         started = self._clock.monotonic_ms()
         response = self._client.complete(
             (
-                Message(MessageRole.SYSTEM, _SYSTEM_PROMPT),
+                Message(MessageRole.SYSTEM, self._prompt.system),
                 Message(MessageRole.USER, prompt),
             )
         )

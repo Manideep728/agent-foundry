@@ -46,6 +46,11 @@ class ScriptedModelClient:
         return PROVIDER_ID
 
     @property
+    def prompt_id(self) -> None:
+        """No prompt, because no model is asked anything."""
+        return None
+
+    @property
     def model_id(self) -> str:
         return MODEL_ID
 
@@ -93,6 +98,16 @@ class FakeAgent:
     @property
     def model_id(self) -> str:
         return MODEL_ID
+
+    @property
+    def prompt_id(self) -> None:
+        """No prompt, because no model is asked anything.
+
+        The honest answer rather than a legacy one: this agent applies a stored
+        solution. It also keeps the None case real -- a summary that only ever
+        saw a named prompt would never be exercised on the runs that have none.
+        """
+        return None
 
     def edit(self, workspace: Path, task: TaskDefinition) -> AgentResult:
         started = self._clock.monotonic_ms()

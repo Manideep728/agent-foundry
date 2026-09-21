@@ -29,6 +29,15 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from control_plane.adapters.prompts import (
+    DEFAULT_TOOL_PROMPT,
+    LIST_FILES,
+    READ_FILE,
+    TOOLS,
+    WRITE_FILE,
+    PromptVariant,
+    variant,
+)
 from control_plane.domain.errors import DomainError
 from control_plane.domain.fixture import is_excluded, validate_fixture_path
 from control_plane.domain.model import (
@@ -39,7 +48,6 @@ from control_plane.domain.model import (
     ModelResponse,
     TokenPrice,
     ToolCall,
-    ToolSpec,
     cost_micros,
 )
 from control_plane.domain.outcomes import AgentOutcome
@@ -65,68 +73,8 @@ Enough for any fixture file, and small enough that a model asking for something
 enormous cannot fill its own context with one call.
 """
 
-LIST_FILES = "list_files"
-READ_FILE = "read_file"
-WRITE_FILE = "write_file"
-
-TOOLS = (
-    ToolSpec(
-        name=LIST_FILES,
-        description=(
-            "List every file you may read or change, as paths relative to the "
-            "repository root. Takes no arguments."
-        ),
-        parameters={"type": "object", "properties": {}, "required": []},
-    ),
-    ToolSpec(
-        name=READ_FILE,
-        description="Read one file. Give its path exactly as list_files gave it.",
-        parameters={
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Path relative to the repository root.",
-                }
-            },
-            "required": ["path"],
-        },
-    ),
-    ToolSpec(
-        name=WRITE_FILE,
-        description=(
-            "Replace one file with new contents. Give the whole file, not a "
-            "diff and not a fragment."
-        ),
-        parameters={
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Path relative to the repository root.",
-                },
-                "content": {
-                    "type": "string",
-                    "description": "The complete new contents of the file.",
-                },
-            },
-            "required": ["path", "content"],
-        },
-    ),
-)
-
-_SYSTEM_PROMPT = """You repair a small software repository.
-
-Work with the tools you are given. A typical repair is: list the files, read
-the ones that matter, then write the file you need to change.
-
-Rules:
-- Use list_files before assuming a path exists.
-- Give whole files to write_file, never a diff or a fragment.
-- Change as few files as possible.
-- Some files are not shown to you. That is deliberate; work from the ones you
-  can see.
-- When the repair is done, say so in a short sentence and stop calling tools."""
+DEFAULT_PROMPT = variant(DEFAULT_TOOL_PROMPT)
+"""What the loop uses when the caller names no prompt."""
 
 
 class ToolError(Exception):
@@ -219,12 +167,14 @@ class ToolUseAgent:
         *,
         price: TokenPrice | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
+        prompt: PromptVariant | None = None,
     ) -> None:
         if max_turns < 1:
             raise ValueError("max_turns must be at least 1")
         self._client = client
         self._clock = clock
         self._price = price or TokenPrice.free(client.model_id)
+        self._prompt = prompt or DEFAULT_PROMPT
         self._max_turns = max_turns
 
     @property
@@ -239,10 +189,14 @@ class ToolUseAgent:
     def model_id(self) -> str:
         return self._client.model_id
 
+    @property
+    def prompt_id(self) -> str:
+        return self._prompt.prompt_id
+
     def edit(self, workspace: Path, task: TaskDefinition) -> AgentResult:
         space = _Workspace(root=workspace, hidden=frozenset(task.hidden_paths))
         messages: list[Message] = [
-            Message(MessageRole.SYSTEM, _SYSTEM_PROMPT),
+            Message(MessageRole.SYSTEM, self._prompt.system),
             Message(MessageRole.USER, self._opening(space, task)),
         ]
         invocations: list[ModelInvocation] = []
@@ -316,7 +270,7 @@ class ToolUseAgent:
 
     def _call(self, messages: list[Message]) -> tuple[ModelResponse, ModelInvocation]:
         started = self._clock.monotonic_ms()
-        response = self._client.complete(tuple(messages), TOOLS)
+        response = self._client.complete(tuple(messages), self._prompt.tools)
         return response, ModelInvocation(
             provider_id=self._client.provider_id,
             model_id=self._client.model_id,
