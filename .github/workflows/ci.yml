@@ -18,7 +18,10 @@ concurrency:
 jobs:
   control-plane:
     name: control plane
-    runs-on: ubuntu-latest
+    # Pinned, not `ubuntu-latest`: that label moves to Ubuntu 26 on
+    # 2026-10-19. Every green run so far was on 24.04, and the runner
+    # image is part of what the C++ half is built against.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -50,7 +53,10 @@ jobs:
   # skipping for some other reason is visible in the log rather than silent.
   runner:
     name: runner
-    runs-on: ubuntu-latest
+    # Pinned, not `ubuntu-latest`: that label moves to Ubuntu 26 on
+    # 2026-10-19. Every green run so far was on 24.04, and the runner
+    # image is part of what the C++ half is built against.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
 
