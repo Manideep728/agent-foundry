@@ -146,3 +146,42 @@ def _checked(
                 f"expected {' or '.join(t.__name__ for t in allowed)}"
             )
     return dict(raw)
+
+
+def encode_report(report: ValidationReport) -> dict[str, Any]:
+    """Build the object form of a report, ready to nest or to serialise.
+
+    The runner writes this shape and `decode_report` reads it. Encoding it
+    again is what lets a worker send a finished report to a collector on
+    another machine, over a format that is already specified and already
+    tested.
+
+    The keys come from the same `_TYPES` tables the decoder validates against,
+    rather than from a second hand-written list. That makes the two symmetric
+    by construction: there is one statement of the contract, so an encoder and
+    a decoder cannot drift into disagreement. Renaming a field on the
+    dataclass without updating the table fails loudly here, at the `getattr`,
+    instead of silently changing the wire format.
+    """
+    return _fields(report, _REPORT_TYPES) | {
+        "commands": [
+            _fields(command, _COMMAND_TYPES)
+            | {
+                "outcome": command.outcome.value,
+                "stdout": _fields(command.stdout, _STREAM_TYPES),
+                "stderr": _fields(command.stderr, _STREAM_TYPES),
+            }
+            for command in report.commands
+        ],
+        "exit_reason": report.exit_reason.value,
+    }
+
+
+def _fields(source: object, types: dict[str, tuple[type, ...]]) -> dict[str, Any]:
+    """Read every key the contract names off the object that holds it.
+
+    Nested and enum values are overwritten by the caller. They are read here
+    too and then replaced, which costs nothing and keeps the key set in one
+    place.
+    """
+    return {key: getattr(source, key) for key in types}

@@ -36,6 +36,7 @@ from typing import Protocol
 from control_plane.domain.errors import DomainError
 from control_plane.domain.ids import RunId, TaskId
 from control_plane.domain.ports import Clock, IdGenerator
+from control_plane.domain.record import RunRecord
 from control_plane.domain.task import Suite, TaskDefinition
 
 TASK_RUNS_TOPIC = "agentfoundry-task-runs"
@@ -152,6 +153,62 @@ class TaskRunMessage:
                 f"{self.fixture_sha256} at the dispatcher; the two checkouts "
                 f"do not hold the same task"
             )
+
+
+@dataclass(frozen=True, slots=True)
+class RunResultMessage:
+    """One finished measurement, on its way to the collector.
+
+    The whole `RunRecord` travels. The alternative -- a notification, with the
+    worker writing the database itself -- would put N writers on one SQLite
+    file and give up the single-writer invariant the run lock exists to hold.
+    Pointing at a file the worker wrote is no better: it assumes the two share
+    a filesystem, which is exactly the assumption distribution removes.
+    """
+
+    record: RunRecord
+    worker_id: str
+    """Which worker produced this. Provenance, not identity.
+
+    A measurement is identified by its `run_id`. This says where it was made,
+    which is what a suite whose numbers disagree between machines needs in
+    order to be read at all.
+    """
+
+    dispatched_at_ms: int
+    """Copied from the work message, unchanged."""
+
+    completed_at_ms: int
+    """The worker's own realtime clock when it finished.
+
+    Both of these are timestamps and neither is subtracted from the other to
+    produce a stored duration (D12). The gap between them spans two machines'
+    realtime clocks, so it is an estimate of how long work waited, and this
+    project does not record estimates as measurements. `agent_ms` and
+    `validation_ms` on the record are the real durations, taken from a
+    monotonic clock on one machine.
+    """
+
+    schema_version: int = SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        if not self.worker_id.strip():
+            raise IncompatibleMessage("worker_id must not be empty")
+        for name in ("dispatched_at_ms", "completed_at_ms"):
+            if getattr(self, name) < 0:
+                raise IncompatibleMessage(f"{name} must not be negative")
+
+    @property
+    def partition_key(self) -> bytes:
+        """The run, because that is the identity a duplicate shares.
+
+        Unlike the work topic, this is not about ordering between runs of one
+        task: the results topic has a single partition and the collector reads
+        it in order. The key is here so that a duplicate of one run is
+        recognisable by key alone, and so that adding partitions later would
+        keep every arrival of a run together.
+        """
+        return self.record.run.run_id.value.encode("utf-8")
 
 
 @dataclass(frozen=True, slots=True)
