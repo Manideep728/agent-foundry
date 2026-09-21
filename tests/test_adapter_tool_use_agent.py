@@ -424,6 +424,8 @@ def test_a_structured_call_reports_nothing_extra(tmp_path: Path) -> None:
         '{"arguments": {}}',
         "Here is some JSON-ish text: {name: read_file}",
         '{"name": "write_file", "arguments": {"content": """x"""}}',
+        '{"name": "list_files", "arguments": {}}\n'
+        '{"name": "read_file", "arguments": {"path": "csvkit/fields.py"}}',
     ],
 )
 def test_prose_is_never_mistaken_for_a_tool_call(tmp_path: Path, text: str) -> None:
@@ -507,3 +509,35 @@ def test_running_out_of_turns_after_using_tools_is_not_malformed(
     assert result.outcome is None
     assert result.outcome_detail is not None
     assert "turn budget" in result.outcome_detail
+
+
+def test_newline_separated_objects_are_prose_not_a_batch(tmp_path: Path) -> None:
+    """Measured against qwen2.5-coder:3b on 2026-09-20.
+
+    That model answers a minimal request with four JSON objects, one per line,
+    in `content`, with `tool_calls` null. Four genuine requests therefore score
+    as a run that asked for nothing, and every stored row for that model
+    undercounts what it intended.
+
+    Read anyway, the harness would be reading a shape the provider does not
+    document and the model does not claim: a message is one JSON value or it is
+    prose. Widening the grammar to fit one template is how a parser for broken
+    JSON starts, which is the failure D3 exists to prevent, and the rule that
+    prose can never become an action would then rest on a grammar rather than
+    on one comparison. The cost is stated in D22 and in the notes: a figure
+    from that model is a floor, not the model's intent.
+    """
+    batched = (
+        '{"name": "list_files", "arguments": {}}\n'
+        '{"name": "read_file", "arguments": {"path": "csvkit/fields.py"}}\n'
+        '{"name": "write_file", "arguments": {"path": "csvkit/fields.py", '
+        '"content": "x"}}'
+    )
+
+    result, repo, _ = run(tmp_path, [says(batched)])
+
+    assert result.outcome is AgentOutcome.MALFORMED_OUTPUT
+    assert result.outcome_detail == "the model never called a tool"
+    # The write in the third object must not reach the workspace: a batch is
+    # all prose or all calls, never the part the harness liked.
+    assert (repo / "csvkit" / "fields.py").read_text() != "x"

@@ -512,3 +512,22 @@ it would put a run with no result into a rate; dropping it in silence would
 shrink the denominator whenever a process died, so the benchmark would look
 better the more often it broke.
 
+## D22 — A tool call written as text must be one JSON value
+
+A model is expected to ask for a tool through the provider's `tool_calls`
+field. Some chat templates put the call in the reply text instead, and the
+harness reads that, because refusing it would measure the template rather than
+the model. What it reads is narrow: the whole message must be one JSON object,
+or one JSON array of them, optionally inside a code fence. Every entry must
+name a tool that exists and carry an object of arguments. Anything else is
+prose, and a message that mixes a call with a sentence is prose.
+
+`qwen2.5-coder:3b` sends several JSON objects separated by newlines. That is
+not one JSON value, and it stays prose. The rule that prose can never become an
+action rests on one comparison, and a grammar widened to fit each template is
+the parser for broken JSON that D3 refuses on the runner side.
+
+The cost is real and is not hidden. Four genuine tool requests from that model
+are recorded as a run that asked for nothing, so its stored outcomes are a
+floor on what it intended. No figure taken from that model may be described as
+the model producing nothing.

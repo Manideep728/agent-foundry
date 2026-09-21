@@ -398,6 +398,11 @@ def _tool_calls_in_text(text: str) -> tuple[ToolCall, ...]:
     must name a tool that exists, and arguments must be an object. Anything
     else is prose. Each use is counted and reported, so a model that only ever
     asks this way is visible in the data rather than quietly accommodated.
+
+    One shape is refused on purpose rather than by omission. `qwen2.5-coder:3b`
+    sends several JSON objects separated by newlines, which is not one JSON
+    value, and D22 keeps it prose. The consequence is real and is stated there:
+    that model's stored rows are a floor on what it asked for.
     """
     stripped = text.strip()
     if stripped.startswith("```"):
