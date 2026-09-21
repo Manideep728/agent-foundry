@@ -11,6 +11,14 @@ license-files = ["LICENSE"]
 # with the first real model adapter and not before.
 dependencies = []
 
+# Kafka is an extra, not a dependency. The serial scheduler is still the
+# default and needs nothing beyond the standard library, so `af run` and `af
+# bench` must keep installing and working on a machine with no broker and no
+# librdkafka. Only `af dispatch`, `af worker` and `af collect` require this,
+# and each fails with an installation hint rather than an ImportError.
+[project.optional-dependencies]
+kafka = ["confluent-kafka>=2.6,<3"]
+
 [project.scripts]
 af = "control_plane.interface.cli:main"
 
