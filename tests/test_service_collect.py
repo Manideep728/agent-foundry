@@ -200,3 +200,19 @@ def test_a_result_that_could_not_be_stored_is_not_acknowledged(
         harness.collector.step(0)
 
     assert harness.consumer.committed == 0
+
+
+def test_a_refused_commit_after_a_store_is_reported_not_raised(
+    harness: Harness,
+) -> None:
+    # The result is redelivered, and then arrives as a duplicate of the row
+    # this step stored.
+    harness.send(measured())
+    harness.consumer.evicted = True
+
+    collected = harness.collector.step(0)
+
+    assert collected is not None
+    assert collected.collection is Collection.STORED
+    assert not collected.committed
+    assert harness.repository.get(measured().run.run_id) is not None
