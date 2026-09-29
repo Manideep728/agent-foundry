@@ -27,6 +27,7 @@ from control_plane.domain.ids import RunId, TaskId
 from control_plane.domain.task import Suite
 from control_plane.services.dispatch import (
     SCHEMA_VERSION,
+    IncompatibleMessage,
     TaskRunMessage,
     UndecodableMessage,
 )
@@ -79,7 +80,10 @@ def encode(message: TaskRunMessage) -> bytes:
 
 
 def decode(raw: bytes) -> TaskRunMessage:
-    """Parse the bytes of one message, or raise `MalformedMessage`.
+    """Parse one message, or raise `MalformedMessage` or `IncompatibleMessage`.
+
+    `IncompatibleMessage` means a newer build wrote it: the worker leaves it
+    for a worker that can honour it rather than committing past it (D28).
 
     The version is checked before anything else is read. A message from a
     future build may use a key this one would reject as unknown, and "unknown
@@ -153,7 +157,10 @@ def _check_version(fields: dict[str, Any]) -> None:
     if not isinstance(version, int) or isinstance(version, bool):
         raise MalformedMessage(f"schema_version must be an integer, got {version!r}")
     if version > SCHEMA_VERSION:
-        raise MalformedMessage(
+        # Incompatible, not malformed. A newer build can read this message,
+        # so it is left uncommitted for one; reported as malformed, it would
+        # be committed past and the run would never be measured (D28).
+        raise IncompatibleMessage(
             f"message is schema_version {version} and this build understands "
             f"at most {SCHEMA_VERSION}"
         )

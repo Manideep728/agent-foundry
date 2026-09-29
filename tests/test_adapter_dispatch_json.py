@@ -18,7 +18,7 @@ from control_plane.adapters.dispatch_json import (
     encode,
 )
 from control_plane.domain.ids import RunId
-from control_plane.services.dispatch import SCHEMA_VERSION
+from control_plane.services.dispatch import SCHEMA_VERSION, IncompatibleMessage
 from tests.test_service_dispatch import make_message
 
 
@@ -108,8 +108,11 @@ def test_a_future_schema_version_is_refused_by_version_not_by_key() -> None:
 
     Checking keys first would report "unknown key budget_micros", which sends
     the reader looking for a typo instead of for a newer producer.
+
+    Incompatible rather than malformed: a newer worker can honour it, so a
+    worker leaves it uncommitted instead of skipping it (D28).
     """
-    with pytest.raises(MalformedMessage, match="understands at most"):
+    with pytest.raises(IncompatibleMessage, match="understands at most"):
         decode(payload(schema_version=SCHEMA_VERSION + 1, budget_micros=500))
 
 

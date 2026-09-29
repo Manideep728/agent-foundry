@@ -1097,8 +1097,9 @@ def run_collector(args: argparse.Namespace) -> int:
     """Store results until a limit or the operator stops it.
 
     Exits 0 when it stops at a limit, whatever it collected: a duplicate or a
-    refused result is reported, not a failure of the collector. Exits 1 when
-    the broker or the database fails it.
+    refused result is reported, not a failure of the collector. Exits 2 when a
+    result comes from a newer build, which is left on the topic for a collector
+    that can store it, and 1 when the broker or the database fails it.
     """
     problem = _limit_problem(args)
     if problem is not None:
@@ -1141,11 +1142,18 @@ def run_collector(args: argparse.Namespace) -> int:
     except KafkaUnavailable as error:
         print(f"{PROGRAM}: {error}", file=sys.stderr)
         return EXIT_HARNESS_FAILED
+    except IncompatibleMessage as error:
+        print(
+            f"{PROGRAM}: stopping, and leaving the result on the topic for a "
+            f"newer collector: {error}",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
     except KeyboardInterrupt:
         print(f"{PROGRAM}: aborted", file=sys.stderr)
         return EXIT_ABORTED
 
-    summary = ", ".join(f"{count} {kind.value}" for kind, count in counts.items())
+    summary =", ".join(f"{count} {kind.value}" for kind, count in counts.items())
     print(f"{PROGRAM}: collected {summary}", file=sys.stderr)
     return EXIT_MEASURED
 

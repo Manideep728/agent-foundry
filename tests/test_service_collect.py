@@ -8,6 +8,7 @@ equality is only worth anything if both sides are the real ones.
 from __future__ import annotations
 
 import dataclasses
+import json
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -21,7 +22,7 @@ from control_plane.domain.outcomes import AgentOutcome
 from control_plane.domain.record import RunRecord
 from control_plane.domain.states import EvaluationRun, RunState
 from control_plane.services.collect import Collection, Collector
-from control_plane.services.dispatch import RunResultMessage
+from control_plane.services.dispatch import IncompatibleMessage, RunResultMessage
 from tests.bus_fakes import FakeConsumer, FakeTopic
 from tests.fakes import EPOCH_MS
 from tests.test_adapter_record_json import failed_run
@@ -216,3 +217,23 @@ def test_a_refused_commit_after_a_store_is_reported_not_raised(
     assert collected.collection is Collection.STORED
     assert not collected.committed
     assert harness.repository.get(measured().run.run_id) is not None
+
+
+def test_a_result_from_a_newer_build_is_left_for_a_newer_collector(
+    harness: Harness,
+) -> None:
+    harness.send(measured())
+    newer = json.loads(harness.results.delivered[0].value)
+    newer["schema_version"] += 1
+    harness.results = FakeTopic(partitions=1)
+    harness.consumer = harness.results.consumer()
+    harness.collector = Collector(
+        consumer=harness.consumer, store=harness.repository, decode=record_json.decode
+    )
+    harness.results.publish(b"run-0001", json.dumps(newer).encode("utf-8"))
+
+    with pytest.raises(IncompatibleMessage, match="understands at most"):
+        harness.collector.step(0)
+
+    assert harness.consumer.committed == 0
+    assert harness.repository.list_runs() == ()

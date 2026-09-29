@@ -9,6 +9,7 @@ stopping a partition for good.
 from __future__ import annotations
 
 import dataclasses
+import json
 
 import pytest
 
@@ -264,3 +265,18 @@ def test_a_worker_evicted_mid_run_still_publishes_and_keeps_working() -> None:
     assert handled.handling is Handling.MEASURED
     assert not handled.committed
     assert len(harness.published()) == 1
+
+
+def test_a_message_from_a_newer_build_is_left_for_a_newer_worker() -> None:
+    # Committed past, as it was until D28's limitation was closed, the run
+    # would never be measured by anyone.
+    harness = Harness()
+    newer = json.loads(dispatch_json.encode(make_message()))
+    newer["schema_version"] += 1
+    harness.work.publish(b"csv-parser-001", json.dumps(newer).encode("utf-8"))
+
+    with pytest.raises(IncompatibleMessage, match="understands at most"):
+        harness.worker.step(0)
+
+    assert harness.consumer.committed == 0
+    assert harness.results.delivered == ()

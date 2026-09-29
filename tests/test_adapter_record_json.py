@@ -30,7 +30,7 @@ from control_plane.domain.outcomes import AgentOutcome, FailureCategory
 from control_plane.domain.record import RunRecord
 from control_plane.domain.scoring import Score
 from control_plane.domain.states import EvaluationRun, HarnessFailure, RunState
-from control_plane.services.dispatch import RunResultMessage
+from control_plane.services.dispatch import IncompatibleMessage, RunResultMessage
 from tests.fakes import EPOCH_MS
 from tests.test_domain_record import record
 
@@ -259,9 +259,17 @@ def test_an_unknown_state_is_refused() -> None:
         decode(json.dumps(payload).encode("utf-8"))
 
 
-def test_a_mismatched_schema_version_is_refused() -> None:
+def test_a_newer_schema_version_is_left_for_a_newer_collector() -> None:
     payload = json.loads(encode(message()))
     payload["schema_version"] = 99
+
+    with pytest.raises(IncompatibleMessage, match="understands at most"):
+        decode(json.dumps(payload).encode("utf-8"))
+
+
+def test_an_older_schema_version_is_refused() -> None:
+    payload = json.loads(encode(message()))
+    payload["schema_version"] = 0
 
     with pytest.raises(MalformedRecord, match="this build speaks"):
         decode(json.dumps(payload).encode("utf-8"))

@@ -44,6 +44,7 @@ from control_plane.domain.states import EvaluationRun, HarnessFailure, RunState
 from control_plane.domain.task import Suite
 from control_plane.services.dispatch import (
     SCHEMA_VERSION,
+    IncompatibleMessage,
     RunResultMessage,
     UndecodableMessage,
 )
@@ -144,7 +145,11 @@ def encode(message: RunResultMessage) -> bytes:
 
 
 def decode(raw: bytes) -> RunResultMessage:
-    """Parse the bytes of one result message, or raise `MalformedRecord`."""
+    """Parse one result, or raise `MalformedRecord` or `IncompatibleMessage`.
+
+    `IncompatibleMessage` means a newer build wrote it, and the collector
+    leaves it on the topic for a collector that can store it.
+    """
     fields = _object(raw, "message")
     _check_version(fields)
 
@@ -444,6 +449,14 @@ def _check_version(fields: dict[str, Any]) -> None:
     version = fields.get("schema_version")
     if not isinstance(version, int) or isinstance(version, bool):
         raise MalformedRecord(f"schema_version must be an integer, got {version!r}")
+    if version > SCHEMA_VERSION:
+        # Left on the topic for a newer collector rather than committed past:
+        # a result this build cannot store is a measurement that would
+        # otherwise be lost (D28).
+        raise IncompatibleMessage(
+            f"message is schema_version {version} and this build understands "
+            f"at most {SCHEMA_VERSION}"
+        )
     if version != SCHEMA_VERSION:
         raise MalformedRecord(
             f"message is schema_version {version} and this build speaks "
