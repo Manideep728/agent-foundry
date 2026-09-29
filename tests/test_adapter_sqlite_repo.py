@@ -168,6 +168,24 @@ def test_a_refused_duplicate_leaves_the_original_intact(
     assert stored is not None and stored.run.state is RunState.PREPARING
 
 
+def test_a_constraint_failure_is_not_reported_as_a_duplicate(
+    repo: SqliteRunRepository,
+) -> None:
+    # A failed row inserted without its failure columns breaks a CHECK, not
+    # the primary key. Reported as "already recorded", it sent the diagnosis
+    # looking for a second copy of a run that did not exist.
+    import sqlite3
+
+    from control_plane.services.errors import RunAlreadyExists
+
+    failed = new_run().fail(FailureCategory.RUNNER_FAILED, EPOCH_MS + 1)
+
+    with pytest.raises(sqlite3.IntegrityError, match="CHECK") as raised:
+        repo.create(base_record(failed))
+    assert not isinstance(raised.value, RunAlreadyExists)
+    assert repo.get(RunId("run-0001")) is None
+
+
 def test_getting_an_unknown_run_returns_none(repo: SqliteRunRepository) -> None:
     assert repo.get(RunId("run-9999")) is None
 

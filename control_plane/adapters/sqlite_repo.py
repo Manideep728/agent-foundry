@@ -147,6 +147,11 @@ CREATE TABLE model_invocations (
 
 _TABLES = ("runs", "validation_reports", "command_results", "model_invocations")
 
+# SQLite's extended result code for "a row with this key already exists". The
+# message text says "UNIQUE constraint failed" even for a primary key, so the
+# code is matched rather than the text.
+_DUPLICATE_KEY_ERRORS = frozenset({"SQLITE_CONSTRAINT_PRIMARYKEY"})
+
 
 _CREATE_SQL = (
     "INSERT INTO runs "
@@ -540,6 +545,11 @@ class SqliteRunRepository:
                 ),
             )
         except sqlite3.IntegrityError as error:
+            # Only a key violation means the run exists. A CHECK failure is a
+            # row this code built wrongly, and naming it a duplicate sends the
+            # diagnosis looking for a second copy that is not there.
+            if error.sqlite_errorname not in _DUPLICATE_KEY_ERRORS:
+                raise
             raise RunAlreadyExists(
                 f"{record.run.run_id} is already recorded"
             ) from error
