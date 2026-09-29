@@ -25,10 +25,14 @@ from typing import Any
 from control_plane.domain.errors import DomainError
 from control_plane.domain.ids import RunId, TaskId
 from control_plane.domain.task import Suite
-from control_plane.services.dispatch import SCHEMA_VERSION, TaskRunMessage
+from control_plane.services.dispatch import (
+    SCHEMA_VERSION,
+    TaskRunMessage,
+    UndecodableMessage,
+)
 
 
-class MalformedMessage(Exception):
+class MalformedMessage(UndecodableMessage):
     """The bytes cannot be turned into a `TaskRunMessage`."""
 
 

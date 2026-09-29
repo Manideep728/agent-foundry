@@ -42,10 +42,14 @@ from control_plane.domain.record import RunRecord
 from control_plane.domain.scoring import Score
 from control_plane.domain.states import EvaluationRun, HarnessFailure, RunState
 from control_plane.domain.task import Suite
-from control_plane.services.dispatch import SCHEMA_VERSION, RunResultMessage
+from control_plane.services.dispatch import (
+    SCHEMA_VERSION,
+    RunResultMessage,
+    UndecodableMessage,
+)
 
 
-class MalformedRecord(Exception):
+class MalformedRecord(UndecodableMessage):
     """The bytes cannot be turned into a `RunResultMessage`."""
 
 

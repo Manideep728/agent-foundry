@@ -65,6 +65,17 @@ class IncompatibleMessage(DomainError):
     """A message this build cannot honour, for a reason that is not a bug."""
 
 
+class UndecodableMessage(Exception):
+    """The bytes on a topic are not a message at all.
+
+    Defined here, and subclassed by each codec's own error, so that a service
+    can tell a poison message from a bug without importing an adapter. The
+    distinction decides whether an offset is committed: bytes that no build
+    can read are acknowledged and skipped, while a message this build merely
+    cannot honour is left for a worker that can.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class TaskRunMessage:
     """One unit of work: measure this task under this configuration.
@@ -153,6 +164,17 @@ class TaskRunMessage:
                 f"{self.fixture_sha256} at the dispatcher; the two checkouts "
                 f"do not hold the same task"
             )
+
+    @property
+    def configuration(self) -> RunConfiguration:
+        """The grouping key this message asks to be measured under."""
+        return RunConfiguration(
+            agent_id=self.agent_id,
+            provider_id=self.provider_id,
+            model_id=self.model_id,
+            prompt_id=self.prompt_id,
+            image=self.image,
+        )
 
 
 @dataclass(frozen=True, slots=True)
