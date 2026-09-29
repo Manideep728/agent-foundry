@@ -480,36 +480,65 @@ class SqliteRunRepository:
     # --- writes -------------------------------------------------------------
 
     def create(self, record: RunRecord) -> None:
+        with self._conn:
+            self._insert(record, record.run.state)
+
+    def store(self, record: RunRecord) -> None:
+        """Write a finished run in one transaction: the row, the report, the costs.
+
+        For a run measured somewhere else and received whole, as the collector
+        receives one. `create` then `finish` would be two transactions, and a
+        crash between them would leave a terminal row with no report -- a
+        measurement that reads as present and holds nothing.
+
+        A run that is not terminal is refused. Stored here, the recovery scan
+        would take it for an abandoned run of this machine and delete its
+        workspace path, which names a directory on another machine.
+        """
+        if not record.run.is_terminal:
+            raise ValueError(
+                f"{record.run.run_id} is {record.run.state.value}; only a "
+                f"finished run can be stored whole"
+            )
+        # Inserted as CREATED and finished inside the same transaction, which
+        # is the lifecycle `create` and `finish` already follow. Inserting the
+        # terminal state directly is refused by the schema for a failed run:
+        # its failure columns are written only by the finish, and the table
+        # requires a failed row to carry them.
+        with self._conn:
+            self._insert(record, RunState.CREATED)
+            self._finalise(record, expected=RunState.CREATED)
+
+    def _insert(self, record: RunRecord, state: RunState) -> None:
         try:
-            with self._conn:
-                self._conn.execute(
-                    _CREATE_SQL,
-                    (
-                        record.run.run_id.value,
-                        record.run.task_id.value,
-                        record.suite.value,
-                        record.run.state.value,
-                        _measure("created_at", record.run.created_at_unix_ms),
-                        _measure("updated_at", record.run.updated_at_unix_ms),
-                        record.fixture_sha256,
-                        record.runner_id,
-                        record.runner_version,
-                        record.arch,
-                        _flag(record.pid1),
-                        # Recorded at creation, not at finish. The row must name
-                        # the directory before the run can die leaving one
-                        # behind, or the recovery scan has nothing to delete.
-                        record.workspace_path,
-                        # Also at creation. A run that dies before the agent is
-                        # reached is exactly the run a reliability figure is
-                        # about, and it must still say which configuration was
-                        # being measured when it died.
-                        record.agent_id,
-                        record.provider_id,
-                        record.model_id,
-                        record.prompt_id,
-                    ),
-                )
+            self._conn.execute(
+                _CREATE_SQL,
+                (
+                    record.run.run_id.value,
+                    record.run.task_id.value,
+                    record.suite.value,
+                    state.value,
+                    _measure("created_at", record.run.created_at_unix_ms),
+                    _measure("updated_at", record.run.updated_at_unix_ms),
+                    record.fixture_sha256,
+                    record.runner_id,
+                    record.runner_version,
+                    record.arch,
+                    _flag(record.pid1),
+                    # Recorded at creation, not at finish. The row must name
+                    # the directory before the run can die leaving one
+                    # behind, or the recovery scan has nothing to delete.
+                    record.workspace_path,
+                    # Also at creation. A run that dies before the agent is
+                    # reached is exactly the run a reliability figure is
+                    # about, and it must still say which configuration was
+                    # being measured when it died.
+                    record.agent_id,
+                    record.provider_id,
+                    record.model_id,
+                    record.prompt_id,
+                ),
+            )
         except sqlite3.IntegrityError as error:
             raise RunAlreadyExists(
                 f"{record.run.run_id} is already recorded"
@@ -553,52 +582,51 @@ class SqliteRunRepository:
         reproduce the same bug.
         """
         with self._conn:
-            cursor = self._conn.execute(
-                _FINISH_SQL,
-                (
-                    record.run.state.value,
-                    _measure("updated_at", record.run.updated_at_unix_ms),
-                    record.run.failure.kind.value if record.run.failure else None,
-                    record.run.failure.failed_from.value
-                    if record.run.failure
-                    else None,
-                    record.run.failure.detail if record.run.failure else "",
-                    record.runner_version,
-                    record.arch,
-                    _flag(record.pid1),
-                    record.outcome.value if record.outcome else None,
-                    _flag(record.score.resolved) if record.score else None,
-                    _flag(record.score.regressed) if record.score else None,
-                    record.score.fail_to_pass_passed if record.score else None,
-                    record.score.fail_to_pass_total if record.score else None,
-                    record.score.pass_to_pass_passed if record.score else None,
-                    record.score.pass_to_pass_total if record.score else None,
-                    record.score.timed_out_commands if record.score else None,
-                    _flag(record.task_defect),
-                    record.patch_sha256,
-                    _measure("patch_bytes", record.patch_bytes),
-                    None
-                    if record.patch_is_empty is None
-                    else _flag(record.patch_is_empty),
-                    _measure("total_cost_micros", int(record.total_cost_micros)),
-                    _measure("agent_ms", record.agent_ms),
-                    _measure("validation_ms", record.validation_ms),
-                    record.workspace_path,
-                    record.image_digest,
-                    record.agent_note,
-                    record.run.run_id.value,
-                    expected.value,
-                ),
-            )
-            if cursor.rowcount != 1:
-                raise ConcurrentModification(
-                    f"{record.run.run_id} was not in state {expected.value}"
-                )
+            self._finalise(record, expected)
 
-            if record.report is not None:
-                self._write_report(record.run.run_id, record.report)
-            for seq, invocation in enumerate(record.invocations):
-                self._write_invocation(record.run.run_id, seq, invocation)
+    def _finalise(self, record: RunRecord, expected: RunState) -> None:
+        cursor = self._conn.execute(
+            _FINISH_SQL,
+            (
+                record.run.state.value,
+                _measure("updated_at", record.run.updated_at_unix_ms),
+                record.run.failure.kind.value if record.run.failure else None,
+                record.run.failure.failed_from.value if record.run.failure else None,
+                record.run.failure.detail if record.run.failure else "",
+                record.runner_version,
+                record.arch,
+                _flag(record.pid1),
+                record.outcome.value if record.outcome else None,
+                _flag(record.score.resolved) if record.score else None,
+                _flag(record.score.regressed) if record.score else None,
+                record.score.fail_to_pass_passed if record.score else None,
+                record.score.fail_to_pass_total if record.score else None,
+                record.score.pass_to_pass_passed if record.score else None,
+                record.score.pass_to_pass_total if record.score else None,
+                record.score.timed_out_commands if record.score else None,
+                _flag(record.task_defect),
+                record.patch_sha256,
+                _measure("patch_bytes", record.patch_bytes),
+                None if record.patch_is_empty is None else _flag(record.patch_is_empty),
+                _measure("total_cost_micros", int(record.total_cost_micros)),
+                _measure("agent_ms", record.agent_ms),
+                _measure("validation_ms", record.validation_ms),
+                record.workspace_path,
+                record.image_digest,
+                record.agent_note,
+                record.run.run_id.value,
+                expected.value,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise ConcurrentModification(
+                f"{record.run.run_id} was not in state {expected.value}"
+            )
+
+        if record.report is not None:
+            self._write_report(record.run.run_id, record.report)
+        for seq, invocation in enumerate(record.invocations):
+            self._write_invocation(record.run.run_id, seq, invocation)
 
     def _write_report(self, run_id: RunId, report: ValidationReport) -> None:
         self._conn.execute(
