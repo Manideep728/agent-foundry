@@ -2,7 +2,7 @@
 # Create the project's topics on a running broker. Idempotent.
 #
 # Topics are created here and never by the broker. Auto-creation is disabled in
-# the compose file, because an auto-created topic gets one partition, and one
+# broker.sh, because an auto-created topic gets one partition, and one
 # partition caps a consumer group at one worker however many are started.
 # Partition count is the parallelism ceiling and is chosen, not defaulted.
 #

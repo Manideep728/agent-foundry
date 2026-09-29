@@ -18,7 +18,8 @@ BENCH_ARGS  ?=
 REPORT_ARGS ?=
 
 .PHONY: help sync test lint fmt typecheck check run clean \
-        runner-configure runner-build runner-test runner-image doctor bench report
+        runner-configure runner-build runner-test runner-image doctor bench report \
+        kafka-up kafka-down fanout-check
 
 ## help: list the documented targets
 help:
@@ -75,6 +76,19 @@ bench:
 ## report: write a Markdown report over the stored runs
 report:
 	uv run af report $(REPORT_ARGS)
+
+## kafka-up: start the development broker and create the topics
+kafka-up:
+	sh infra/kafka/broker.sh
+	sh infra/kafka/topics.sh
+
+## kafka-down: stop the development broker; its topics are kept
+kafka-down:
+	docker stop af-kafka
+
+## fanout-check: measure the suite over Kafka and compare it with af bench
+fanout-check:
+	AF_IMAGE=$(RUNNER_IMAGE) sh infra/kafka/fanout-check.sh
 
 ## check: everything CI runs
 check: lint typecheck test

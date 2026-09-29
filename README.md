@@ -14,7 +14,7 @@ run twice produces two comparable records.
 
 ## Status
 
-Phase 8. Eight tasks run end to end, in one command: the harness verifies a
+Eight tasks run end to end, in one command: the harness verifies a
 fixture against its pinned content hash, copies it to an isolated workspace,
 invokes an agent, captures the patch, executes the repository's own tests
 inside a container, scores the result, stores it, and writes a report over
@@ -239,6 +239,59 @@ from every figure, rather than quietly shrinking the denominator. The next
 Two reports over the same database differ only where the measurements differ,
 so a change between two benchmarks is a diff.
 
+## Run distributed
+
+A pool of workers can also measure a suite, over Kafka. `af dispatch`
+publishes one message for each task. Each `af worker` measures the messages it
+receives and publishes each record. `af collect` stores the records in one
+database. Kafka is an optional extra: `af run` and `af bench` do not need it.
+
+```
+$ make kafka-up
+sh infra/kafka/broker.sh
+broker: started existing af-kafka
+sh infra/kafka/topics.sh
+...
+$ uv sync --extra kafka
+$ uv run af dispatch --agent fake
+af: dispatched 8 run(s) for 8 task(s) to agentfoundry-task-runs at localhost:9092
+20260929-044240-300587d1	cache-eviction
+20260929-044240-c8d9cf11	csv-quoted-fields
+...
+$ uv run af worker --agent fake --worker-id w1 --db worker.sqlite3 --idle-exit-s 10
+af: w1 waiting for work on agentfoundry-task-runs at localhost:9092
+af: w1 handled 8 message(s)
+20260929-044240-c8d9cf11  csv-quoted-fields        clean_patch
+...
+$ uv run af collect --db pool.sqlite3 --idle-exit-s 5
+af: collecting from agentfoundry-run-results at localhost:9092 into pool.sqlite3
+af: collected 8 stored, 0 duplicate, 0 conflicting-duplicate, 0 undecodable, 0 unfinished
+...
+$ uv run af report --db pool.sqlite3 --out -
+```
+
+Each process uses its own database. A worker keeps a local database for its
+own recovery, and holds its lock, so two workers on one machine need two
+`--db` paths. The collector database is the one that holds the results, and
+`af report` reads it.
+
+The dispatcher sets the run identifier. Kafka can deliver a message more than
+once: for example, when a worker stops after it publishes a result and before
+it commits the offset. The worker then republishes the stored record and does
+not measure the task again. The collector stores the first arrival of each run
+and reports a later arrival with different content.
+
+A worker measures with its own flags. A message for a different agent, model,
+prompt or image, or for a task this checkout does not hold, stops the worker
+with exit `2`. The worker does not acknowledge the message, so a worker with
+the correct configuration receives it. A message that cannot be decoded is
+logged and acknowledged, because no worker can read it.
+
+`make fanout-check` measures the suite two times with the fake agent: once with
+`af bench`, and once with two workers in parallel and a collector. It exits
+`0` only when the per-task results are identical and the collected runs are
+exactly the dispatched runs.
+
 ## Agents
 
 Three agents exist behind one interface, so they are comparable on the same
@@ -299,8 +352,8 @@ validation, test-based scoring, SQLite storage with in-place schema upgrades,
 eight benchmark tasks, three agents and Markdown report generation exist. The
 first release also needs a hosted-provider adapter.
 
-Distributed execution, automatic pull requests, and a web interface are outside
-the first release.
+Distributed execution over Kafka exists on one machine. Automatic pull
+requests and a web interface are outside the scope of the project.
 
 ## Limitations
 
