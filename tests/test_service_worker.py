@@ -20,12 +20,14 @@ from control_plane.domain.states import EvaluationRun, RunState
 from control_plane.domain.task import TaskDefinition
 from control_plane.services.dispatch import IncompatibleMessage, TaskRunMessage
 from control_plane.services.worker import (
+    Handled,
     Handling,
     ResultNotDelivered,
     Worker,
+    work,
 )
 from tests.bus_fakes import FakeConsumer, FakeTopic
-from tests.fakes import EPOCH_MS
+from tests.fakes import EPOCH_MS, FakeClock
 from tests.test_domain_record import record, scored_run
 from tests.test_domain_task import make_task
 from tests.test_service_dispatch import (
@@ -207,3 +209,38 @@ def test_a_message_this_worker_cannot_honour_is_left_for_another(
     assert harness.executor.executed == []
     assert harness.results.delivered == ()
     assert harness.consumer.committed == 0
+
+
+class PollingClock(FakeClock):
+    """Moves one second every time the loop reads it, as polling would."""
+
+    def monotonic_ms(self) -> int:
+        self.advance(1_000)
+        return super().monotonic_ms()
+
+
+def test_the_loop_stops_at_the_message_limit_and_leaves_the_rest() -> None:
+    harness = Harness()
+    for number in range(1, 4):
+        harness.send(make_message(run_id=RunId(f"run-000{number}")))
+    seen: list[Handled] = []
+
+    handled = work(harness.worker, PollingClock(), seen.append, max_messages=2)
+
+    assert handled == 2
+    assert [h.record.run.run_id for h in seen if h.record] == [
+        RunId("run-0001"),
+        RunId("run-0002"),
+    ]
+    assert harness.consumer.committed == 2
+
+
+def test_the_loop_ends_once_the_topic_has_been_quiet_long_enough() -> None:
+    harness = Harness()
+    harness.send(make_message())
+    seen: list[Handled] = []
+
+    handled = work(harness.worker, PollingClock(), seen.append, idle_exit_ms=5_000)
+
+    assert handled == 1
+    assert len(seen) == 1

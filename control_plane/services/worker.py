@@ -34,6 +34,7 @@ from enum import StrEnum
 from typing import Protocol
 
 from control_plane.domain.ids import RunId, TaskId
+from control_plane.domain.ports import Clock
 from control_plane.domain.record import RunRecord
 from control_plane.domain.task import TaskDefinition
 from control_plane.services.dispatch import (
@@ -185,3 +186,34 @@ class Worker:
                 f"the result of {message.run_id} was not acknowledged within "
                 f"{self._flush_timeout_s:g}s"
             )
+
+
+def work(
+    worker: Worker,
+    clock: Clock,
+    report: Callable[[Handled], None],
+    *,
+    poll_timeout_s: float = 1.0,
+    max_messages: int | None = None,
+    idle_exit_ms: int | None = None,
+) -> int:
+    """Step until a limit is reached, and return how many deliveries were handled.
+
+    With neither limit a worker runs until it is stopped, which is what a pool
+    does. The limits exist so that a demonstration or a test ends by itself:
+    `idle_exit_ms` ends the loop once the topic has been quiet that long,
+    measured on the monotonic clock because it is a duration (D12).
+    """
+    handled = 0
+    quiet_since_ms = clock.monotonic_ms()
+    while max_messages is None or handled < max_messages:
+        step = worker.step(poll_timeout_s)
+        if step is None:
+            quiet_ms = clock.monotonic_ms() - quiet_since_ms
+            if idle_exit_ms is not None and quiet_ms >= idle_exit_ms:
+                break
+            continue
+        handled += 1
+        report(step)
+        quiet_since_ms = clock.monotonic_ms()
+    return handled

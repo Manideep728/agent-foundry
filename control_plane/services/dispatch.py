@@ -50,6 +50,14 @@ auto-creation is off, so a drift between the two would not be a warning but a
 dispatcher that produces to a topic nobody consumes.
 """
 
+WORKER_GROUP = "agentfoundry-workers"
+"""The consumer group every worker joins.
+
+One group, so the partitions of the work topic are divided among the pool and
+each message is measured by one worker. A worker in a group of its own would
+read every message the others read, and the suite would be measured twice.
+"""
+
 SCHEMA_VERSION = 1
 """The version every message this build writes carries.
 

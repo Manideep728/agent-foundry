@@ -15,17 +15,21 @@ leniency -- the harness did its job.
 from __future__ import annotations
 
 import argparse
+import os
+import socket
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from control_plane import __version__
+from control_plane.adapters.dispatch_json import decode as decode_message
 from control_plane.adapters.dispatch_json import encode as encode_message
 from control_plane.adapters.docker_runner import DockerConfig, DockerRunner
 from control_plane.adapters.fake_agent import FakeAgent
 from control_plane.adapters.fixtures import digest_tree
 from control_plane.adapters.kafka_bus import (
     DEFAULT_BOOTSTRAP,
+    KafkaConsumer,
     KafkaPublisher,
     KafkaUnavailable,
 )
@@ -38,6 +42,7 @@ from control_plane.adapters.prompts import (
     PromptVariant,
     variant,
 )
+from control_plane.adapters.record_json import encode as encode_result
 from control_plane.adapters.run_lock import DatabaseBusy, exclusive_run_lock
 from control_plane.adapters.single_shot_agent import SingleShotAgent
 from control_plane.adapters.sqlite_repo import SqliteRunRepository
@@ -58,14 +63,24 @@ from control_plane.domain.task import TaskDefinition
 from control_plane.interface.doctor import run_doctor
 from control_plane.interface.report import describe, render, unfinished
 from control_plane.services.dispatch import (
+    RUN_RESULTS_TOPIC,
     TASK_RUNS_TOPIC,
+    WORKER_GROUP,
     DispatchIncomplete,
+    IncompatibleMessage,
     RunConfiguration,
     dispatch,
 )
 from control_plane.services.evaluate import EvaluationService
 from control_plane.services.ports import AgentPort, ValidationRunner
 from control_plane.services.recovery import recover_unfinished
+from control_plane.services.worker import (
+    Handled,
+    Handling,
+    ResultNotDelivered,
+    Worker,
+    work,
+)
 
 PROGRAM = "af"
 
@@ -185,6 +200,14 @@ def _add_run_flags(parser: argparse.ArgumentParser) -> None:
     _add_agent_flags(parser)
 
 
+def _add_bus_flag(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--bootstrap",
+        default=DEFAULT_BOOTSTRAP,
+        help=f"the Kafka broker (default {DEFAULT_BOOTSTRAP})",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=PROGRAM,
@@ -253,11 +276,7 @@ def build_parser() -> argparse.ArgumentParser:
         "directory", type=Path, nargs="?", default=DEFAULT_TASKS
     )
     _add_agent_flags(dispatch_parser)
-    dispatch_parser.add_argument(
-        "--bootstrap",
-        default=DEFAULT_BOOTSTRAP,
-        help=f"the Kafka broker to publish to (default {DEFAULT_BOOTSTRAP})",
-    )
+    _add_bus_flag(dispatch_parser)
     dispatch_parser.add_argument(
         "--repeats",
         type=int,
@@ -267,6 +286,39 @@ def build_parser() -> argparse.ArgumentParser:
             "suites have disagreed on individual tasks at temperature 0, so a "
             "per-task figure needs repeats before it carries a range"
         ),
+    )
+
+    worker = subcommands.add_parser(
+        "worker",
+        help="measure work from the queue and publish each result",
+        description=(
+            "Join the worker group, measure each message under this worker's "
+            "own configuration, and publish the record to the results topic. "
+            "A message asking for another configuration, or for a task this "
+            "checkout does not hold, stops the worker without acknowledging "
+            "it, so a worker that can honour it takes it instead. The --db "
+            "here is this worker's own; `af collect` keeps the shared one."
+        ),
+    )
+    worker.add_argument("directory", type=Path, nargs="?", default=DEFAULT_TASKS)
+    _add_run_flags(worker)
+    _add_bus_flag(worker)
+    worker.add_argument(
+        "--worker-id",
+        default=None,
+        help="the name recorded as provenance (default: host name and pid)",
+    )
+    worker.add_argument(
+        "--max-messages",
+        type=int,
+        default=None,
+        help="stop after handling this many messages (default: run until stopped)",
+    )
+    worker.add_argument(
+        "--idle-exit-s",
+        type=int,
+        default=None,
+        help="stop once the topic has been quiet this long (default: never)",
     )
 
     show = subcommands.add_parser("show", help="print a stored run")
@@ -451,16 +503,19 @@ def _build_service(
     workspaces: WorkspaceFactory,
     runner: ValidationRunner,
     clock: SystemClock,
+    agent: AgentPort,
 ) -> EvaluationService:
     """One service for the whole invocation.
 
     Every dependency is invocation-scoped and `execute` writes no state back
-    onto the service, so one instance drives a whole suite.
+    onto the service, so one instance drives a whole suite. The agent is passed
+    in rather than built here so that a worker checks messages against the
+    same agent that measures them.
     """
     return EvaluationService(
         repository=repository,
         runner=runner,
-        agent=_build_agent(args, clock),
+        agent=agent,
         workspaces=workspaces,
         clock=clock,
         ids=UuidIdGenerator(),
@@ -478,7 +533,9 @@ def _recover_and_evaluate(
     with SqliteRunRepository(args.db) as repository:
         workspaces = WorkspaceFactory(args.runs)
         _recover(repository, workspaces, clock, docker.remove_container)
-        service = _build_service(args, repository, workspaces, runner, clock)
+        service = _build_service(
+            args, repository, workspaces, runner, clock, _build_agent(args, clock)
+        )
         return service.execute(task)
 
 
@@ -682,7 +739,9 @@ def bench_tasks(args: argparse.Namespace) -> int:
         with exclusive_run_lock(args.db), SqliteRunRepository(args.db) as repository:
             workspaces = WorkspaceFactory(args.runs)
             _recover(repository, workspaces, clock, docker.remove_container)
-            service = _build_service(args, repository, workspaces, runner, clock)
+            service = _build_service(
+                args, repository, workspaces, runner, clock, _build_agent(args, clock)
+            )
 
             for position, task in enumerate(tasks, start=1):
                 spent = total_micros(r.total_cost_micros for r in records)
@@ -813,14 +872,7 @@ def dispatch_tasks(args: argparse.Namespace) -> int:
     # mapping from the flags to the identity a benchmark groups on, and
     # reading it here keeps that mapping in one place. Building costs nothing:
     # no agent opens a connection in its constructor.
-    agent = _build_agent(args, clock)
-    configuration = RunConfiguration(
-        agent_id=agent.agent_id,
-        provider_id=agent.provider_id,
-        model_id=agent.model_id,
-        prompt_id=agent.prompt_id,
-        image=args.image,
-    )
+    configuration = _configuration(_build_agent(args, clock), args.image)
 
     try:
         publisher = KafkaPublisher(TASK_RUNS_TOPIC, args.bootstrap)
@@ -849,6 +901,136 @@ def dispatch_tasks(args: argparse.Namespace) -> int:
     )
     # Zero means every message reached the broker. It does not mean anything
     # was measured; no measurement exists until a worker stores one.
+    return EXIT_MEASURED
+
+
+def _configuration(agent: AgentPort, image: str) -> RunConfiguration:
+    """The grouping key, read off a built agent.
+
+    Shared by the dispatcher, which sends it, and the worker, which compares
+    against it. Two readings of the same flags would be two places that know
+    the mapping, and the first bug would be the two disagreeing.
+    """
+    return RunConfiguration(
+        agent_id=agent.agent_id,
+        provider_id=agent.provider_id,
+        model_id=agent.model_id,
+        prompt_id=agent.prompt_id,
+        image=image,
+    )
+
+
+def _print_handled(handled: Handled) -> None:
+    delivery = handled.delivery
+    if handled.record is None:
+        # On stderr: there is no run to name, and the position in the log is
+        # the only honest way to identify bytes nobody could read.
+        print(
+            f"{PROGRAM}: skipped an undecodable message at partition "
+            f"{delivery.partition} offset {delivery.offset}: {handled.detail}",
+            file=sys.stderr,
+        )
+        return
+    _print_line(handled.record)
+    if handled.handling is Handling.REPUBLISHED:
+        print(
+            f"{PROGRAM}: {handled.record.run.run_id} was already stored; "
+            f"republished rather than measured again",
+            file=sys.stderr,
+        )
+
+
+def run_worker(args: argparse.Namespace) -> int:
+    """Measure messages from the work topic until a limit or the operator stops it.
+
+    Exits 0 when it stops at a limit, 2 when a message asks for something this
+    worker cannot honour -- that is how it was started, not a harness fault --
+    and 1 when the broker or the database fails it.
+    """
+    problem = _prompt_problem(args)
+    if problem is not None:
+        print(f"{PROGRAM}: {problem}", file=sys.stderr)
+        return EXIT_USAGE
+    for flag, value in (
+        ("--max-messages", args.max_messages),
+        ("--idle-exit-s", args.idle_exit_s),
+    ):
+        if value is not None and value < 1:
+            print(f"{PROGRAM}: {flag} must be at least 1, got {value}", file=sys.stderr)
+            return EXIT_USAGE
+
+    try:
+        tasks = load_tasks(args.directory)
+    except DomainError as error:
+        print(f"{PROGRAM}: {error}", file=sys.stderr)
+        return EXIT_USAGE
+    if not tasks:
+        print(f"{PROGRAM}: no task files in {args.directory}", file=sys.stderr)
+        return EXIT_USAGE
+
+    clock = SystemClock()
+    runner, docker = _build_runners(args, clock)
+    agent = _build_agent(args, clock)
+    worker_id = args.worker_id or f"{socket.gethostname()}-{os.getpid()}"
+
+    try:
+        # The lock is held for the worker's whole life, as `bench` holds it for
+        # a suite: recovery assumes every unfinished run in this database is
+        # abandoned, and the redelivery check assumes no one else writes it.
+        with exclusive_run_lock(args.db), SqliteRunRepository(args.db) as repository:
+            workspaces = WorkspaceFactory(args.runs)
+            _recover(repository, workspaces, clock, docker.remove_container)
+            service = _build_service(args, repository, workspaces, runner, clock, agent)
+            consumer = KafkaConsumer(TASK_RUNS_TOPIC, WORKER_GROUP, args.bootstrap)
+            try:
+                worker = Worker(
+                    consumer=consumer,
+                    publisher=KafkaPublisher(RUN_RESULTS_TOPIC, args.bootstrap),
+                    tasks={task.task_id: task for task in tasks},
+                    configuration=_configuration(agent, args.image),
+                    executor=service,
+                    records=repository,
+                    worker_id=worker_id,
+                    decode=decode_message,
+                    encode=encode_result,
+                )
+                print(
+                    f"{PROGRAM}: {worker_id} waiting for work on {TASK_RUNS_TOPIC} "
+                    f"at {args.bootstrap}",
+                    file=sys.stderr,
+                )
+                handled = work(
+                    worker,
+                    clock,
+                    _print_handled,
+                    max_messages=args.max_messages,
+                    idle_exit_ms=None
+                    if args.idle_exit_s is None
+                    else args.idle_exit_s * 1000,
+                )
+            finally:
+                # Leaving the group at once lets it rebalance now, instead of
+                # holding this worker's partitions until the broker gives up
+                # on it -- which matters most when a message was refused.
+                consumer.close()
+    except DatabaseBusy as error:
+        print(f"{PROGRAM}: {error}", file=sys.stderr)
+        return EXIT_HARNESS_FAILED
+    except (KafkaUnavailable, ResultNotDelivered) as error:
+        print(f"{PROGRAM}: {error}", file=sys.stderr)
+        return EXIT_HARNESS_FAILED
+    except IncompatibleMessage as error:
+        print(
+            f"{PROGRAM}: refusing a message this worker cannot honour, and "
+            f"leaving it for one that can: {error}",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+    except KeyboardInterrupt:
+        print(f"{PROGRAM}: aborted", file=sys.stderr)
+        return EXIT_ABORTED
+
+    print(f"{PROGRAM}: {worker_id} handled {handled} message(s)", file=sys.stderr)
     return EXIT_MEASURED
 
 
@@ -946,6 +1128,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_task(args)
     if args.command == "bench":
         return bench_tasks(args)
+    if args.command == "worker":
+        return run_worker(args)
     if args.command == "dispatch":
         return dispatch_tasks(args)
     if args.command == "show":
