@@ -58,6 +58,9 @@ each message is measured by one worker. A worker in a group of its own would
 read every message the others read, and the suite would be measured twice.
 """
 
+COLLECTOR_GROUP = "agentfoundry-collector"
+"""The consumer group the one collector joins, and the offsets it resumes from."""
+
 SCHEMA_VERSION = 1
 """The version every message this build writes carries.
 

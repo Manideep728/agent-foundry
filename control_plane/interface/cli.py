@@ -42,6 +42,7 @@ from control_plane.adapters.prompts import (
     PromptVariant,
     variant,
 )
+from control_plane.adapters.record_json import decode as decode_result
 from control_plane.adapters.record_json import encode as encode_result
 from control_plane.adapters.run_lock import DatabaseBusy, exclusive_run_lock
 from control_plane.adapters.single_shot_agent import SingleShotAgent
@@ -62,7 +63,9 @@ from control_plane.domain.summary import Durations, SuiteSummary, summarise
 from control_plane.domain.task import TaskDefinition
 from control_plane.interface.doctor import run_doctor
 from control_plane.interface.report import describe, render, unfinished
+from control_plane.services.collect import Collected, Collection, Collector
 from control_plane.services.dispatch import (
+    COLLECTOR_GROUP,
     RUN_RESULTS_TOPIC,
     TASK_RUNS_TOPIC,
     WORKER_GROUP,
@@ -208,6 +211,37 @@ def _add_bus_flag(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_limit_flags(parser: argparse.ArgumentParser) -> None:
+    """When a consumer stops by itself. Without either, it runs until stopped."""
+    parser.add_argument(
+        "--max-messages",
+        type=int,
+        default=None,
+        help="stop after handling this many messages (default: run until stopped)",
+    )
+    parser.add_argument(
+        "--idle-exit-s",
+        type=int,
+        default=None,
+        help="stop once the topic has been quiet this long (default: never)",
+    )
+
+
+def _limit_problem(args: argparse.Namespace) -> str | None:
+    """Zero would be a consumer that joins its group and does nothing."""
+    for flag, value in (
+        ("--max-messages", args.max_messages),
+        ("--idle-exit-s", args.idle_exit_s),
+    ):
+        if value is not None and value < 1:
+            return f"{flag} must be at least 1, got {value}"
+    return None
+
+
+def _idle_exit_ms(args: argparse.Namespace) -> int | None:
+    return None if args.idle_exit_s is None else args.idle_exit_s * 1000
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=PROGRAM,
@@ -308,18 +342,22 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="the name recorded as provenance (default: host name and pid)",
     )
-    worker.add_argument(
-        "--max-messages",
-        type=int,
-        default=None,
-        help="stop after handling this many messages (default: run until stopped)",
+    _add_limit_flags(worker)
+
+    collect = subcommands.add_parser(
+        "collect",
+        help="store the results the workers publish",
+        description=(
+            "Read the results topic and store each finished run in --db, the "
+            "one database that owns the results. A run that arrives twice is "
+            "stored once; one that arrives twice with different content keeps "
+            "the first and says so. Holds the run lock, like `bench`, so this "
+            "is the only writer."
+        ),
     )
-    worker.add_argument(
-        "--idle-exit-s",
-        type=int,
-        default=None,
-        help="stop once the topic has been quiet this long (default: never)",
-    )
+    collect.add_argument("--db", type=Path, default=DEFAULT_DB)
+    _add_bus_flag(collect)
+    _add_limit_flags(collect)
 
     show = subcommands.add_parser("show", help="print a stored run")
     show.add_argument("run_id")
@@ -947,17 +985,10 @@ def run_worker(args: argparse.Namespace) -> int:
     worker cannot honour -- that is how it was started, not a harness fault --
     and 1 when the broker or the database fails it.
     """
-    problem = _prompt_problem(args)
+    problem = _prompt_problem(args) or _limit_problem(args)
     if problem is not None:
         print(f"{PROGRAM}: {problem}", file=sys.stderr)
         return EXIT_USAGE
-    for flag, value in (
-        ("--max-messages", args.max_messages),
-        ("--idle-exit-s", args.idle_exit_s),
-    ):
-        if value is not None and value < 1:
-            print(f"{PROGRAM}: {flag} must be at least 1, got {value}", file=sys.stderr)
-            return EXIT_USAGE
 
     try:
         tasks = load_tasks(args.directory)
@@ -1004,9 +1035,7 @@ def run_worker(args: argparse.Namespace) -> int:
                     clock,
                     _print_handled,
                     max_messages=args.max_messages,
-                    idle_exit_ms=None
-                    if args.idle_exit_s is None
-                    else args.idle_exit_s * 1000,
+                    idle_exit_ms=_idle_exit_ms(args),
                 )
             finally:
                 # Leaving the group at once lets it rebalance now, instead of
@@ -1031,6 +1060,79 @@ def run_worker(args: argparse.Namespace) -> int:
         return EXIT_ABORTED
 
     print(f"{PROGRAM}: {worker_id} handled {handled} message(s)", file=sys.stderr)
+    return EXIT_MEASURED
+
+
+def _print_collected(collected: Collected) -> None:
+    """A stored run on stdout, shaped like `af list`; anything else on stderr."""
+    if collected.collection is Collection.STORED and collected.message is not None:
+        _print_line(collected.message.record)
+        return
+    delivery = collected.delivery
+    where = f"partition {delivery.partition} offset {delivery.offset}"
+    if collected.collection is Collection.DUPLICATE and collected.message is not None:
+        detail = f"{collected.message.record.run.run_id} already stored"
+    else:
+        detail = collected.detail
+    print(
+        f"{PROGRAM}: {collected.collection.value} at {where}: {detail}", file=sys.stderr
+    )
+
+
+def run_collector(args: argparse.Namespace) -> int:
+    """Store results until a limit or the operator stops it.
+
+    Exits 0 when it stops at a limit, whatever it collected: a duplicate or a
+    refused result is reported, not a failure of the collector. Exits 1 when
+    the broker or the database fails it.
+    """
+    problem = _limit_problem(args)
+    if problem is not None:
+        print(f"{PROGRAM}: {problem}", file=sys.stderr)
+        return EXIT_USAGE
+
+    counts: dict[Collection, int] = dict.fromkeys(Collection, 0)
+
+    def report(collected: Collected) -> None:
+        counts[collected.collection] += 1
+        _print_collected(collected)
+
+    try:
+        # The same lock `bench` takes. The collector is this database's one
+        # writer, and a `bench` against the same file at the same time would
+        # make it two.
+        with exclusive_run_lock(args.db), SqliteRunRepository(args.db) as repository:
+            consumer = KafkaConsumer(RUN_RESULTS_TOPIC, COLLECTOR_GROUP, args.bootstrap)
+            try:
+                collector = Collector(
+                    consumer=consumer, store=repository, decode=decode_result
+                )
+                print(
+                    f"{PROGRAM}: collecting from {RUN_RESULTS_TOPIC} at "
+                    f"{args.bootstrap} into {args.db}",
+                    file=sys.stderr,
+                )
+                poll_until(
+                    collector,
+                    SystemClock(),
+                    report,
+                    max_messages=args.max_messages,
+                    idle_exit_ms=_idle_exit_ms(args),
+                )
+            finally:
+                consumer.close()
+    except DatabaseBusy as error:
+        print(f"{PROGRAM}: {error}", file=sys.stderr)
+        return EXIT_HARNESS_FAILED
+    except KafkaUnavailable as error:
+        print(f"{PROGRAM}: {error}", file=sys.stderr)
+        return EXIT_HARNESS_FAILED
+    except KeyboardInterrupt:
+        print(f"{PROGRAM}: aborted", file=sys.stderr)
+        return EXIT_ABORTED
+
+    summary = ", ".join(f"{count} {kind.value}" for kind, count in counts.items())
+    print(f"{PROGRAM}: collected {summary}", file=sys.stderr)
     return EXIT_MEASURED
 
 
@@ -1128,6 +1230,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_task(args)
     if args.command == "bench":
         return bench_tasks(args)
+    if args.command == "collect":
+        return run_collector(args)
     if args.command == "worker":
         return run_worker(args)
     if args.command == "dispatch":
