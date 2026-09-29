@@ -19,12 +19,12 @@ from control_plane.domain.record import RunRecord
 from control_plane.domain.states import EvaluationRun, RunState
 from control_plane.domain.task import TaskDefinition
 from control_plane.services.dispatch import IncompatibleMessage, TaskRunMessage
+from control_plane.services.polling import poll_until
 from control_plane.services.worker import (
     Handled,
     Handling,
     ResultNotDelivered,
     Worker,
-    work,
 )
 from tests.bus_fakes import FakeConsumer, FakeTopic
 from tests.fakes import EPOCH_MS, FakeClock
@@ -225,7 +225,7 @@ def test_the_loop_stops_at_the_message_limit_and_leaves_the_rest() -> None:
         harness.send(make_message(run_id=RunId(f"run-000{number}")))
     seen: list[Handled] = []
 
-    handled = work(harness.worker, PollingClock(), seen.append, max_messages=2)
+    handled = poll_until(harness.worker, PollingClock(), seen.append, max_messages=2)
 
     assert handled == 2
     assert [h.record.run.run_id for h in seen if h.record] == [
@@ -240,7 +240,9 @@ def test_the_loop_ends_once_the_topic_has_been_quiet_long_enough() -> None:
     harness.send(make_message())
     seen: list[Handled] = []
 
-    handled = work(harness.worker, PollingClock(), seen.append, idle_exit_ms=5_000)
+    handled = poll_until(
+        harness.worker, PollingClock(), seen.append, idle_exit_ms=5_000
+    )
 
     assert handled == 1
     assert len(seen) == 1

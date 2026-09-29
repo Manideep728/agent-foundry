@@ -72,6 +72,7 @@ from control_plane.services.dispatch import (
     dispatch,
 )
 from control_plane.services.evaluate import EvaluationService
+from control_plane.services.polling import poll_until
 from control_plane.services.ports import AgentPort, ValidationRunner
 from control_plane.services.recovery import recover_unfinished
 from control_plane.services.worker import (
@@ -79,7 +80,6 @@ from control_plane.services.worker import (
     Handling,
     ResultNotDelivered,
     Worker,
-    work,
 )
 
 PROGRAM = "af"
@@ -999,7 +999,7 @@ def run_worker(args: argparse.Namespace) -> int:
                     f"at {args.bootstrap}",
                     file=sys.stderr,
                 )
-                handled = work(
+                handled = poll_until(
                     worker,
                     clock,
                     _print_handled,
