@@ -11,6 +11,8 @@ What the fake models faithfully:
 - A key always lands on the same partition, and offsets increase within one.
 - Offsets are committed only when the caller says so, and a restart rewinds to
   the last commit.
+- A consumer the group has evicted has its commits refused (`evicted = True`),
+  as the broker refuses them with `UNKNOWN_MEMBER_ID`.
 
 What it does not model, and no test may depend on:
 
@@ -26,7 +28,7 @@ from __future__ import annotations
 
 import hashlib
 
-from control_plane.services.dispatch import RawDelivery
+from control_plane.services.dispatch import CommitRejected, RawDelivery
 
 
 class FakeTopic:
@@ -82,6 +84,7 @@ class FakeConsumer:
         self._position = 0
         self._committed = 0
         self.closed = False
+        self.evicted = False
 
     def poll(self, timeout_s: float) -> RawDelivery | None:
         if self.closed:
@@ -95,6 +98,8 @@ class FakeConsumer:
     def commit(self, delivery: RawDelivery) -> None:
         if self.closed:
             raise RuntimeError("commit on a closed consumer")
+        if self.evicted:
+            raise CommitRejected("Broker: Unknown member")
         self._committed = self._position
 
     def close(self) -> None:

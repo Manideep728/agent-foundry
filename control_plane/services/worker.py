@@ -37,6 +37,7 @@ from control_plane.domain.ids import RunId, TaskId
 from control_plane.domain.record import RunRecord
 from control_plane.domain.task import TaskDefinition
 from control_plane.services.dispatch import (
+    CommitRejected,
     IncompatibleMessage,
     MessageConsumer,
     MessagePublisher,
@@ -88,6 +89,13 @@ class Handled:
     detail: str = ""
     """Why the delivery could not be decoded. Empty otherwise."""
 
+    committed: bool = True
+    """False when the group had already evicted this worker (`CommitRejected`).
+
+    The result was still published; the message went to another worker, and
+    the collector keeps whichever result arrives first.
+    """
+
 
 class Worker:
     def __init__(
@@ -129,8 +137,10 @@ class Worker:
         try:
             message = self._decode(delivery.value)
         except UndecodableMessage as error:
-            self._consumer.commit(delivery)
-            return Handled(Handling.UNDECODABLE, delivery, None, str(error))
+            committed = self._commit(delivery)
+            return Handled(
+                Handling.UNDECODABLE, delivery, None, str(error), committed=committed
+            )
 
         task = self._task_for(message)
         record = self._records.get(message.run_id)
@@ -150,8 +160,14 @@ class Worker:
             )
 
         self._publish(message, record)
-        self._consumer.commit(delivery)
-        return Handled(handling, delivery, record)
+        return Handled(handling, delivery, record, committed=self._commit(delivery))
+
+    def _commit(self, delivery: RawDelivery) -> bool:
+        try:
+            self._consumer.commit(delivery)
+        except CommitRejected:
+            return False
+        return True
 
     def _task_for(self, message: TaskRunMessage) -> TaskDefinition:
         if message.configuration != self._configuration:

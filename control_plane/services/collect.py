@@ -20,13 +20,14 @@ produces the same database.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Protocol
 
 from control_plane.domain.ids import RunId
 from control_plane.domain.record import RunRecord
 from control_plane.services.dispatch import (
+    CommitRejected,
     MessageConsumer,
     RawDelivery,
     RunResultMessage,
@@ -61,6 +62,10 @@ class Collected:
 
     detail: str = ""
 
+    committed: bool = True
+    """False when the commit was refused (`CommitRejected`). The result is
+    redelivered, and arrives as a duplicate of what was just stored."""
+
 
 class Collector:
     def __init__(
@@ -88,11 +93,14 @@ class Collector:
         try:
             message = self._decode(delivery.value)
         except UndecodableMessage as error:
-            self._consumer.commit(delivery)
-            return Collected(Collection.UNDECODABLE, delivery, None, str(error))
+            collected = Collected(Collection.UNDECODABLE, delivery, None, str(error))
+        else:
+            collected = self._collect(delivery, message)
 
-        collected = self._collect(delivery, message)
-        self._consumer.commit(delivery)
+        try:
+            self._consumer.commit(delivery)
+        except CommitRejected:
+            return replace(collected, committed=False)
         return collected
 
     def _collect(self, delivery: RawDelivery, message: RunResultMessage) -> Collected:

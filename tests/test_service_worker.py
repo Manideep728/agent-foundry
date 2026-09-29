@@ -246,3 +246,21 @@ def test_the_loop_ends_once_the_topic_has_been_quiet_long_enough() -> None:
 
     assert handled == 1
     assert len(seen) == 1
+
+
+def test_a_worker_evicted_mid_run_still_publishes_and_keeps_working() -> None:
+    # Measured 2026-09-28: a worker that holds a message past
+    # max.poll.interval.ms is evicted, and its commit fails with
+    # UNKNOWN_MEMBER_ID after it has published. That used to escape as a raw
+    # KafkaException and kill the worker; the message had already gone to
+    # another worker, and the collector keeps whichever result lands first.
+    harness = Harness()
+    harness.send(make_message())
+    harness.consumer.evicted = True
+
+    handled = harness.worker.step(0)
+
+    assert handled is not None
+    assert handled.handling is Handling.MEASURED
+    assert not handled.committed
+    assert len(harness.published()) == 1

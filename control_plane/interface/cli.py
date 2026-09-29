@@ -71,6 +71,7 @@ from control_plane.services.dispatch import (
     WORKER_GROUP,
     DispatchIncomplete,
     IncompatibleMessage,
+    RawDelivery,
     RunConfiguration,
     dispatch,
 )
@@ -958,8 +959,20 @@ def _configuration(agent: AgentPort, image: str) -> RunConfiguration:
     )
 
 
+def _print_eviction(delivery: RawDelivery, committed: bool) -> None:
+    if committed:
+        return
+    print(
+        f"{PROGRAM}: the group evicted this consumer before it committed "
+        f"partition {delivery.partition} offset {delivery.offset}; the message "
+        f"was reassigned, and the collector keeps the first result it receives",
+        file=sys.stderr,
+    )
+
+
 def _print_handled(handled: Handled) -> None:
     delivery = handled.delivery
+    _print_eviction(delivery, handled.committed)
     if handled.record is None:
         # On stderr: there is no run to name, and the position in the log is
         # the only honest way to identify bytes nobody could read.
@@ -1065,6 +1078,7 @@ def run_worker(args: argparse.Namespace) -> int:
 
 def _print_collected(collected: Collected) -> None:
     """A stored run on stdout, shaped like `af list`; anything else on stderr."""
+    _print_eviction(collected.delivery, collected.committed)
     if collected.collection is Collection.STORED and collected.message is not None:
         _print_line(collected.message.record)
         return

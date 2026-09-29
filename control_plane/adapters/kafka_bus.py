@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from control_plane.services.dispatch import RawDelivery
+from control_plane.services.dispatch import CommitRejected, RawDelivery
 
 if TYPE_CHECKING:  # pragma: no cover - import only for the type checker
     from confluent_kafka import Consumer as _Consumer
@@ -131,6 +131,13 @@ class KafkaConsumer:
             # the ordinary quiet case and must read the same as no message.
             if error.code() == self._client.KafkaError._PARTITION_EOF:
                 return None
+            # Nor is `_MAX_POLL_EXCEEDED`. It is delivered once, on the first
+            # poll after this consumer held a message past the interval and
+            # was evicted, and that same poll rejoins the group. Measured
+            # 2026-09-28: raising here stopped a worker that had just
+            # published its result and could go on working.
+            if error.code() == self._client.KafkaError._MAX_POLL_EXCEEDED:
+                return None
             raise KafkaUnavailable(f"consume failed: {error}")
 
         partition, offset = message.partition(), message.offset()
@@ -161,13 +168,34 @@ class KafkaConsumer:
         # The committed offset is the *next* message to read, so it is one
         # past the one just finished. Committing the delivery's own offset
         # would redeliver it on every restart for ever.
-        self._consumer.commit(
-            offsets=[
-                self._client.TopicPartition(
-                    self._topic, delivery.partition, delivery.offset + 1
-                )
-            ],
-            asynchronous=False,
+        try:
+            self._consumer.commit(
+                offsets=[
+                    self._client.TopicPartition(
+                        self._topic, delivery.partition, delivery.offset + 1
+                    )
+                ],
+                asynchronous=False,
+            )
+        except self._client.KafkaException as raised:
+            error = raised.args[0]
+            if error.code() in self._evicted_codes():
+                raise CommitRejected(
+                    f"commit of partition {delivery.partition} offset "
+                    f"{delivery.offset} refused: {error.str()}"
+                ) from raised
+            raise KafkaUnavailable(f"commit failed: {error}") from raised
+
+    def _evicted_codes(self) -> frozenset[int]:
+        """The errors that mean the group has moved on without this member."""
+        codes = self._client.KafkaError
+        return frozenset(
+            {
+                codes.UNKNOWN_MEMBER_ID,
+                codes.ILLEGAL_GENERATION,
+                codes.REBALANCE_IN_PROGRESS,
+                codes._MAX_POLL_EXCEEDED,
+            }
         )
 
     def close(self) -> None:

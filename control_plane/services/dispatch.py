@@ -76,6 +76,22 @@ class IncompatibleMessage(DomainError):
     """A message this build cannot honour, for a reason that is not a bug."""
 
 
+class CommitRejected(Exception):
+    """The broker refused an offset commit from a consumer it no longer counts.
+
+    It happens when a consumer holds one message longer than
+    `max.poll.interval.ms`: the group evicts it, gives its partitions to
+    another member, and that member receives the message again. By the time
+    the first consumer commits, the group has moved on. Measured 2026-09-28:
+    the commit fails with `UNKNOWN_MEMBER_ID`, after the result was already
+    published.
+
+    Not a fault to stop for. The work is not lost -- it was redelivered -- and
+    the duplicate result carries the same `run_id`, which the collector
+    recognises. The consumer rejoins the group on its next poll.
+    """
+
+
 class UndecodableMessage(Exception):
     """The bytes on a topic are not a message at all.
 
@@ -314,7 +330,11 @@ class MessageConsumer(Protocol):
         ...
 
     def commit(self, delivery: RawDelivery) -> None:
-        """Record that everything up to and including `delivery` is done."""
+        """Record that everything up to and including `delivery` is done.
+
+        Raises `CommitRejected` when the group has already evicted this
+        consumer and reassigned the message.
+        """
         ...
 
     def close(self) -> None:
