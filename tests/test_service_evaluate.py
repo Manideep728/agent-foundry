@@ -17,6 +17,7 @@ from control_plane.adapters.sqlite_repo import SqliteRunRepository
 from control_plane.adapters.task_toml import load_task
 from control_plane.adapters.workspace import WorkspaceFactory
 from control_plane.domain.errors import PreconditionViolated
+from control_plane.domain.ids import RunId
 from control_plane.domain.model import MicroUsd, ModelInvocation, ModelUsage
 from control_plane.domain.outcomes import AgentOutcome, FailureCategory
 from control_plane.domain.states import RunState
@@ -462,6 +463,19 @@ def test_the_stored_run_matches_the_returned_record(tmp_path: Path) -> None:
     assert stored.run.state is record.run.state
     assert stored.outcome is record.outcome
     assert stored.score == record.score
+    repo.close()
+
+
+def test_a_run_id_minted_by_the_caller_is_the_one_stored(tmp_path: Path) -> None:
+    # The worker's contract with the dispatcher. A service that minted its own
+    # identifier here would store a redelivered message as a second run.
+    service, repo = build(tmp_path)
+    minted = RunId("dispatched-0007")
+
+    record = service.execute(task(), run_id=minted)
+
+    assert record.run.run_id == minted
+    assert repo.get(minted) is not None
     repo.close()
 
 

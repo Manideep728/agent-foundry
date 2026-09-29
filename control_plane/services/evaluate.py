@@ -27,6 +27,7 @@ from control_plane.adapters.fixtures import digest_tree
 from control_plane.adapters.sqlite_repo import SqliteRunRepository
 from control_plane.adapters.workspace import WorkspaceFactory
 from control_plane.domain.errors import DomainError
+from control_plane.domain.ids import RunId
 from control_plane.domain.model import total_micros
 from control_plane.domain.outcomes import AgentOutcome, FailureCategory
 from control_plane.domain.patch import Patch
@@ -103,10 +104,17 @@ class EvaluationService:
         self._ids = ids
         self._fixtures_root = fixtures_root
 
-    def execute(self, task: TaskDefinition) -> RunRecord:
-        run = EvaluationRun.create(
-            self._ids.new_run_id(), task.task_id, self._clock.now_unix_ms()
-        )
+    def execute(self, task: TaskDefinition, run_id: RunId | None = None) -> RunRecord:
+        """Measure `task` once, under `run_id` if the caller already minted one.
+
+        A worker passes the identifier the dispatcher put in the message, so
+        that a redelivered message produces the same `run_id` and the
+        collector can recognise the second arrival as a duplicate (D27).
+        Every local caller passes nothing and gets a fresh one.
+        """
+        if run_id is None:
+            run_id = self._ids.new_run_id()
+        run = EvaluationRun.create(run_id, task.task_id, self._clock.now_unix_ms())
         base = self._base_record(run, task)
         # Written before anything creates external state, and already naming
         # the workspace it is about to create: a directory nothing knows about
