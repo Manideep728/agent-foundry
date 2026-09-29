@@ -86,3 +86,39 @@ jobs:
 
       - name: Check the runtime enforces the limits
         run: make doctor
+
+  # The distributed path against a real broker. The other two jobs have no
+  # broker, so the `kafka` tests skip there. This job starts one with the same
+  # script a developer uses, runs those tests, and runs the fan-out check,
+  # which measures the suite over Kafka and fails unless the result is
+  # identical per task to `af bench`.
+  kafka:
+    name: kafka
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.1.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies with the Kafka client
+        run: uv sync --locked --extra kafka
+
+      - name: Start the broker and create the topics
+        run: make kafka-up
+
+      - name: Build the runner image
+        run: make runner-image
+
+      # The whole suite, not only `-m kafka`: the tests of how the adapter
+      # reads a refused commit need the client but no broker, carry no marker,
+      # and skip in the other jobs, which do not install the client. This is
+      # the only job where they run. `--extra kafka` on every `uv run`, so no
+      # step can re-sync the client away and turn them into skips.
+      - name: Test with the broker and the client
+        run: uv run --extra kafka pytest -q -rs
+
+      - name: Check fan-out preserves the measurement
+        run: make fanout-check
