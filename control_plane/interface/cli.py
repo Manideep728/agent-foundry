@@ -1153,7 +1153,7 @@ def run_collector(args: argparse.Namespace) -> int:
         print(f"{PROGRAM}: aborted", file=sys.stderr)
         return EXIT_ABORTED
 
-    summary =", ".join(f"{count} {kind.value}" for kind, count in counts.items())
+    summary = ", ".join(f"{count} {kind.value}" for kind, count in counts.items())
     print(f"{PROGRAM}: collected {summary}", file=sys.stderr)
     return EXIT_MEASURED
 
