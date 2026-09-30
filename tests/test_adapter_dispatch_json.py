@@ -116,9 +116,19 @@ def test_a_future_schema_version_is_refused_by_version_not_by_key() -> None:
         decode(payload(schema_version=SCHEMA_VERSION + 1, budget_micros=500))
 
 
-def test_an_older_schema_version_is_refused() -> None:
-    with pytest.raises(MalformedMessage, match="no downgrade path"):
-        decode(payload(schema_version=SCHEMA_VERSION - 1))
+def test_a_schema_version_older_than_any_known_is_refused() -> None:
+    with pytest.raises(MalformedMessage, match="this build reads 1 to"):
+        decode(payload(schema_version=0))
+
+
+def test_a_version_1_work_message_is_still_measured() -> None:
+    """Work dispatched before the upgrade must not be lost with it.
+
+    Version 2 changed only the result message, so a version 1 work message
+    carries every key a version 2 one does. Refusing it would commit past runs
+    that were dispatched and never measured.
+    """
+    assert decode(payload(schema_version=1)).schema_version == 1
 
 
 def test_a_boolean_schema_version_is_refused() -> None:

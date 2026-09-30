@@ -21,7 +21,7 @@ from control_plane.adapters.fake_agent import FakeAgent
 from control_plane.adapters.fixtures import digest_tree
 from control_plane.adapters.local_runner import LocalRunner
 from control_plane.adapters.sqlite_repo import SqliteRunRepository
-from control_plane.adapters.system import SystemClock
+from control_plane.adapters.system import SystemClock, harness_version
 from control_plane.adapters.task_toml import fixture_root_for, load_task
 from control_plane.adapters.workspace import WorkspaceFactory
 from control_plane.domain.outcomes import AgentOutcome
@@ -82,6 +82,7 @@ def test_one_task_runs_end_to_end(tmp_path: Path) -> None:
             clock=clock,
             ids=FakeIdGenerator(),
             fixtures_root=FIXTURES,
+            harness_version=harness_version(),
         )
         record = service.execute(task)
 
@@ -136,6 +137,9 @@ def test_one_task_runs_end_to_end(tmp_path: Path) -> None:
     assert stored.report is not None
     assert len(stored.report.commands) == 2
     assert stored.patch_sha256 == record.patch_sha256
+    # The tests run from a checkout, so the build must be able to name itself.
+    assert stored.harness_version is not None
+    assert stored.harness_version == harness_version()
 
     # --- 8. the working copy is gone, the evidence is not --------------------
     assert not (workspace_root / "repo").exists()
@@ -162,6 +166,7 @@ def test_the_same_task_run_twice_produces_two_comparable_records(
             clock=clock,
             ids=FakeIdGenerator(),
             fixtures_root=FIXTURES,
+            harness_version=None,
         )
         first = service.execute(task)
         second = service.execute(task)

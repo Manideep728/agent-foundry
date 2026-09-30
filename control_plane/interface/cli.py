@@ -47,7 +47,11 @@ from control_plane.adapters.record_json import encode as encode_result
 from control_plane.adapters.run_lock import DatabaseBusy, exclusive_run_lock
 from control_plane.adapters.single_shot_agent import SingleShotAgent
 from control_plane.adapters.sqlite_repo import SqliteRunRepository
-from control_plane.adapters.system import SystemClock, UuidIdGenerator
+from control_plane.adapters.system import (
+    SystemClock,
+    UuidIdGenerator,
+    harness_version,
+)
 from control_plane.adapters.task_toml import load_task, load_tasks
 from control_plane.adapters.tool_use_agent import DEFAULT_MAX_TURNS, ToolUseAgent
 from control_plane.adapters.workspace import WorkspaceFactory
@@ -559,6 +563,7 @@ def _build_service(
         clock=clock,
         ids=UuidIdGenerator(),
         fixtures_root=args.fixtures,
+        harness_version=harness_version(),
     )
 
 
@@ -677,6 +682,8 @@ def _print_summary(summary: SuiteSummary, *, planned: int) -> None:
     print(f"  config        {describe(summary.configuration)}")
     for digest in summary.image_digests:
         print(f"  image         {digest}")
+    for version in summary.harness_versions:
+        print(f"  harness       {version}")
 
     print(f"  resolved      {summary.resolved}/{summary.measured}")
     print(f"  regressed     {summary.regressed}/{summary.measured}")

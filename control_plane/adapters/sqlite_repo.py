@@ -34,7 +34,7 @@ from control_plane.domain.validation import (
 )
 from control_plane.services.errors import ConcurrentModification, RunAlreadyExists
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 _SCHEMA = (
     """
@@ -75,6 +75,7 @@ CREATE TABLE runs (
   provider_id        TEXT,
   model_id           TEXT,
   prompt_id          TEXT,
+  harness_version    TEXT,
   CHECK ((state = 'failed') = (failure_kind IS NOT NULL)),
   CHECK (updated_at_unix_ms >= created_at_unix_ms),
   CHECK (pid1 IN (0, 1))
@@ -158,8 +159,8 @@ _CREATE_SQL = (
     "(run_id, task_id, suite, state, created_at_unix_ms, "
     " updated_at_unix_ms, fixture_sha256, runner_id, "
     " runner_version, arch, pid1, workspace_path, "
-    " agent_id, provider_id, model_id, prompt_id) "
-    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+    " agent_id, provider_id, model_id, prompt_id, harness_version) "
+    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
 )
 
 _ADVANCE_SQL = (
@@ -232,6 +233,7 @@ _FIELD_COLUMNS: Mapping[str, frozenset[str]] = MappingProxyType(
         "provider_id": frozenset({"provider_id"}),
         "model_id": frozenset({"model_id"}),
         "prompt_id": frozenset({"prompt_id"}),
+        "harness_version": frozenset({"harness_version"}),
         "total_cost_micros": frozenset({"total_cost_micros"}),
         "agent_ms": frozenset({"agent_ms"}),
         "validation_ms": frozenset({"validation_ms"}),
@@ -264,6 +266,7 @@ _CREATE_ONLY = frozenset(
         "provider_id",
         "model_id",
         "prompt_id",
+        "harness_version",
     }
 )
 """Columns written once, at creation, and never revised.
@@ -342,6 +345,16 @@ _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             # before this column cannot be said to have used `tools-v1`, only
             # to have used whatever the text was on that day.
             "ALTER TABLE runs ADD COLUMN prompt_id TEXT",
+        ),
+    ),
+    (
+        7,
+        (
+            # The build that measured a run. NULL for every stored row: the
+            # commit that produced them was never written down, and the git
+            # history cannot recover it, because a run's timestamp says when it
+            # ran and not which checkout it ran from.
+            "ALTER TABLE runs ADD COLUMN harness_version TEXT",
         ),
     ),
 )
@@ -542,6 +555,7 @@ class SqliteRunRepository:
                     record.provider_id,
                     record.model_id,
                     record.prompt_id,
+                    record.harness_version,
                 ),
             )
         except sqlite3.IntegrityError as error:
@@ -804,6 +818,7 @@ class SqliteRunRepository:
             provider_id=row["provider_id"],
             model_id=row["model_id"],
             prompt_id=row["prompt_id"],
+            harness_version=row["harness_version"],
         )
 
     def _read_report(self, run_id: RunId) -> ValidationReport | None:

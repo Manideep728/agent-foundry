@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from control_plane.adapters.sqlite_repo import SqliteRunRepository
+from control_plane.adapters.system import harness_version
 from control_plane.domain.ids import RunId, TaskId
 from control_plane.domain.outcomes import FailureCategory
 from control_plane.domain.record import RunRecord
@@ -141,6 +142,7 @@ def test_the_report_names_the_environment_that_validated_the_runs(
     assert "- Architecture:" in text
     assert "- Supervisor was PID 1:" in text
     assert "- Image: none recorded" in text  # --runner local has no image
+    assert f"- Harness: `{harness_version()}`" in text
 
 
 # --- the rules the report must not break -------------------------------------

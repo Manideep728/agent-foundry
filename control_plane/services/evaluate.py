@@ -95,7 +95,10 @@ class EvaluationService:
         clock: Clock,
         ids: IdGenerator,
         fixtures_root: Path,
+        harness_version: str | None,
     ) -> None:
+        # Required although it may be None: a default would let a new caller
+        # forget it and store every run as "build unknown" without a word.
         self._repo = repository
         self._runner = runner
         self._agent = agent
@@ -103,6 +106,7 @@ class EvaluationService:
         self._clock = clock
         self._ids = ids
         self._fixtures_root = fixtures_root
+        self._harness_version = harness_version
 
     def execute(self, task: TaskDefinition, run_id: RunId | None = None) -> RunRecord:
         """Measure `task` once, under `run_id` if the caller already minted one.
@@ -429,6 +433,7 @@ class EvaluationService:
             provider_id=self._agent.provider_id,
             model_id=self._agent.model_id,
             prompt_id=self._agent.prompt_id,
+            harness_version=self._harness_version,
             arch=report.arch if report is not None else UNKNOWN_ARCH,
             pid1=report.pid1 if report is not None else False,
             # Not guarded on `report is not None`, unlike arch and pid1. The

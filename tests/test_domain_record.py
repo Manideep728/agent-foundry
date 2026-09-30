@@ -207,3 +207,10 @@ def test_a_prompt_id_is_a_name_or_none_never_the_empty_string() -> None:
     # in a comparison between prompts.
     with pytest.raises(PreconditionViolated, match="prompt_id"):
         record(outcome=AgentOutcome.NO_PATCH_PRODUCED, prompt_id="")
+
+
+def test_a_harness_version_is_a_version_or_none_never_the_empty_string() -> None:
+    # Same rule again. An empty version would read as "a build" in a report
+    # that lists the builds a group spans, when it is really "no build named".
+    with pytest.raises(PreconditionViolated, match="harness_version"):
+        record(outcome=AgentOutcome.NO_PATCH_PRODUCED, harness_version="")

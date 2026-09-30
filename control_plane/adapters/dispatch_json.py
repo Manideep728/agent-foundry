@@ -26,6 +26,7 @@ from control_plane.domain.errors import DomainError
 from control_plane.domain.ids import RunId, TaskId
 from control_plane.domain.task import Suite
 from control_plane.services.dispatch import (
+    OLDEST_READABLE_VERSION,
     SCHEMA_VERSION,
     IncompatibleMessage,
     TaskRunMessage,
@@ -164,12 +165,14 @@ def _check_version(fields: dict[str, Any]) -> None:
             f"message is schema_version {version} and this build understands "
             f"at most {SCHEMA_VERSION}"
         )
-    if version < SCHEMA_VERSION:
-        # Refused rather than upgraded. There is one version, so there is no
-        # migration to write yet, and inventing defaults for an older message
-        # would mean a worker filling in a configuration the dispatcher never
-        # chose -- which is the class of defect this contract exists to stop.
+    if version < OLDEST_READABLE_VERSION:
+        # Refused rather than upgraded. Inventing defaults for a message older
+        # than any this build knows would mean a worker filling in a
+        # configuration the dispatcher never chose -- which is the class of
+        # defect this contract exists to stop. Version 1 is still read: it
+        # carries exactly the keys version 2 does, because version 2 changed
+        # only the result message.
         raise MalformedMessage(
-            f"message is schema_version {version} and this build writes "
-            f"{SCHEMA_VERSION}; no downgrade path exists"
+            f"message is schema_version {version} and this build reads "
+            f"{OLDEST_READABLE_VERSION} to {SCHEMA_VERSION}"
         )

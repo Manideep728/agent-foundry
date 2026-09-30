@@ -140,6 +140,14 @@ class SuiteSummary:
 
     image_digests: tuple[str, ...]
 
+    harness_versions: tuple[str, ...]
+    """Every build that measured a run in this group.
+
+    Listed rather than grouped on, like the image digests. More than one means
+    the group's numbers straddle a change to the harness itself, which a reader
+    comparing them needs to know and a split per commit would bury.
+    """
+
     def __post_init__(self) -> None:
         if self.measured + len(self.unmeasured) + self.aborted != self.runs:
             raise PreconditionViolated(
@@ -316,4 +324,5 @@ def _summarise_one(
             r.validation_ms for r in scored if r.validation_ms is not None
         ),
         image_digests=_distinct(r.image_digest for r in records),
+        harness_versions=_distinct(r.harness_version for r in records),
     )

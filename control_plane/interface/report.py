@@ -119,6 +119,11 @@ def _environment(records: Sequence[RunRecord]) -> list[str]:
         # Never silently absent. A run with no image digest is a run nothing
         # can pin to the bytes that produced it, and saying so is the point.
         lines.append("- Image: none recorded")
+    versions = sorted({r.harness_version for r in records if r.harness_version})
+    if versions:
+        lines.extend(f"- Harness: `{version}`" for version in versions)
+    else:
+        lines.append("- Harness: none recorded")
     return lines
 
 

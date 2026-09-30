@@ -61,15 +61,24 @@ read every message the others read, and the suite would be measured twice.
 COLLECTOR_GROUP = "agentfoundry-collector"
 """The consumer group the one collector joins, and the offsets it resumes from."""
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 """The version every message this build writes carries.
 
-Bumped when a field changes meaning or disappears, never when one is added
-with a default. A consumer refuses a version above its own rather than
-guessing, because a worker that silently ignores a field it does not
-understand measures the configuration it knows about and reports it under the
-configuration it was asked for.
+Bumped whenever a message's set of keys changes, including when one is added:
+the decoders refuse unknown keys, so an unversioned addition would reach an
+older consumer as a malformed message and be committed past -- a measurement
+lost. Versioned, it reaches that consumer as a newer version, which it refuses
+rather than guessing and leaves on the topic for a newer build (D28). A worker
+that silently ignored a field it did not understand would measure the
+configuration it knows about and report it under the one it was asked for.
+
+A consumer still reads an older version when every key that version lacks has
+an honest default. Version 2 added `harness_version` to a result, and a result
+without one means exactly what the column's NULL means.
 """
+
+OLDEST_READABLE_VERSION = 1
+"""The oldest message version this build still decodes."""
 
 
 class IncompatibleMessage(DomainError):

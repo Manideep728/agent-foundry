@@ -335,6 +335,7 @@ CONFIGURATION: dict[str, object] = {
     "provider_id": "ollama",
     "model_id": "llama3.2:3b",
     "prompt_id": "tools-v2",
+    "harness_version": "0.1.0+62540b902356",
 }
 """What `create()` writes and `finish()` must not touch.
 

@@ -51,6 +51,12 @@ the supervisor was PID 1, and the content digest of the image. A run that
 cannot name the environment that produced it is not reproducible, so a
 benchmark table can require those fields rather than trusting them.
 
+Every run also records the harness build that measured it: the package version
+and the commit, for example `0.1.0+62540b902356`. The suffix `.dirty` shows that
+tracked files differed from that commit. The report lists each build that a
+group of runs spans, so a reader can see when one group of numbers comes from
+two versions of the scoring code.
+
 The database carries a schema version and upgrades itself in place when an
 older one is opened. A database written by a newer build is refused rather than
 read, because a field may have changed meaning and guessing produces plausible

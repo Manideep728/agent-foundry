@@ -535,6 +535,7 @@ def test_one_task_runs_end_to_end_in_docker(tmp_path: Path) -> None:
             clock=clock,
             ids=FakeIdGenerator("e2e"),
             fixtures_root=REPO / "tasks" / "fixtures",
+            harness_version=None,
         )
         record = service.execute(load_task(REPO / "tasks" / "csv-quoted-fields.toml"))
 

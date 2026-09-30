@@ -58,6 +58,7 @@ def build(
     runner: object | None = None,
     agent: object | None = None,
     solutions: Path | None = None,
+    harness_version: str | None = None,
 ) -> tuple[EvaluationService, SqliteRunRepository]:
     clock = RealClock()
     repo = SqliteRunRepository(tmp_path / "af.sqlite3")
@@ -69,6 +70,7 @@ def build(
         clock=clock,
         ids=FakeIdGenerator(),
         fixtures_root=FIXTURES,
+        harness_version=harness_version,
     )
     return service, repo
 
@@ -91,6 +93,27 @@ def test_a_solved_task_is_scored_as_a_clean_patch(tmp_path: Path) -> None:
     assert not record.score.regressed
     assert record.patch_is_empty is False
     assert record.total_cost_micros == 0  # the fake model is free
+    repo.close()
+
+
+def test_a_run_names_the_build_that_measured_it(tmp_path: Path) -> None:
+    """Written at creation, so a run that dies early still names its build.
+
+    The fixture-hash failure is the earliest exit there is: it happens before
+    a workspace, an agent call or a container.
+    """
+    service, repo = build(tmp_path, harness_version="0.1.0+62540b902356")
+    broken = load_task(TASK_FILE)
+    object.__setattr__(broken, "fixture_sha256", "f" * 64)
+
+    finished = service.execute(task())
+    failed = service.execute(broken)
+
+    for record in (finished, failed):
+        stored = repo.get(record.run.run_id)
+        assert stored is not None
+        assert stored.harness_version == "0.1.0+62540b902356"
+    assert failed.run.state is RunState.FAILED
     repo.close()
 
 
@@ -447,6 +470,7 @@ def test_every_transition_is_persisted_in_order(tmp_path: Path) -> None:
         clock=clock,
         ids=FakeIdGenerator(),
         fixtures_root=FIXTURES,
+        harness_version=None,
     )
     service.execute(task())
 

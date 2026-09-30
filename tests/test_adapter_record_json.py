@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from typing import Any
 
 import pytest
 
@@ -227,7 +228,7 @@ def test_a_record_missing_a_field_is_refused() -> None:
 
 def test_a_record_with_an_unknown_field_is_refused() -> None:
     payload = json.loads(encode(message()))
-    payload["record"]["harness_version"] = "0.2.0"
+    payload["record"]["budget_micros"] = 500
 
     with pytest.raises(MalformedRecord, match="unknown key"):
         decode(json.dumps(payload).encode("utf-8"))
@@ -271,7 +272,82 @@ def test_an_older_schema_version_is_refused() -> None:
     payload = json.loads(encode(message()))
     payload["schema_version"] = 0
 
-    with pytest.raises(MalformedRecord, match="this build speaks"):
+    with pytest.raises(MalformedRecord, match="this build reads 1 to"):
+        decode(json.dumps(payload).encode("utf-8"))
+
+
+def test_the_harness_version_survives_a_round_trip() -> None:
+    sent = message(
+        record=record(
+            outcome=AgentOutcome.NO_PATCH_PRODUCED,
+            harness_version="0.1.0+62540b902356",
+        )
+    )
+
+    assert decode(encode(sent)).record.harness_version == "0.1.0+62540b902356"
+
+
+def as_version_1(sent: RunResultMessage) -> dict[str, Any]:
+    """A result as a worker built before `harness_version` would send it."""
+    payload: dict[str, Any] = json.loads(encode(sent))
+    del payload["record"]["harness_version"]
+    payload["schema_version"] = 1
+    return payload
+
+
+def test_a_version_1_result_is_still_stored_with_no_harness_version() -> None:
+    """Results already on the topic when the collector is upgraded.
+
+    Refusing them as malformed would commit past finished measurements. The
+    one key they lack has an honest default: None, the column's own "this run
+    did not name its build".
+    """
+    sent = message()
+
+    restored = decode(json.dumps(as_version_1(sent)).encode("utf-8"))
+
+    assert restored.record.harness_version is None
+    assert restored.record == sent.record
+
+
+def test_a_decoded_version_1_result_encodes_back_to_the_same_bytes() -> None:
+    """`encode` must write what `decode` reads, at every readable version."""
+    raw = json.dumps(as_version_1(message()), sort_keys=True, separators=(",", ":"))
+
+    assert encode(decode(raw.encode("utf-8"))) == raw.encode("utf-8")
+
+
+def test_a_version_1_message_cannot_be_given_a_harness_version() -> None:
+    sent = message(
+        record=record(
+            outcome=AgentOutcome.NO_PATCH_PRODUCED,
+            harness_version="0.1.0+62540b902356",
+        ),
+        schema_version=1,
+    )
+
+    with pytest.raises(RuntimeError, match="cannot carry harness_version"):
+        encode(sent)
+
+
+def test_a_version_1_result_carrying_a_harness_version_is_refused() -> None:
+    # A key the message's own version did not have is as unknown as any other:
+    # a producer that claims version 1 and sends version 2 keys is broken.
+    payload = as_version_1(message())
+    payload["record"]["harness_version"] = "0.1.0+62540b902356"
+
+    with pytest.raises(MalformedRecord, match=r"unknown key\(s\) harness_version"):
+        decode(json.dumps(payload).encode("utf-8"))
+
+
+def test_a_current_result_without_a_harness_version_is_refused() -> None:
+    # None travels as an explicit null. A missing key at version 2 is a
+    # producer that forgot the field, which is the defect this codec's field
+    # list exists to catch.
+    payload = json.loads(encode(message()))
+    del payload["record"]["harness_version"]
+
+    with pytest.raises(MalformedRecord, match="missing harness_version"):
         decode(json.dumps(payload).encode("utf-8"))
 
 

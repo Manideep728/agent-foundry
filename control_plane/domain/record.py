@@ -116,6 +116,22 @@ class RunRecord:
     a file beside the patch.
     """
 
+    harness_version: str | None = None
+    """Which build of the harness produced this run.
+
+    The package version plus the commit, so that two rows measured under
+    different scoring or prompt code can be told apart after the fact. Three
+    changes in Phase 9 altered what a stored number means, and before this
+    field no row said which side of them it was measured on.
+
+    Not part of the grouping key. Every commit would otherwise start a new
+    configuration, and repeats measured across a harmless docs commit would
+    stop being comparable. The report lists the versions a group spans instead.
+
+    None for a run stored before the harness recorded this, and for a build
+    that cannot name itself. Never a sentinel, for the `image_digest` reason.
+    """
+
     def __post_init__(self) -> None:
         scored = self.run.state is RunState.SCORED
 
@@ -202,6 +218,11 @@ class RunRecord:
         self._require(
             self.image_digest != "",
             "image_digest is None or a digest, never the empty string",
+        )
+
+        self._require(
+            self.harness_version != "",
+            "harness_version is None or a version, never the empty string",
         )
 
     def _require(self, condition: bool, message: str) -> None:

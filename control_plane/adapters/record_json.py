@@ -43,6 +43,7 @@ from control_plane.domain.scoring import Score
 from control_plane.domain.states import EvaluationRun, HarnessFailure, RunState
 from control_plane.domain.task import Suite
 from control_plane.services.dispatch import (
+    OLDEST_READABLE_VERSION,
     SCHEMA_VERSION,
     IncompatibleMessage,
     RunResultMessage,
@@ -107,7 +108,17 @@ _RECORD_FIELDS = (
     "workspace_path",
     "image_digest",
     "agent_note",
+    "harness_version",
 )
+
+_RECORD_FIELD_ADDED_IN = {"harness_version": 2}
+"""The message version each later record key first appeared in.
+
+A key absent from this map has been in the record since version 1. A message
+must carry exactly the keys of its own version: an older one lacking a newer
+key decodes to that field's default, and a newer key in an older message is
+as unknown as any other.
+"""
 
 # The fields of each type that are plain JSON scalars, and so can be read and
 # written by name. Everything else is handled explicitly below.
@@ -139,9 +150,29 @@ def encode(message: RunResultMessage) -> bytes:
         "worker_id": message.worker_id,
         "dispatched_at_ms": message.dispatched_at_ms,
         "completed_at_ms": message.completed_at_ms,
-        "record": _encode_record(message.record),
+        "record": _for_version(_encode_record(message.record), message.schema_version),
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _for_version(record: dict[str, Any], version: int) -> dict[str, Any]:
+    """The record keys a message of `version` carries, and no others.
+
+    Without this, re-encoding a decoded version 1 result would write a key
+    version 1 never had, and `decode` would refuse the bytes `encode` wrote.
+    A value in a key the version cannot carry is a caller bug, not data to
+    drop quietly.
+    """
+    kept = dict(record)
+    for name, added_in in _RECORD_FIELD_ADDED_IN.items():
+        if added_in <= version:
+            continue
+        if kept.pop(name) is not None:
+            raise RuntimeError(
+                f"a version {version} message cannot carry {name}, "
+                f"which arrived in version {added_in}"
+            )
+    return kept
 
 
 def decode(raw: bytes) -> RunResultMessage:
@@ -151,11 +182,11 @@ def decode(raw: bytes) -> RunResultMessage:
     leaves it on the topic for a collector that can store it.
     """
     fields = _object(raw, "message")
-    _check_version(fields)
+    version = _check_version(fields)
 
     try:
         return RunResultMessage(
-            record=_decode_record(_object_at(fields, "record")),
+            record=_decode_record(_object_at(fields, "record"), version),
             worker_id=_string(fields, "worker_id"),
             dispatched_at_ms=_integer(fields, "dispatched_at_ms"),
             completed_at_ms=_integer(fields, "completed_at_ms"),
@@ -260,11 +291,16 @@ def _complete(
     return encoded
 
 
-def _decode_record(fields: dict[str, Any]) -> RunRecord:
-    missing = sorted(set(_RECORD_FIELDS) - set(fields))
+def _decode_record(fields: dict[str, Any], version: int) -> RunRecord:
+    expected = {
+        name
+        for name in _RECORD_FIELDS
+        if _RECORD_FIELD_ADDED_IN.get(name, 1) <= version
+    }
+    missing = sorted(expected - set(fields))
     if missing:
         raise MalformedRecord(f"record is missing {', '.join(missing)}")
-    unknown = sorted(set(fields) - set(_RECORD_FIELDS))
+    unknown = sorted(set(fields) - expected)
     if unknown:
         raise MalformedRecord(f"record has unknown key(s) {', '.join(unknown)}")
 
@@ -303,6 +339,10 @@ def _decode_record(fields: dict[str, Any]) -> RunRecord:
         workspace_path=_optional_string(fields, "workspace_path"),
         image_digest=_optional_string(fields, "image_digest"),
         agent_note=_optional_string(fields, "agent_note"),
+        # Absent from a version 1 message, where `.get` makes it None: the
+        # worker that sent it could not name its build, which is what None
+        # means in the column too.
+        harness_version=_optional_string(fields, "harness_version"),
     )
 
 
@@ -445,7 +485,7 @@ def _optional_enum[E: (Suite, RunState, FailureCategory, AgentOutcome)](
     return None if value is None else _enum(kind, value, key)
 
 
-def _check_version(fields: dict[str, Any]) -> None:
+def _check_version(fields: dict[str, Any]) -> int:
     version = fields.get("schema_version")
     if not isinstance(version, int) or isinstance(version, bool):
         raise MalformedRecord(f"schema_version must be an integer, got {version!r}")
@@ -457,8 +497,9 @@ def _check_version(fields: dict[str, Any]) -> None:
             f"message is schema_version {version} and this build understands "
             f"at most {SCHEMA_VERSION}"
         )
-    if version != SCHEMA_VERSION:
+    if version < OLDEST_READABLE_VERSION:
         raise MalformedRecord(
-            f"message is schema_version {version} and this build speaks "
-            f"{SCHEMA_VERSION}"
+            f"message is schema_version {version} and this build reads "
+            f"{OLDEST_READABLE_VERSION} to {SCHEMA_VERSION}"
         )
+    return version

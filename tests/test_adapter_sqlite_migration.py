@@ -366,3 +366,20 @@ def test_the_upgrade_leaves_an_older_runs_prompt_unnamed(tmp_path: Path) -> None
         pass
 
     assert read(path, "SELECT prompt_id FROM runs WHERE run_id = 'r1'") is None
+
+
+def test_the_upgrade_leaves_an_older_runs_build_unnamed(tmp_path: Path) -> None:
+    """The v7 step backfills nothing either.
+
+    The tempting backfill is the commit that was HEAD when the run was created.
+    It would be wrong for any run measured on a checkout that was behind, ahead
+    or dirty, and nothing stored says which runs those were.
+    """
+    path = tmp_path / "af.sqlite3"
+    build_v1(path)
+    insert_v1_run(path, stored_arch="unknown", report_arch="x86_64")
+
+    with SqliteRunRepository(path):
+        pass
+
+    assert read(path, "SELECT harness_version FROM runs WHERE run_id = 'r1'") is None
