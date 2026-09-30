@@ -16,7 +16,7 @@ from typing import Any, ClassVar
 
 import pytest
 
-from control_plane.adapters.ollama_client import OllamaClient
+from control_plane.adapters.ollama_client import OllamaClient, _decode
 from control_plane.domain.model import Message, MessageRole
 from control_plane.services.errors import AgentError
 from tests.ollama_support import MODEL as LIVE_MODEL
@@ -29,12 +29,14 @@ class Canned:
     status = 200
     body: bytes = b"{}"
     received: ClassVar[dict[str, Any]] = {}
+    paths: ClassVar[list[str]] = []
 
 
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length", "0"))
         Canned.received = json.loads(self.rfile.read(length))
+        Canned.paths.append(self.path)
         self.send_response(Canned.status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(Canned.body)))
@@ -53,6 +55,7 @@ def base_url_fixture() -> Iterator[str]:
     thread.start()
     Canned.status = 200
     Canned.body = b"{}"
+    Canned.paths = []
     try:
         yield f"http://127.0.0.1:{server.server_port}"
     finally:
@@ -88,7 +91,7 @@ def test_a_reply_carries_its_text_and_usage(base_url: str) -> None:
     assert response.truncated is False
 
 
-def test_cached_prompt_tokens_are_a_subset_not_an_extra(base_url: str) -> None:
+def test_cached_prompt_tokens_are_a_subset_not_an_extra() -> None:
     """The arithmetic that stops every cached run reporting twice its input.
 
     Measured against the real server: an identical second call reported
@@ -96,15 +99,49 @@ def test_cached_prompt_tokens_are_a_subset_not_an_extra(base_url: str) -> None:
     whole prompt and the cached figure is part of it. Treat them as separate
     additions and a 271-token prompt is recorded as 541.
     """
-    reply(prompt_eval_count=271, prompt_eval_cached_count=270, eval_count=8)
-
-    usage = OllamaClient("m", base_url=base_url).complete(ASK).usage
+    usage = _decode(
+        {
+            "message": {"content": "hi"},
+            "prompt_eval_count": 271,
+            "prompt_eval_cached_count": 270,
+            "eval_count": 8,
+        }
+    ).usage
 
     assert usage.input_tokens == 1
     assert usage.cache_read_tokens == 270
     # The whole prompt, counted once.
     assert usage.input_tokens + usage.cache_read_tokens == 271
     assert usage.total_tokens == 279
+
+
+def test_a_reply_that_reused_the_prompt_cache_is_refused(base_url: str) -> None:
+    """A reply that depends on an earlier request cannot be reproduced.
+
+    Measured: the same request after two different predecessors produced two
+    different replies at temperature 0. The client asks for a cold model every
+    time, so cached tokens mean that request was not honoured.
+    """
+    reply(prompt_eval_count=271, prompt_eval_cached_count=270)
+
+    with pytest.raises(AgentError, match="reused 270 cached prompt tokens"):
+        OllamaClient("m", base_url=base_url).complete(ASK)
+
+
+def test_every_request_runs_on_a_model_loaded_for_it_alone(base_url: str) -> None:
+    """Unloaded before, so nothing another client left cached is reused.
+
+    Unloaded after too, with zero rather than a short duration, so this
+    client leaves nothing cached for anyone else. Measured 2026-09-29: a cold
+    request straight after another client's warm one still found the cache,
+    because `keep_alive` on a request only governs what happens after it.
+    """
+    reply()
+
+    OllamaClient("m", base_url=base_url).complete(ASK)
+
+    assert Canned.paths == ["/api/generate", "/api/chat"]
+    assert Canned.received["keep_alive"] == 0
 
 
 def test_more_cached_tokens_than_prompt_tokens_is_refused(base_url: str) -> None:
@@ -215,3 +252,22 @@ def test_a_real_server_answers_in_the_shape_this_adapter_expects() -> None:
     assert response.usage.output_tokens > 0
     # The prompt was counted somewhere, cached or not.
     assert response.usage.input_tokens + response.usage.cache_read_tokens > 0
+
+
+@pytest.mark.ollama
+@requires_ollama
+def test_a_real_server_starts_every_request_cold() -> None:
+    """The claim `keep_alive: 0` rests on, checked where it can fail.
+
+    An identical second request is the case most likely to hit the cache: the
+    whole prompt would be reusable. A server that ignored `keep_alive` would
+    report it cached, and the client would refuse the reply.
+    """
+    client = OllamaClient(LIVE_MODEL, num_predict=8)
+    ask = (Message(MessageRole.USER, "Reply with: ok"),)
+
+    first = client.complete(ask)
+    second = client.complete(ask)
+
+    assert first.usage.cache_read_tokens == 0
+    assert second.usage.cache_read_tokens == 0

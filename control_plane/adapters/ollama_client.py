@@ -82,6 +82,9 @@ class OllamaClient:
             "messages": [_encode_message(m) for m in messages],
             "stream": False,
             "options": {"temperature": self._temperature, "seed": self._seed},
+            # Unloaded again once this reply is written, leaving nothing cached
+            # for the next request. See `_unload` for why.
+            "keep_alive": 0,
         }
         if tools:
             # Omitted entirely when empty rather than sent as []. Some builds
@@ -101,8 +104,39 @@ class OllamaClient:
         if self._num_predict is not None:
             payload["options"]["num_predict"] = self._num_predict
 
-        body = self._post("/api/chat", payload)
-        return _decode(body)
+        self._unload()
+        response = _decode(self._post("/api/chat", payload))
+        if response.usage.cache_read_tokens:
+            # The model was still loaded when this request arrived, most likely
+            # because another client was using the same server at the time. The
+            # reply is valid, but it is no longer a function of the request
+            # alone, so a rerun could not reproduce it. Failing the run says so;
+            # storing it would put an unrepeatable number in a table that
+            # claims to be repeatable.
+            raise AgentError(
+                f"ollama reused {response.usage.cache_read_tokens} cached prompt "
+                "tokens, so this reply depends on an earlier request; is another "
+                "client using this server?"
+            )
+        return response
+
+    def _unload(self) -> None:
+        """Make the next request start from an empty prompt cache.
+
+        Temperature 0 and a fixed seed are not enough on their own. A reply
+        also depends on how much of its prompt the server could reuse from
+        whatever it handled before, because the reused prefix changes how the
+        rest is batched and so the floating-point result. Measured 2026-09-29:
+        the same request after two different predecessors gave two different
+        replies, and a tool loop's third turn changed after a fresh model
+        load. That is how one task produced a patch in one suite and none in
+        the next.
+
+        An unload takes about 6 ms, loaded or not, and never loads the model
+        to unload it. The reload that follows is the real cost: about 2.5 s
+        per call for a 7B model from the page cache.
+        """
+        self._post("/api/generate", {"model": self._model, "keep_alive": 0})
 
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         request = urllib.request.Request(

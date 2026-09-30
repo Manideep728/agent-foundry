@@ -320,6 +320,13 @@ eight tasks, the same model and the same prompt gave the same totals and
 disagreed on two tasks (see Limitations). Token counts are recorded and the cost is zero, which
 is the honest figure for a model that cost nothing to call.
 
+Every model call starts from an unloaded model. At temperature 0 a reply still
+depends on how much of its prompt the server can reuse from an earlier request,
+so the client unloads the model before and after each call. A reply that
+reports reused prompt tokens anyway fails the run, because nothing could
+reproduce it. Each call therefore includes a model load, about 2.5 s for a 7B
+model, and the recorded agent time includes it.
+
 `--agent tools` gives the model three tools -- list the files, read one, write
 one -- and a budget of turns, set by `--max-turns`. Each turn is recorded as
 its own invocation, so the loop's cost is the sum of its calls rather than its
