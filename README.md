@@ -314,11 +314,8 @@ into a rate describing neither.
 
 `--agent ollama` sends the task and the visible files to a local model in one
 prompt and applies the files it sends back. It runs at temperature 0 with a
-fixed seed. For the single-shot agent two runs of one task produce
-byte-identical patches. For the tool loop they do not: two suites over the same
-eight tasks, the same model and the same prompt gave the same totals and
-disagreed on two tasks (see Limitations). Token counts are recorded and the cost is zero, which
-is the honest figure for a model that cost nothing to call.
+fixed seed. Token counts are recorded and the cost is zero, which is the honest
+figure for a model that cost nothing to call.
 
 Every model call starts from an unloaded model. At temperature 0 a reply still
 depends on how much of its prompt the server can reuse from an earlier request,
@@ -326,6 +323,12 @@ so the client unloads the model before and after each call. A reply that
 reports reused prompt tokens anyway fails the run, because nothing could
 reproduce it. Each call therefore includes a model load, about 2.5 s for a 7B
 model, and the recorded agent time includes it.
+
+Three suites of the tool loop, run back to back with `llama3.2:3b` and
+`tools-v2`, agree on every task: the same outcome, the same patch hash, and the
+same token counts on every turn. Each suite started after another client had
+left the model loaded. Before the client started every call cold, two suites
+under the same conditions disagreed on two tasks.
 
 `--agent tools` gives the model three tools -- list the files, read one, write
 one -- and a budget of turns, set by `--max-turns`. Each turn is recorded as
@@ -372,25 +375,27 @@ requests and a web interface are outside the scope of the project.
 
 - **Safety against hostile code.** Docker reduces accidental host access. It is
   not a hardened boundary against a deliberately malicious workload.
-- **Statistical significance.** Single-trial results are single-trial results.
+- **Statistical significance.** Eight tasks are a small sample. A result that
+  repeats exactly on eight tasks still says little about a ninth task.
 - **Portability.** The supervisor depends on POSIX process semantics and is
   Linux-only by design.
 - **`--runner local` is not a sandbox.** Point it only at fixtures whose
   contents are already trusted.
 - **`--agent tools` writes patches, and none of them is correct yet.** Under
-  the prompt `tools-v2` and `llama3.2:3b`, five of seven measured tasks produce
-  a patch and all five break a test that passed before. `resolved` is 0/7. The
+  the prompt `tools-v2` and `llama3.2:3b`, four of seven measured tasks produce
+  a patch and all four break a test that passed before. `resolved` is 0/7. The
   prompt fixed the mechanism, not the repair.
-- **A tool-loop result is not reproducible at the task level.** Temperature is
-  zero and the seed is fixed, and two suites over the same eight tasks, the
-  same model and the same prompt still disagreed on two of them, while the
-  totals matched. Read the per-task rows as one sample each.
+- **Reproducibility is shown on one machine.** The repeated suites ran on one
+  GPU with one Ollama build. Another GPU or build can compute a different
+  result, which is why every run records its environment and harness build.
+  Two workers that share one Ollama server can load the model for each other,
+  so their runs fail with that reason. Give each worker its own server.
 - **The prompt is a measured variable, and it was tuned on this suite.** Every
   run records the named prompt it used, and a summary groups on it, so two
   prompts are two rows. The same eight tasks chose the prompt and then scored
   it, so the figure is an upper bound on an unseen task.
 - **One task exceeds the client timeout.** `template-render` asks the model for
-  a whole file and has not answered inside 300 s in three attempts. It is
+  a whole file and has not answered inside 300 s in six attempts. It is
   reported as `agent_error`, which produces no measurement, rather than as a
   model failure.
 - **Tool calls do not always arrive on the tool channel.** `llama3.2:3b` uses
