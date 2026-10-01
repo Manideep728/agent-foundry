@@ -3,7 +3,11 @@
 Every measurement is stored as an INTEGER. Tables are STRICT, which rejects a
 float like 1.5 outright -- though note it silently coerces an integral float
 like 2.0, so STRICT is one layer of three: the schema, a test asserting no
-column is declared REAL, and the row builder below refusing a non-int.
+column is declared REAL, and the row builders in `run_rows` refusing a non-int.
+
+What is stored, and how a row becomes a record, is shared with the Postgres
+repository in `run_rows`. This module owns the file: the schema, its upgrades,
+WAL, and SQLite's own transaction rules.
 
 State advances by compare-and-swap rather than a bare UPDATE, because an UPDATE
 that matches no rows is *success* in SQLite. The rowcount check is what makes
@@ -13,25 +17,16 @@ the guard real.
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator
 from contextlib import closing, suppress
 from pathlib import Path
-from types import MappingProxyType
 
-from control_plane.domain.ids import RunId, TaskId
-from control_plane.domain.model import MicroUsd, ModelInvocation, ModelUsage
-from control_plane.domain.outcomes import AgentOutcome, FailureCategory
+from control_plane.adapters import run_rows as rows
+from control_plane.domain.ids import RunId
+from control_plane.domain.model import ModelInvocation
 from control_plane.domain.record import RunRecord
-from control_plane.domain.scoring import Score
-from control_plane.domain.states import EvaluationRun, HarnessFailure, RunState
-from control_plane.domain.task import Suite
-from control_plane.domain.validation import (
-    CommandOutcome,
-    CommandResult,
-    ExitReason,
-    StreamCapture,
-    ValidationReport,
-)
+from control_plane.domain.states import EvaluationRun, RunState
+from control_plane.domain.validation import ValidationReport
 from control_plane.services.errors import ConcurrentModification, RunAlreadyExists
 
 SCHEMA_VERSION = 7
@@ -146,144 +141,10 @@ CREATE TABLE model_invocations (
 )
 
 
-_TABLES = ("runs", "validation_reports", "command_results", "model_invocations")
-
 # SQLite's extended result code for "a row with this key already exists". The
 # message text says "UNIQUE constraint failed" even for a primary key, so the
 # code is matched rather than the text.
 _DUPLICATE_KEY_ERRORS = frozenset({"SQLITE_CONSTRAINT_PRIMARYKEY"})
-
-
-_CREATE_SQL = (
-    "INSERT INTO runs "
-    "(run_id, task_id, suite, state, created_at_unix_ms, "
-    " updated_at_unix_ms, fixture_sha256, runner_id, "
-    " runner_version, arch, pid1, workspace_path, "
-    " agent_id, provider_id, model_id, prompt_id, harness_version) "
-    "VALUES (:run_id, :task_id, :suite, :state, :created_at_unix_ms, "
-    " :updated_at_unix_ms, :fixture_sha256, :runner_id, "
-    " :runner_version, :arch, :pid1, :workspace_path, "
-    " :agent_id, :provider_id, :model_id, :prompt_id, :harness_version)"
-)
-
-_ADVANCE_SQL = (
-    "UPDATE runs SET state = ?, updated_at_unix_ms = ?, "
-    "failure_kind = ?, failure_from = ?, failure_detail = ? "
-    "WHERE run_id = ? AND state = ?"
-)
-
-_FINISH_SQL = (
-    "UPDATE runs SET state = :state, updated_at_unix_ms = :updated_at_unix_ms, "
-    "failure_kind = :failure_kind, failure_from = :failure_from, "
-    "failure_detail = :failure_detail, "
-    "runner_version = :runner_version, arch = :arch, pid1 = :pid1, "
-    "outcome = :outcome, resolved = :resolved, regressed = :regressed, "
-    "f2p_passed = :f2p_passed, f2p_total = :f2p_total, "
-    "p2p_passed = :p2p_passed, p2p_total = :p2p_total, "
-    "timed_out_commands = :timed_out_commands, task_defect = :task_defect, "
-    "patch_sha256 = :patch_sha256, patch_bytes = :patch_bytes, "
-    "patch_is_empty = :patch_is_empty, total_cost_micros = :total_cost_micros, "
-    "agent_ms = :agent_ms, validation_ms = :validation_ms, "
-    "workspace_path = :workspace_path, image_digest = :image_digest, "
-    "agent_note = :agent_note "
-    "WHERE run_id = :run_id AND state = :expected_state"
-)
-"""The three statements that write `runs`, lifted out of their methods.
-
-Named so a test can read the column names back out of the SQL. Three bugs have
-now been a column missing from one of these lists while the value that belongs
-in it was computed correctly -- `arch` and `pid1`, `workspace_path` before
-them. A comment asking the next author to keep the lists in step is what was
-there when each of those shipped.
-
-The values are bound by name from `_run_columns`, never by position, so a list
-that names the right columns cannot feed them in the wrong order.
-"""
-
-
-_FIELD_COLUMNS: Mapping[str, frozenset[str]] = MappingProxyType(
-    {
-        # One `RunRecord` field does not mean one column: `run` carries the
-        # state machine and fans out to eight, `score` to seven.
-        "run": frozenset(
-            {
-                "run_id",
-                "task_id",
-                "state",
-                "created_at_unix_ms",
-                "updated_at_unix_ms",
-                "failure_kind",
-                "failure_from",
-                "failure_detail",
-            }
-        ),
-        "suite": frozenset({"suite"}),
-        "fixture_sha256": frozenset({"fixture_sha256"}),
-        "runner_id": frozenset({"runner_id"}),
-        "runner_version": frozenset({"runner_version"}),
-        "arch": frozenset({"arch"}),
-        "pid1": frozenset({"pid1"}),
-        "score": frozenset(
-            {
-                "resolved",
-                "regressed",
-                "f2p_passed",
-                "f2p_total",
-                "p2p_passed",
-                "p2p_total",
-                "timed_out_commands",
-            }
-        ),
-        "outcome": frozenset({"outcome"}),
-        "task_defect": frozenset({"task_defect"}),
-        "patch_sha256": frozenset({"patch_sha256"}),
-        "patch_bytes": frozenset({"patch_bytes"}),
-        "patch_is_empty": frozenset({"patch_is_empty"}),
-        "agent_id": frozenset({"agent_id"}),
-        "provider_id": frozenset({"provider_id"}),
-        "model_id": frozenset({"model_id"}),
-        "prompt_id": frozenset({"prompt_id"}),
-        "harness_version": frozenset({"harness_version"}),
-        "total_cost_micros": frozenset({"total_cost_micros"}),
-        "agent_ms": frozenset({"agent_ms"}),
-        "validation_ms": frozenset({"validation_ms"}),
-        "workspace_path": frozenset({"workspace_path"}),
-        "image_digest": frozenset({"image_digest"}),
-        "agent_note": frozenset({"agent_note"}),
-    }
-)
-"""Which columns of `runs` each `RunRecord` field reaches.
-
-Declared rather than derived, because the mapping is not one to one and a
-generator able to express it would be this same table spelled as code that
-emits SQL. Stating it once lets a test compare it against the record, against
-the table and against the statements above -- which is the guard the three
-bugs needed, and which no amount of care in the SQL itself provides.
-"""
-
-_CHILD_TABLE_FIELDS = frozenset({"report", "invocations"})
-"""Fields stored in a table of their own rather than in a `runs` column."""
-
-_CREATE_ONLY = frozenset(
-    {
-        "run_id",
-        "task_id",
-        "created_at_unix_ms",
-        "suite",
-        "fixture_sha256",
-        "runner_id",
-        "agent_id",
-        "provider_id",
-        "model_id",
-        "prompt_id",
-        "harness_version",
-    }
-)
-"""Columns written once, at creation, and never revised.
-
-Identity and configuration: what the run is and what was being measured. Every
-other column describes what happened, so `finish()` must write it.
-"""
 
 
 # Ordered upgrade steps, each naming the version it produces. A step may add a
@@ -368,83 +229,6 @@ _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
         ),
     ),
 )
-
-
-def _run_columns(record: RunRecord) -> dict[str, object]:
-    """Every column of `runs`, by name, as one record says it.
-
-    The single place a record becomes a row. Each statement binds the names it
-    writes, so `create` and `finish` read the same value for a column by
-    construction, and a test can compare these keys against the table.
-
-    `create` writes some columns before they are known -- arch 'unknown', pid1
-    False -- because the row must exist, and name its workspace, before the
-    run can die leaving one behind. `finish` writes them again.
-    """
-    run = record.run
-    failure = run.failure
-    score = record.score
-    return {
-        "run_id": run.run_id.value,
-        "task_id": run.task_id.value,
-        "suite": record.suite.value,
-        "state": run.state.value,
-        "created_at_unix_ms": _measure("created_at", run.created_at_unix_ms),
-        "updated_at_unix_ms": _measure("updated_at", run.updated_at_unix_ms),
-        "failure_kind": failure.kind.value if failure else None,
-        "failure_from": failure.failed_from.value if failure else None,
-        "failure_detail": failure.detail if failure else "",
-        "fixture_sha256": record.fixture_sha256,
-        "runner_id": record.runner_id,
-        "runner_version": record.runner_version,
-        "arch": record.arch,
-        "pid1": _flag(record.pid1),
-        "outcome": record.outcome.value if record.outcome else None,
-        "resolved": _flag(score.resolved) if score else None,
-        "regressed": _flag(score.regressed) if score else None,
-        "f2p_passed": score.fail_to_pass_passed if score else None,
-        "f2p_total": score.fail_to_pass_total if score else None,
-        "p2p_passed": score.pass_to_pass_passed if score else None,
-        "p2p_total": score.pass_to_pass_total if score else None,
-        "timed_out_commands": score.timed_out_commands if score else None,
-        "task_defect": _flag(record.task_defect),
-        "patch_sha256": record.patch_sha256,
-        "patch_bytes": _measure("patch_bytes", record.patch_bytes),
-        "patch_is_empty": (
-            None if record.patch_is_empty is None else _flag(record.patch_is_empty)
-        ),
-        "total_cost_micros": _measure(
-            "total_cost_micros", int(record.total_cost_micros)
-        ),
-        "agent_ms": _measure("agent_ms", record.agent_ms),
-        "validation_ms": _measure("validation_ms", record.validation_ms),
-        "workspace_path": record.workspace_path,
-        "image_digest": record.image_digest,
-        "agent_note": record.agent_note,
-        "agent_id": record.agent_id,
-        "provider_id": record.provider_id,
-        "model_id": record.model_id,
-        "prompt_id": record.prompt_id,
-        "harness_version": record.harness_version,
-    }
-
-
-def _flag(value: bool) -> int:
-    return 1 if value else 0
-
-
-def _measure(name: str, value: int | None) -> int | None:
-    """Refuse a non-integer measurement.
-
-    The third float guard. STRICT rejects 1.5 but silently coerces 2.0, and
-    `isinstance(True, int)` is True in Python -- so a boolean written into a
-    count would pass every other check.
-    """
-    if value is None:
-        return None
-    if type(value) is not int:
-        raise TypeError(f"{name} must be an int, got {type(value).__name__}")
-    return value
 
 
 class SqliteRunRepository:
@@ -599,7 +383,7 @@ class SqliteRunRepository:
     def _insert(self, record: RunRecord, state: RunState) -> None:
         try:
             self._conn.execute(
-                _CREATE_SQL, {**_run_columns(record), "state": state.value}
+                rows.CREATE_SQL, {**rows.run_columns(record), "state": state.value}
             )
         except sqlite3.IntegrityError as error:
             # Only a key violation means the run exists. A CHECK failure is a
@@ -615,16 +399,7 @@ class SqliteRunRepository:
         """Compare-and-swap the state, or raise."""
         with self._conn:
             cursor = self._conn.execute(
-                _ADVANCE_SQL,
-                (
-                    run.state.value,
-                    _measure("updated_at", run.updated_at_unix_ms),
-                    run.failure.kind.value if run.failure else None,
-                    run.failure.failed_from.value if run.failure else None,
-                    run.failure.detail if run.failure else "",
-                    run.run_id.value,
-                    expected.value,
-                ),
+                rows.ADVANCE_SQL, rows.advance_columns(run, expected)
             )
         # An UPDATE that matches nothing is success in SQLite. Without this
         # check the compare-and-swap buys nothing at all.
@@ -653,95 +428,31 @@ class SqliteRunRepository:
 
     def _finalise(self, record: RunRecord, expected: RunState) -> None:
         cursor = self._conn.execute(
-            _FINISH_SQL,
-            {**_run_columns(record), "expected_state": expected.value},
+            rows.FINISH_SQL,
+            {**rows.run_columns(record), "expected_state": expected.value},
         )
         if cursor.rowcount != 1:
             raise ConcurrentModification(
                 f"{record.run.run_id} was not in state {expected.value}"
             )
 
+        run_id = record.run.run_id
         if record.report is not None:
-            self._write_report(record.run.run_id, record.report)
+            self._write_report(run_id, record.report)
         for seq, invocation in enumerate(record.invocations):
-            self._write_invocation(record.run.run_id, seq, invocation)
-
-    def _write_report(self, run_id: RunId, report: ValidationReport) -> None:
-        self._conn.execute(
-            "INSERT INTO validation_reports VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-            (
-                run_id.value,
-                report.schema_version,
-                report.runner_version,
-                report.arch,
-                _flag(report.pid1),
-                report.shell,
-                report.workdir,
-                _measure("started_at", report.started_at_unix_ms),
-                _measure("wall_ms", report.wall_ms),
-                report.exit_reason.value,
-                _flag(report.aborted),
-                _measure("orphans", report.orphans_reaped_total),
-            ),
-        )
-        for result in report.commands:
             self._conn.execute(
-                "INSERT INTO command_results VALUES "
-                "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    run_id.value,
-                    result.index,
-                    result.command,
-                    _measure("started_at", result.started_at_unix_ms),
-                    _measure("duration_ms", result.duration_ms),
-                    result.outcome.value,
-                    result.exit_code,
-                    result.signal,
-                    _flag(result.timed_out),
-                    _flag(result.deadline_signal_sent),
-                    _flag(result.killed_after_grace),
-                    _flag(result.group_escaped),
-                    _flag(result.drain_deadline_hit),
-                    _measure("orphans", result.orphans_reaped),
-                    result.spawn_error,
-                    _measure("stdout_total", result.stdout.bytes_total),
-                    _measure("stdout_written", result.stdout.bytes_written),
-                    _flag(result.stdout.truncated),
-                    result.stdout.path,
-                    result.stdout.tail,
-                    _measure("stderr_total", result.stderr.bytes_total),
-                    _measure("stderr_written", result.stderr.bytes_written),
-                    _flag(result.stderr.truncated),
-                    result.stderr.path,
-                    result.stderr.tail,
-                ),
+                rows.INVOCATION_SQL, rows.invocation_columns(run_id, seq, invocation)
             )
 
-    def _write_invocation(
-        self, run_id: RunId, seq: int, invocation: ModelInvocation
-    ) -> None:
-        self._conn.execute(
-            "INSERT INTO model_invocations VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (
-                run_id.value,
-                seq,
-                invocation.provider_id,
-                invocation.model_id,
-                _measure("input_tokens", invocation.usage.input_tokens),
-                _measure("output_tokens", invocation.usage.output_tokens),
-                _measure("cache_write", invocation.usage.cache_write_tokens),
-                _measure("cache_read", invocation.usage.cache_read_tokens),
-                _measure("cost", int(invocation.cost)),
-                _measure("latency_ms", invocation.latency_ms),
-            ),
-        )
+    def _write_report(self, run_id: RunId, report: ValidationReport) -> None:
+        self._conn.execute(rows.REPORT_SQL, rows.report_columns(run_id, report))
+        for result in report.commands:
+            self._conn.execute(rows.COMMAND_SQL, rows.command_columns(run_id, result))
 
     # --- reads --------------------------------------------------------------
 
     def get(self, run_id: RunId) -> RunRecord | None:
-        row = self._conn.execute(
-            "SELECT * FROM runs WHERE run_id = ?", (run_id.value,)
-        ).fetchone()
+        row = self._conn.execute(rows.GET_SQL, {"run_id": run_id.value}).fetchone()
         return None if row is None else self._hydrate(row)
 
     def list_runs(self, limit: int | None = 50) -> tuple[RunRecord, ...]:
@@ -751,168 +462,40 @@ class SqliteRunRepository:
         would produce a table that looks complete and is not -- the denominator
         shrinking with no indication that it had.
         """
-        rows = self._conn.execute(
-            "SELECT * FROM runs ORDER BY created_at_unix_ms DESC, run_id DESC LIMIT ?",
-            # SQLite reads a negative LIMIT as no limit, which keeps this one
-            # statement rather than branching into two that could drift.
-            (-1 if limit is None else limit,),
-        ).fetchall()
-        return tuple(self._hydrate(row) for row in rows)
+        if limit is None:
+            found = self._conn.execute(rows.LIST_ALL_SQL).fetchall()
+        else:
+            found = self._conn.execute(rows.LIST_SQL, {"limit": limit}).fetchall()
+        return tuple(self._hydrate(row) for row in found)
 
     def list_unfinished(self) -> tuple[RunRecord, ...]:
-        rows = self._conn.execute(
-            "SELECT * FROM runs WHERE state NOT IN ('scored','failed','aborted') "
-            "ORDER BY created_at_unix_ms"
-        ).fetchall()
-        return tuple(self._hydrate(row) for row in rows)
+        found = self._conn.execute(rows.UNFINISHED_SQL).fetchall()
+        return tuple(self._hydrate(row) for row in found)
 
     def _hydrate(self, row: sqlite3.Row) -> RunRecord:
-        """Rebuild a record through the domain's own constructors.
-
-        Every __post_init__ runs here, so the read path is the validation path
-        and a row that violates an invariant fails loudly rather than becoming
-        a plausible wrong number.
-        """
-        state = RunState(row["state"])
-        failure = (
-            HarnessFailure(
-                kind=FailureCategory(row["failure_kind"]),
-                failed_from=RunState(row["failure_from"]),
-                detail=row["failure_detail"],
-            )
-            if row["failure_kind"]
-            else None
-        )
-        run = EvaluationRun(
-            run_id=RunId(row["run_id"]),
-            task_id=TaskId(row["task_id"]),
-            state=state,
-            created_at_unix_ms=row["created_at_unix_ms"],
-            updated_at_unix_ms=row["updated_at_unix_ms"],
-            failure=failure,
-        )
-        score = (
-            Score(
-                resolved=bool(row["resolved"]),
-                regressed=bool(row["regressed"]),
-                fail_to_pass_passed=row["f2p_passed"],
-                fail_to_pass_total=row["f2p_total"],
-                pass_to_pass_passed=row["p2p_passed"],
-                pass_to_pass_total=row["p2p_total"],
-                timed_out_commands=row["timed_out_commands"],
-            )
-            if row["resolved"] is not None
-            else None
-        )
-        return RunRecord(
-            run=run,
-            suite=Suite(row["suite"]),
-            fixture_sha256=row["fixture_sha256"],
-            runner_id=row["runner_id"],
-            runner_version=row["runner_version"],
-            arch=row["arch"],
-            pid1=bool(row["pid1"]),
-            report=self._read_report(run.run_id),
-            score=score,
-            outcome=AgentOutcome(row["outcome"]) if row["outcome"] else None,
-            task_defect=bool(row["task_defect"]),
-            patch_sha256=row["patch_sha256"],
-            patch_bytes=row["patch_bytes"],
-            patch_is_empty=(
-                None if row["patch_is_empty"] is None else bool(row["patch_is_empty"])
-            ),
-            invocations=self._read_invocations(run.run_id),
-            total_cost_micros=MicroUsd(row["total_cost_micros"]),
-            agent_ms=row["agent_ms"],
-            validation_ms=row["validation_ms"],
-            workspace_path=row["workspace_path"],
-            image_digest=row["image_digest"],
-            agent_note=row["agent_note"],
-            agent_id=row["agent_id"],
-            provider_id=row["provider_id"],
-            model_id=row["model_id"],
-            prompt_id=row["prompt_id"],
-            harness_version=row["harness_version"],
+        run_id = RunId(row["run_id"])
+        return rows.hydrate_run(
+            row, self._read_report(run_id), self._read_invocations(run_id)
         )
 
     def _read_report(self, run_id: RunId) -> ValidationReport | None:
-        header = self._conn.execute(
-            "SELECT * FROM validation_reports WHERE run_id = ?", (run_id.value,)
-        ).fetchone()
+        key = {"run_id": run_id.value}
+        header = self._conn.execute(rows.REPORT_HEADER_SQL, key).fetchone()
         if header is None:
             return None
-        rows = self._conn.execute(
-            "SELECT * FROM command_results WHERE run_id = ? ORDER BY idx",
-            (run_id.value,),
-        ).fetchall()
-        return ValidationReport(
-            schema_version=header["schema_version"],
-            runner_version=header["runner_version"],
-            arch=header["arch"],
-            pid1=bool(header["pid1"]),
-            shell=header["shell"],
-            workdir=header["workdir"],
-            started_at_unix_ms=header["started_at_unix_ms"],
-            wall_ms=header["wall_ms"],
-            exit_reason=ExitReason(header["exit_reason"]),
-            aborted=bool(header["aborted"]),
-            orphans_reaped_total=header["orphans_reaped_total"],
-            commands=tuple(self._hydrate_command(row) for row in rows),
-        )
-
-    def _hydrate_command(self, row: sqlite3.Row) -> CommandResult:
-        def stream(prefix: str) -> StreamCapture:
-            return StreamCapture(
-                bytes_total=row[f"{prefix}_bytes_total"],
-                bytes_written=row[f"{prefix}_bytes_written"],
-                truncated=bool(row[f"{prefix}_truncated"]),
-                path=row[f"{prefix}_path"],
-                tail=row[f"{prefix}_tail"],
-            )
-
-        return CommandResult(
-            index=row["idx"],
-            command=row["command"],
-            started_at_unix_ms=row["started_at_unix_ms"],
-            duration_ms=row["duration_ms"],
-            outcome=CommandOutcome(row["outcome"]),
-            stdout=stream("stdout"),
-            stderr=stream("stderr"),
-            exit_code=row["exit_code"],
-            signal=row["signal"],
-            timed_out=bool(row["timed_out"]),
-            deadline_signal_sent=bool(row["deadline_signal_sent"]),
-            killed_after_grace=bool(row["killed_after_grace"]),
-            group_escaped=bool(row["group_escaped"]),
-            drain_deadline_hit=bool(row["drain_deadline_hit"]),
-            orphans_reaped=row["orphans_reaped"],
-            spawn_error=row["spawn_error"],
+        return rows.hydrate_report(
+            header, self._conn.execute(rows.COMMANDS_SQL, key).fetchall()
         )
 
     def _read_invocations(self, run_id: RunId) -> tuple[ModelInvocation, ...]:
-        rows = self._conn.execute(
-            "SELECT * FROM model_invocations WHERE run_id = ? ORDER BY seq",
-            (run_id.value,),
+        found = self._conn.execute(
+            rows.INVOCATIONS_SQL, {"run_id": run_id.value}
         ).fetchall()
-        return tuple(
-            ModelInvocation(
-                provider_id=row["provider_id"],
-                model_id=row["model_id"],
-                usage=ModelUsage(
-                    input_tokens=row["input_tokens"],
-                    output_tokens=row["output_tokens"],
-                    cache_write_tokens=row["cache_write_tokens"],
-                    cache_read_tokens=row["cache_read_tokens"],
-                ),
-                cost=MicroUsd(row["cost_micros"]),
-                latency_ms=row["latency_ms"],
-            )
-            for row in rows
-        )
+        return tuple(rows.hydrate_invocation(row) for row in found)
 
     def column_types(self) -> Iterator[tuple[str, str, str]]:
         """(table, column, declared type) for every column. Used by a test."""
-        for table in _TABLES:
+        for table in rows.TABLES:
             with closing(self._conn.execute(f"PRAGMA table_info({table})")) as cursor:
                 for row in cursor.fetchall():
                     yield table, row["name"], row["type"]
@@ -942,5 +525,5 @@ class SqliteRunRepository:
                 )
                 for pragma in ("table_info", "index_list", "foreign_key_list")
             }
-            for table in _TABLES
+            for table in rows.TABLES
         }
