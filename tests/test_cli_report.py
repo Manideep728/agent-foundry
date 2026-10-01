@@ -23,6 +23,7 @@ from control_plane.domain.record import RunRecord
 from control_plane.domain.states import EvaluationRun, RunState
 from control_plane.domain.task import Suite
 from control_plane.interface.cli import main
+from tests.postgres_support import fresh_schema, requires_postgres
 
 REPO = Path(__file__).resolve().parent.parent
 TASKS = REPO / "tasks"
@@ -327,3 +328,37 @@ def test_a_single_pass_gets_no_agreement_table(tmp_path: Path) -> None:
     report(tmp_path, "--out", str(tmp_path / "report.md"))
 
     assert "agree across their repeats" not in read_report(tmp_path)
+
+
+@pytest.mark.postgres
+@requires_postgres
+def test_a_suite_benched_into_postgres_reports_like_one_in_sqlite(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The commands take a URL where they took a path, and nothing else moves."""
+    directory = suite_of(tmp_path, "pagination-last-page", "interval-merge")
+    with fresh_schema() as url:
+        code = main(
+            [
+                "bench",
+                str(directory),
+                "--db",
+                url,
+                "--runs",
+                str(tmp_path / "runs"),
+                "--fixtures",
+                str(FIXTURES),
+                "--solutions",
+                str(SOLUTIONS),
+                "--runner",
+                "local",
+            ]
+        )
+        capsys.readouterr()
+        assert code == 0
+
+        assert main(["report", "--db", url, "--out", "-"]) == 0
+
+    text = capsys.readouterr().out
+    assert "| resolved | 2/2 |" in text
+    assert "| interval-merge | clean_patch | yes | no |" in text

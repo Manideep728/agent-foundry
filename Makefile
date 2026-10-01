@@ -86,6 +86,14 @@ kafka-up:
 kafka-down:
 	docker stop af-kafka
 
+## pg-up: start the development PostgreSQL
+pg-up:
+	sh infra/postgres/server.sh
+
+## pg-down: stop the development PostgreSQL; its data is kept
+pg-down:
+	docker stop af-postgres
+
 ## fanout-check: measure the suite over Kafka and compare it with af bench
 fanout-check:
 	AF_IMAGE=$(RUNNER_IMAGE) sh infra/kafka/fanout-check.sh

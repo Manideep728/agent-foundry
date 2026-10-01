@@ -51,7 +51,11 @@ from control_plane.adapters.record_json import decode as decode_result
 from control_plane.adapters.record_json import encode as encode_result
 from control_plane.adapters.run_lock import DatabaseBusy
 from control_plane.adapters.single_shot_agent import SingleShotAgent
-from control_plane.adapters.storage import database_exists, open_repository
+from control_plane.adapters.storage import (
+    database_exists,
+    display_name,
+    open_repository,
+)
 from control_plane.adapters.system import (
     SystemClock,
     UuidIdGenerator,
@@ -1206,7 +1210,7 @@ def run_collector(args: argparse.Namespace) -> int:
                 )
                 print(
                     f"{PROGRAM}: collecting from {RUN_RESULTS_TOPIC} at "
-                    f"{args.bootstrap} into {args.db}",
+                    f"{args.bootstrap} into {display_name(args.db)}",
                     file=sys.stderr,
                 )
                 poll_until(
@@ -1242,7 +1246,7 @@ def run_collector(args: argparse.Namespace) -> int:
 
 def show_run(args: argparse.Namespace) -> int:
     if not database_exists(args.db):
-        print(f"{PROGRAM}: no database at {args.db}", file=sys.stderr)
+        print(f"{PROGRAM}: no database at {display_name(args.db)}", file=sys.stderr)
         return EXIT_USAGE
     with open_repository(args.db, exclusive=False) as repository:
         try:
@@ -1259,7 +1263,7 @@ def show_run(args: argparse.Namespace) -> int:
 
 def write_report(args: argparse.Namespace) -> int:
     if not database_exists(args.db):
-        print(f"{PROGRAM}: no database at {args.db}", file=sys.stderr)
+        print(f"{PROGRAM}: no database at {display_name(args.db)}", file=sys.stderr)
         return EXIT_USAGE
 
     with open_repository(args.db, exclusive=False) as repository:
@@ -1271,13 +1275,13 @@ def write_report(args: argparse.Namespace) -> int:
         # Never EXIT_MEASURED, for the reason `bench` gives: a report of
         # nothing that exits 0 is a green CI job asserting that zero tasks
         # passed.
-        print(f"{PROGRAM}: no runs in {args.db}", file=sys.stderr)
+        print(f"{PROGRAM}: no runs in {display_name(args.db)}", file=sys.stderr)
         return EXIT_USAGE
 
     text = render(
         records,
         generated_at_unix_ms=SystemClock().now_unix_ms(),
-        source=str(args.db),
+        source=display_name(args.db),
     )
 
     pending = unfinished(records)
@@ -1299,7 +1303,7 @@ def write_report(args: argparse.Namespace) -> int:
 
 def list_runs(args: argparse.Namespace) -> int:
     if not database_exists(args.db):
-        print(f"{PROGRAM}: no database at {args.db}", file=sys.stderr)
+        print(f"{PROGRAM}: no database at {display_name(args.db)}", file=sys.stderr)
         return EXIT_USAGE
     with open_repository(args.db, exclusive=False) as repository:
         records = repository.list_runs(args.limit)

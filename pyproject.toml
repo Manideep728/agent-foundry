@@ -16,8 +16,12 @@ dependencies = []
 # bench` must keep installing and working on a machine with no broker and no
 # librdkafka. Only `af dispatch`, `af worker` and `af collect` require this,
 # and each fails with an installation hint rather than an ImportError.
+#
+# PostgreSQL is an extra for the same reason: SQLite is the default store and
+# ships with Python. Only a `--db postgresql://...` needs the driver.
 [project.optional-dependencies]
 kafka = ["confluent-kafka>=2.6,<3"]
+postgres = ["psycopg[binary]>=3.2,<4"]
 
 [project.scripts]
 af = "control_plane.interface.cli:main"
@@ -39,6 +43,11 @@ dev = [
     "pytest>=8.3",
     "ruff>=0.7",
     "mypy>=1.13",
+    # The Postgres driver is optional at run time and always present in
+    # development, so the type checker and the shared repository contract see
+    # it on every machine. The contract's Postgres half still skips with no
+    # server.
+    "psycopg[binary]>=3.2,<4",
 ]
 
 [tool.pytest.ini_options]
@@ -62,6 +71,7 @@ markers = [
     # the suite depends on, so it is the thing that must be verified, not
     # merely trusted.
     "kafka: requires a Kafka broker on AF_KAFKA_BOOTSTRAP (default localhost:9092)",
+    "postgres: requires a PostgreSQL server at AF_PG_URL (make pg-up)",
 ]
 
 [tool.ruff]
