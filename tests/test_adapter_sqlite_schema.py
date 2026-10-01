@@ -38,7 +38,7 @@ from control_plane.adapters.run_rows import (
 )
 from control_plane.adapters.sqlite_repo import _SCHEMA
 from control_plane.domain.record import RunRecord
-from tests.test_adapter_sqlite_repo import base_record, new_run
+from tests.test_repository_contract import base_record, new_run
 
 
 def record_fields() -> frozenset[str]:

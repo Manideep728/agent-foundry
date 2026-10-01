@@ -1,4 +1,8 @@
-"""Persistence.
+"""The run repository contract, held by every store.
+
+Each test runs against SQLite and against PostgreSQL. The services see only
+`RunRepository`, so a behaviour that differs between the two is a behaviour no
+service can rely on, and this is where such a difference shows up.
 
 The read path is the validation path: rehydration goes through the domain's
 own constructors, so a row that violates an invariant fails loudly instead of
@@ -7,11 +11,13 @@ becoming a plausible wrong number.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import MISSING, fields, replace
 from pathlib import Path
 
 import pytest
 
+from control_plane.adapters.postgres_repo import PostgresRunRepository
 from control_plane.adapters.sqlite_repo import SqliteRunRepository
 from control_plane.domain.ids import RunId, TaskId
 from control_plane.domain.model import MicroUsd, ModelInvocation, ModelUsage
@@ -29,11 +35,23 @@ from control_plane.domain.validation import (
     ValidationReport,
 )
 from tests.fakes import EPOCH_MS
+from tests.postgres_support import fresh_schema, requires_postgres
+
+Repository = SqliteRunRepository | PostgresRunRepository
 
 
-@pytest.fixture
-def repo(tmp_path: Path):  # type: ignore[no-untyped-def]
-    with SqliteRunRepository(tmp_path / "af.sqlite3") as repository:
+@pytest.fixture(
+    params=[
+        "sqlite",
+        pytest.param("postgres", marks=[pytest.mark.postgres, requires_postgres]),
+    ]
+)
+def repo(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Repository]:
+    if request.param == "sqlite":
+        with SqliteRunRepository(tmp_path / "af.sqlite3") as repository:
+            yield repository
+        return
+    with fresh_schema() as url, PostgresRunRepository(url) as repository:
         yield repository
 
 
@@ -115,7 +133,7 @@ def a_score() -> Score:
 # --- create and idempotency --------------------------------------------------
 
 
-def test_a_created_run_reads_back(repo: SqliteRunRepository) -> None:
+def test_a_created_run_reads_back(repo: Repository) -> None:
     repo.create(base_record(new_run()))
     stored = repo.get(RunId("run-0001"))
 
@@ -126,7 +144,7 @@ def test_a_created_run_reads_back(repo: SqliteRunRepository) -> None:
 
 
 def test_a_created_run_records_its_workspace_before_it_exists(
-    repo: SqliteRunRepository,
+    repo: Repository,
 ) -> None:
     """`create`, not just `finish`, persists the workspace path.
 
@@ -141,7 +159,7 @@ def test_a_created_run_records_its_workspace_before_it_exists(
     assert stored.workspace_path == "/runs/run-0001"
 
 
-def test_recording_the_same_run_twice_is_refused(repo: SqliteRunRepository) -> None:
+def test_recording_the_same_run_twice_is_refused(repo: Repository) -> None:
     from control_plane.services.errors import RunAlreadyExists
 
     repo.create(base_record(new_run()))
@@ -150,7 +168,7 @@ def test_recording_the_same_run_twice_is_refused(repo: SqliteRunRepository) -> N
 
 
 def test_a_refused_duplicate_leaves_the_original_intact(
-    repo: SqliteRunRepository,
+    repo: Repository,
 ) -> None:
     # INSERT OR REPLACE would silently destroy a previous run's record, which
     # for an evaluation harness is the data loss the project exists to prevent.
@@ -169,24 +187,23 @@ def test_a_refused_duplicate_leaves_the_original_intact(
 
 
 def test_a_constraint_failure_is_not_reported_as_a_duplicate(
-    repo: SqliteRunRepository,
+    repo: Repository,
 ) -> None:
     # A failed row inserted without its failure columns breaks a CHECK, not
     # the primary key. Reported as "already recorded", it sent the diagnosis
-    # looking for a second copy of a run that did not exist.
-    import sqlite3
-
+    # looking for a second copy of a run that did not exist. Each driver raises
+    # its own error type; both name the check.
     from control_plane.services.errors import RunAlreadyExists
 
     failed = new_run().fail(FailureCategory.RUNNER_FAILED, EPOCH_MS + 1)
 
-    with pytest.raises(sqlite3.IntegrityError, match="CHECK") as raised:
+    with pytest.raises(Exception, match=r"(?i)check") as raised:
         repo.create(base_record(failed))
     assert not isinstance(raised.value, RunAlreadyExists)
     assert repo.get(RunId("run-0001")) is None
 
 
-def test_getting_an_unknown_run_returns_none(repo: SqliteRunRepository) -> None:
+def test_getting_an_unknown_run_returns_none(repo: Repository) -> None:
     assert repo.get(RunId("run-9999")) is None
 
 
@@ -194,7 +211,7 @@ def test_getting_an_unknown_run_returns_none(repo: SqliteRunRepository) -> None:
 
 
 def test_a_state_advance_requires_the_expected_prior_state(
-    repo: SqliteRunRepository,
+    repo: Repository,
 ) -> None:
     from control_plane.services.errors import ConcurrentModification
 
@@ -211,9 +228,9 @@ def test_a_state_advance_requires_the_expected_prior_state(
 
 
 def test_an_update_matching_no_rows_raises_rather_than_passing(
-    repo: SqliteRunRepository,
+    repo: Repository,
 ) -> None:
-    # An UPDATE that matches nothing is *success* in SQLite. This asserts the
+    # An UPDATE that matches nothing is *success* in SQL. This asserts the
     # rowcount check is what turns that into a failure.
     from control_plane.services.errors import ConcurrentModification
 
@@ -227,7 +244,7 @@ def test_an_update_matching_no_rows_raises_rather_than_passing(
 # --- the terminal write ------------------------------------------------------
 
 
-def advance_to_validating(repo: SqliteRunRepository) -> EvaluationRun:
+def advance_to_validating(repo: Repository) -> EvaluationRun:
     run = new_run()
     repo.create(base_record(run))
     for state, at in (
@@ -241,7 +258,7 @@ def advance_to_validating(repo: SqliteRunRepository) -> EvaluationRun:
     return run
 
 
-def test_a_scored_run_round_trips_completely(repo: SqliteRunRepository) -> None:
+def test_a_scored_run_round_trips_completely(repo: Repository) -> None:
     run = advance_to_validating(repo)
     scored = run.transition_to(RunState.SCORED, EPOCH_MS + 4)
     usage = ModelUsage(input_tokens=5000, output_tokens=500)
@@ -284,7 +301,7 @@ def test_a_scored_run_round_trips_completely(repo: SqliteRunRepository) -> None:
 
 
 def test_a_failed_run_keeps_its_reason_and_the_state_it_failed_from(
-    repo: SqliteRunRepository,
+    repo: Repository,
 ) -> None:
     run = advance_to_validating(repo)
     failed = run.fail(FailureCategory.RUNNER_FAILED, EPOCH_MS + 4, "no result file")
@@ -300,7 +317,7 @@ def test_a_failed_run_keeps_its_reason_and_the_state_it_failed_from(
     assert stored.outcome is None
 
 
-def test_a_task_defect_keeps_its_evidence(repo: SqliteRunRepository) -> None:
+def test_a_task_defect_keeps_its_evidence(repo: Repository) -> None:
     # FAILED implies no outcome, but report and score are evidence and must
     # survive -- otherwise the defect is unactionable.
     run = advance_to_validating(repo)
@@ -353,7 +370,7 @@ stores that shape on its own.
 """
 
 
-def configured_run(repo: SqliteRunRepository) -> EvaluationRun:
+def configured_run(repo: Repository) -> EvaluationRun:
     """Create a run the way the service does, then take it to VALIDATING.
 
     The created row holds the configuration and a guessed environment: no
@@ -412,7 +429,7 @@ def fully_populated(run: EvaluationRun) -> RunRecord:
 
 
 def test_a_finished_run_reads_back_exactly_as_it_was_written(
-    repo: SqliteRunRepository,
+    repo: Repository,
 ) -> None:
     """The guard for a value computed correctly and then not written down.
 
@@ -430,7 +447,7 @@ def test_a_finished_run_reads_back_exactly_as_it_was_written(
 
 
 def test_the_round_trip_record_leaves_no_field_at_its_default(
-    repo: SqliteRunRepository,
+    repo: Repository,
 ) -> None:
     """The hole in the test above: a field whose two sides are both None.
 
@@ -452,18 +469,19 @@ def test_the_round_trip_record_leaves_no_field_at_its_default(
 # --- the float guard ---------------------------------------------------------
 
 
-def test_no_column_is_declared_real(repo: SqliteRunRepository) -> None:
+def test_no_column_is_declared_real(repo: Repository) -> None:
     # The storage-layer sibling of the two AST guards. STRICT rejects 1.5 but
     # silently coerces 2.0, so the schema itself has to be checked.
     real_columns = [
         (table, column)
         for table, column, declared in repo.column_types()
-        if declared.upper() in {"REAL", "FLOAT", "DOUBLE", "NUMERIC"}
+        if declared.upper()
+        in {"REAL", "FLOAT", "DOUBLE", "DOUBLE PRECISION", "NUMERIC"}
     ]
     assert not real_columns
 
 
-def test_a_float_measurement_is_rejected(repo: SqliteRunRepository) -> None:
+def test_a_float_measurement_is_rejected(repo: Repository) -> None:
     run = advance_to_validating(repo)
     scored = run.transition_to(RunState.SCORED, EPOCH_MS + 4)
 
@@ -484,7 +502,7 @@ def test_a_float_measurement_is_rejected(repo: SqliteRunRepository) -> None:
 # --- listing -----------------------------------------------------------------
 
 
-def test_unfinished_runs_are_listed_for_recovery(repo: SqliteRunRepository) -> None:
+def test_unfinished_runs_are_listed_for_recovery(repo: Repository) -> None:
     advance_to_validating(repo)
 
     done = EvaluationRun.create(RunId("run-0002"), TaskId("t"), EPOCH_MS)
@@ -494,7 +512,7 @@ def test_unfinished_runs_are_listed_for_recovery(repo: SqliteRunRepository) -> N
     assert {r.run.run_id.value for r in unfinished} == {"run-0001", "run-0002"}
 
 
-def test_a_terminal_run_is_not_listed_as_unfinished(repo: SqliteRunRepository) -> None:
+def test_a_terminal_run_is_not_listed_as_unfinished(repo: Repository) -> None:
     run = advance_to_validating(repo)
     repo.finish(
         base_record(run.fail(FailureCategory.INTERRUPTED, EPOCH_MS + 9)),
@@ -503,7 +521,7 @@ def test_a_terminal_run_is_not_listed_as_unfinished(repo: SqliteRunRepository) -
     assert repo.list_unfinished() == ()
 
 
-def test_a_database_from_a_newer_build_is_refused(tmp_path: Path) -> None:
+def test_a_sqlite_database_from_a_newer_build_is_refused(tmp_path: Path) -> None:
     path = tmp_path / "af.sqlite3"
     SqliteRunRepository(path).close()
 
@@ -517,7 +535,7 @@ def test_a_database_from_a_newer_build_is_refused(tmp_path: Path) -> None:
 
 
 def test_the_stored_environment_is_the_one_validation_ran_on(
-    repo: SqliteRunRepository,
+    repo: Repository,
 ) -> None:
     """finish() must rewrite the environment columns create() could only guess.
 
@@ -563,3 +581,49 @@ def test_the_stored_environment_is_the_one_validation_ran_on(
     assert stored.arch == "x86_64"
     assert stored.pid1 is True
     assert stored.runner_version == "afrunner in docker image afrunner:local"
+
+
+# --- what only a server store has ---------------------------------------------
+
+
+@pytest.mark.postgres
+@requires_postgres
+def test_a_postgres_database_from_a_newer_build_is_refused() -> None:
+    import psycopg
+
+    with fresh_schema() as url:
+        PostgresRunRepository(url).close()
+        with psycopg.connect(url, autocommit=True) as conn:
+            conn.execute("UPDATE schema_version SET version = 99")
+
+        with pytest.raises(RuntimeError, match="newer build"):
+            PostgresRunRepository(url)
+
+
+@pytest.mark.postgres
+@requires_postgres
+def test_opening_an_existing_postgres_database_keeps_its_runs() -> None:
+    """Setup runs on every open. It must create once and then leave alone."""
+    with fresh_schema() as url:
+        with PostgresRunRepository(url) as first:
+            first.create(base_record(new_run()))
+        with PostgresRunRepository(url) as second:
+            assert second.get(RunId("run-0001")) is not None
+
+
+@pytest.mark.postgres
+@requires_postgres
+def test_the_postgres_run_lock_admits_one_holder_until_it_disconnects() -> None:
+    """The D17 lock across machines: a session advisory lock, released by the
+    server when the holder's connection ends, however it ends."""
+    with fresh_schema() as url:
+        holder = PostgresRunRepository(url)
+        try:
+            assert holder.try_hold_run_lock()
+            with PostgresRunRepository(url) as rival:
+                assert not rival.try_hold_run_lock()
+        finally:
+            holder.close()
+
+        with PostgresRunRepository(url) as successor:
+            assert successor.try_hold_run_lock()
