@@ -160,7 +160,10 @@ _CREATE_SQL = (
     " updated_at_unix_ms, fixture_sha256, runner_id, "
     " runner_version, arch, pid1, workspace_path, "
     " agent_id, provider_id, model_id, prompt_id, harness_version) "
-    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+    "VALUES (:run_id, :task_id, :suite, :state, :created_at_unix_ms, "
+    " :updated_at_unix_ms, :fixture_sha256, :runner_id, "
+    " :runner_version, :arch, :pid1, :workspace_path, "
+    " :agent_id, :provider_id, :model_id, :prompt_id, :harness_version)"
 )
 
 _ADVANCE_SQL = (
@@ -170,16 +173,20 @@ _ADVANCE_SQL = (
 )
 
 _FINISH_SQL = (
-    "UPDATE runs SET state = ?, updated_at_unix_ms = ?, "
-    "failure_kind = ?, failure_from = ?, failure_detail = ?, "
-    "runner_version = ?, arch = ?, pid1 = ?, "
-    "outcome = ?, resolved = ?, regressed = ?, f2p_passed = ?, "
-    "f2p_total = ?, p2p_passed = ?, p2p_total = ?, "
-    "timed_out_commands = ?, task_defect = ?, patch_sha256 = ?, "
-    "patch_bytes = ?, patch_is_empty = ?, total_cost_micros = ?, "
-    "agent_ms = ?, validation_ms = ?, workspace_path = ?, "
-    "image_digest = ?, agent_note = ? "
-    "WHERE run_id = ? AND state = ?"
+    "UPDATE runs SET state = :state, updated_at_unix_ms = :updated_at_unix_ms, "
+    "failure_kind = :failure_kind, failure_from = :failure_from, "
+    "failure_detail = :failure_detail, "
+    "runner_version = :runner_version, arch = :arch, pid1 = :pid1, "
+    "outcome = :outcome, resolved = :resolved, regressed = :regressed, "
+    "f2p_passed = :f2p_passed, f2p_total = :f2p_total, "
+    "p2p_passed = :p2p_passed, p2p_total = :p2p_total, "
+    "timed_out_commands = :timed_out_commands, task_defect = :task_defect, "
+    "patch_sha256 = :patch_sha256, patch_bytes = :patch_bytes, "
+    "patch_is_empty = :patch_is_empty, total_cost_micros = :total_cost_micros, "
+    "agent_ms = :agent_ms, validation_ms = :validation_ms, "
+    "workspace_path = :workspace_path, image_digest = :image_digest, "
+    "agent_note = :agent_note "
+    "WHERE run_id = :run_id AND state = :expected_state"
 )
 """The three statements that write `runs`, lifted out of their methods.
 
@@ -188,6 +195,9 @@ now been a column missing from one of these lists while the value that belongs
 in it was computed correctly -- `arch` and `pid1`, `workspace_path` before
 them. A comment asking the next author to keep the lists in step is what was
 there when each of those shipped.
+
+The values are bound by name from `_run_columns`, never by position, so a list
+that names the right columns cannot feed them in the wrong order.
 """
 
 
@@ -360,6 +370,65 @@ _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
 )
 
 
+def _run_columns(record: RunRecord) -> dict[str, object]:
+    """Every column of `runs`, by name, as one record says it.
+
+    The single place a record becomes a row. Each statement binds the names it
+    writes, so `create` and `finish` read the same value for a column by
+    construction, and a test can compare these keys against the table.
+
+    `create` writes some columns before they are known -- arch 'unknown', pid1
+    False -- because the row must exist, and name its workspace, before the
+    run can die leaving one behind. `finish` writes them again.
+    """
+    run = record.run
+    failure = run.failure
+    score = record.score
+    return {
+        "run_id": run.run_id.value,
+        "task_id": run.task_id.value,
+        "suite": record.suite.value,
+        "state": run.state.value,
+        "created_at_unix_ms": _measure("created_at", run.created_at_unix_ms),
+        "updated_at_unix_ms": _measure("updated_at", run.updated_at_unix_ms),
+        "failure_kind": failure.kind.value if failure else None,
+        "failure_from": failure.failed_from.value if failure else None,
+        "failure_detail": failure.detail if failure else "",
+        "fixture_sha256": record.fixture_sha256,
+        "runner_id": record.runner_id,
+        "runner_version": record.runner_version,
+        "arch": record.arch,
+        "pid1": _flag(record.pid1),
+        "outcome": record.outcome.value if record.outcome else None,
+        "resolved": _flag(score.resolved) if score else None,
+        "regressed": _flag(score.regressed) if score else None,
+        "f2p_passed": score.fail_to_pass_passed if score else None,
+        "f2p_total": score.fail_to_pass_total if score else None,
+        "p2p_passed": score.pass_to_pass_passed if score else None,
+        "p2p_total": score.pass_to_pass_total if score else None,
+        "timed_out_commands": score.timed_out_commands if score else None,
+        "task_defect": _flag(record.task_defect),
+        "patch_sha256": record.patch_sha256,
+        "patch_bytes": _measure("patch_bytes", record.patch_bytes),
+        "patch_is_empty": (
+            None if record.patch_is_empty is None else _flag(record.patch_is_empty)
+        ),
+        "total_cost_micros": _measure(
+            "total_cost_micros", int(record.total_cost_micros)
+        ),
+        "agent_ms": _measure("agent_ms", record.agent_ms),
+        "validation_ms": _measure("validation_ms", record.validation_ms),
+        "workspace_path": record.workspace_path,
+        "image_digest": record.image_digest,
+        "agent_note": record.agent_note,
+        "agent_id": record.agent_id,
+        "provider_id": record.provider_id,
+        "model_id": record.model_id,
+        "prompt_id": record.prompt_id,
+        "harness_version": record.harness_version,
+    }
+
+
 def _flag(value: bool) -> int:
     return 1 if value else 0
 
@@ -530,33 +599,7 @@ class SqliteRunRepository:
     def _insert(self, record: RunRecord, state: RunState) -> None:
         try:
             self._conn.execute(
-                _CREATE_SQL,
-                (
-                    record.run.run_id.value,
-                    record.run.task_id.value,
-                    record.suite.value,
-                    state.value,
-                    _measure("created_at", record.run.created_at_unix_ms),
-                    _measure("updated_at", record.run.updated_at_unix_ms),
-                    record.fixture_sha256,
-                    record.runner_id,
-                    record.runner_version,
-                    record.arch,
-                    _flag(record.pid1),
-                    # Recorded at creation, not at finish. The row must name
-                    # the directory before the run can die leaving one
-                    # behind, or the recovery scan has nothing to delete.
-                    record.workspace_path,
-                    # Also at creation. A run that dies before the agent is
-                    # reached is exactly the run a reliability figure is
-                    # about, and it must still say which configuration was
-                    # being measured when it died.
-                    record.agent_id,
-                    record.provider_id,
-                    record.model_id,
-                    record.prompt_id,
-                    record.harness_version,
-                ),
+                _CREATE_SQL, {**_run_columns(record), "state": state.value}
             )
         except sqlite3.IntegrityError as error:
             # Only a key violation means the run exists. A CHECK failure is a
@@ -611,36 +654,7 @@ class SqliteRunRepository:
     def _finalise(self, record: RunRecord, expected: RunState) -> None:
         cursor = self._conn.execute(
             _FINISH_SQL,
-            (
-                record.run.state.value,
-                _measure("updated_at", record.run.updated_at_unix_ms),
-                record.run.failure.kind.value if record.run.failure else None,
-                record.run.failure.failed_from.value if record.run.failure else None,
-                record.run.failure.detail if record.run.failure else "",
-                record.runner_version,
-                record.arch,
-                _flag(record.pid1),
-                record.outcome.value if record.outcome else None,
-                _flag(record.score.resolved) if record.score else None,
-                _flag(record.score.regressed) if record.score else None,
-                record.score.fail_to_pass_passed if record.score else None,
-                record.score.fail_to_pass_total if record.score else None,
-                record.score.pass_to_pass_passed if record.score else None,
-                record.score.pass_to_pass_total if record.score else None,
-                record.score.timed_out_commands if record.score else None,
-                _flag(record.task_defect),
-                record.patch_sha256,
-                _measure("patch_bytes", record.patch_bytes),
-                None if record.patch_is_empty is None else _flag(record.patch_is_empty),
-                _measure("total_cost_micros", int(record.total_cost_micros)),
-                _measure("agent_ms", record.agent_ms),
-                _measure("validation_ms", record.validation_ms),
-                record.workspace_path,
-                record.image_digest,
-                record.agent_note,
-                record.run.run_id.value,
-                expected.value,
-            ),
+            {**_run_columns(record), "expected_state": expected.value},
         )
         if cursor.rowcount != 1:
             raise ConcurrentModification(

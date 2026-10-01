@@ -30,8 +30,10 @@ from control_plane.adapters.sqlite_repo import (
     _FIELD_COLUMNS,
     _FINISH_SQL,
     _SCHEMA,
+    _run_columns,
 )
 from control_plane.domain.record import RunRecord
+from tests.test_adapter_sqlite_repo import base_record, new_run
 
 
 def record_fields() -> frozenset[str]:
@@ -56,16 +58,29 @@ def runs_columns() -> frozenset[str]:
     return frozenset(columns)
 
 
+def assignments(sql: str) -> list[tuple[str, str]]:
+    """Each `column = placeholder` an UPDATE makes, in order."""
+    body = sql.split(" SET ", 1)[1].split(" WHERE ", 1)[0]
+    return re.findall(r"(\w+) = (\?|:\w+)", body)
+
+
 def set_columns(sql: str) -> frozenset[str]:
     """The columns an UPDATE assigns."""
-    assignments = sql.split(" SET ", 1)[1].split(" WHERE ", 1)[0]
-    return frozenset(re.findall(r"(\w+) = \?", assignments))
+    return frozenset(column for column, _ in assignments(sql))
+
+
+def insert_names(sql: str) -> tuple[list[str], list[str]]:
+    """The columns an INSERT names, and the placeholders it binds them to."""
+    columns, values = re.findall(r"\(([^)]*)\)", sql)
+    return (
+        [name.strip() for name in columns.split(",")],
+        [name.strip() for name in values.split(",")],
+    )
 
 
 def insert_columns(sql: str) -> frozenset[str]:
     """The columns an INSERT names."""
-    named = sql.split("(", 1)[1].split(")", 1)[0]
-    return frozenset(name.strip() for name in named.split(","))
+    return frozenset(insert_names(sql)[0])
 
 
 def mapped_columns() -> frozenset[str]:
@@ -156,3 +171,27 @@ def test_advancing_a_state_touches_only_the_state_and_its_failure() -> None:
             "failure_detail",
         }
     )
+
+
+def test_the_row_mapping_names_every_column_of_runs_and_nothing_else() -> None:
+    """The one function that turns a record into a row. A column it misses
+    would raise at the first write; a name it invents would bind nothing."""
+    keys = frozenset(_run_columns(base_record(new_run())))
+    assert keys == runs_columns()
+
+
+def test_finish_binds_each_column_to_the_value_of_the_same_name() -> None:
+    """The order bug, made impossible rather than tested for.
+
+    With positional placeholders a SET list could name the right columns and
+    feed them each other's values. Bound by name, `arch = :pid1` is the only
+    way left to get it wrong, and this refuses it.
+    """
+    pairs = assignments(_FINISH_SQL)
+    assert pairs, "no assignments parsed"
+    assert [(column, f":{column}") for column, _ in pairs] == pairs
+
+
+def test_create_binds_each_column_to_the_value_of_the_same_name() -> None:
+    columns, placeholders = insert_names(_CREATE_SQL)
+    assert placeholders == [f":{column}" for column in columns]
