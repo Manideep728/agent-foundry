@@ -7,6 +7,8 @@ way of getting that wrong produces a plausible figure rather than a crash.
 
 from __future__ import annotations
 
+import dataclasses
+
 from control_plane.domain.ids import RunId, TaskId
 from control_plane.domain.model import MicroUsd, ModelInvocation, ModelUsage
 from control_plane.domain.outcomes import AgentOutcome, FailureCategory
@@ -403,3 +405,120 @@ def test_a_run_with_no_prompt_groups_apart_from_one_with_a_prompt() -> None:
 
     assert len(summaries) == 2
     assert summaries[0].configuration.prompt_id is None
+
+
+# --- agreement across repeats ------------------------------------------------
+
+
+def on_task(
+    record: RunRecord,
+    task: str,
+    *,
+    patch: str | None = "p" * 64,
+    tokens: tuple[tuple[int, int], ...] = ((10, 5),),
+) -> RunRecord:
+    """The same run, moved to a task, with a chosen patch and per-call tokens."""
+    calls = tuple(
+        dataclasses.replace(
+            an_invocation(),
+            usage=ModelUsage(input_tokens=sent, output_tokens=received),
+        )
+        for sent, received in tokens
+    )
+    return dataclasses.replace(
+        record,
+        run=dataclasses.replace(record.run, task_id=TaskId(task)),
+        patch_sha256=patch if record.run.state is RunState.SCORED else None,
+        invocations=calls,
+    )
+
+
+def spread_of(*records: RunRecord) -> tuple[bool, int, int]:
+    (summary,) = summarise(records)
+    return summary.repeated, summary.tasks_agreeing, len(summary.tasks)
+
+
+def test_identical_repeats_of_a_task_agree() -> None:
+    runs = [on_task(scored(f"run-{n}"), "csv") for n in range(3)]
+
+    (summary,) = summarise(runs)
+
+    (task,) = summary.tasks
+    assert (task.task_id, task.runs, task.resolved) == ("csv", 3, 3)
+    assert task.agrees
+    assert spread_of(*runs) == (True, 1, 1)
+
+
+def test_two_patches_for_one_task_disagree_even_with_one_outcome() -> None:
+    """Both resolved, by different edits: the outcome agreed and the run did not."""
+    first = on_task(scored("run-1"), "csv", patch="a" * 64)
+    second = on_task(scored("run-2"), "csv", patch="b" * 64)
+
+    (summary,) = summarise([first, second])
+
+    assert summary.tasks[0].patches == 2
+    assert not summary.tasks[0].agrees
+
+
+def test_a_different_token_count_on_one_call_is_a_disagreement() -> None:
+    """The tell D31 was found by: same outcome and patch, and one turn read a
+    different number of tokens because an earlier reply differed."""
+    first = on_task(scored("run-1"), "csv", tokens=((10, 5), (40, 7)))
+    second = on_task(scored("run-2"), "csv", tokens=((10, 5), (41, 7)))
+
+    (summary,) = summarise([first, second])
+
+    assert summary.tasks[0].token_traces == 2
+    assert not summary.tasks[0].agrees
+
+
+def test_a_scored_run_and_a_failed_run_of_one_task_disagree() -> None:
+    first = on_task(scored("run-1"), "csv")
+    second = on_task(failed("run-2"), "csv")
+
+    (summary,) = summarise([first, second])
+
+    (task,) = summary.tasks
+    assert task.results == ("clean_patch", "infrastructure_failed")
+    assert task.resolved == 1
+    assert not task.agrees
+
+
+def test_runs_that_failed_the_same_way_agree() -> None:
+    """Consistent failure is still consistent; the summary reports it as such
+    and the failure list says what it was."""
+    runs = [on_task(failed(f"run-{n}"), "csv") for n in range(2)]
+
+    (summary,) = summarise(runs)
+
+    assert summary.tasks[0].agrees
+    assert summary.tasks[0].patches == 0
+
+
+def test_one_run_per_task_is_not_a_repeat() -> None:
+    runs = [on_task(scored("run-1"), "csv"), on_task(scored("run-2"), "semver")]
+
+    assert spread_of(*runs) == (False, 2, 2)
+
+
+def test_tasks_are_listed_in_order_and_account_for_every_run() -> None:
+    runs = [
+        on_task(scored("run-1"), "semver"),
+        on_task(scored("run-2"), "csv"),
+        on_task(scored("run-3"), "semver"),
+    ]
+
+    (summary,) = summarise(runs)
+
+    assert [(t.task_id, t.runs) for t in summary.tasks] == [("csv", 1), ("semver", 2)]
+
+
+def test_a_failed_run_adds_no_agent_time_to_its_task() -> None:
+    """The suite-level rule, held per task: failed runs contribute no latency."""
+    runs = [on_task(scored("run-1", agent_ms=100), "csv"), on_task(failed(), "csv")]
+
+    (summary,) = summarise(runs)
+
+    agent = summary.tasks[0].agent_ms
+    assert agent is not None
+    assert (agent.fastest_ms, agent.slowest_ms, agent.counted) == (100, 100, 1)

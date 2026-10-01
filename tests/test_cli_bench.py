@@ -203,7 +203,7 @@ def test_bench_defaults_to_the_tasks_directory() -> None:
     assert args.directory == Path("tasks")
 
 
-BENCH_ONLY = {"max_bench_micros"}
+BENCH_ONLY = {"max_bench_micros", "repeats"}
 """Flags that describe a suite and would do nothing on a single run.
 
 Listed, and named, so that adding to it is a decision someone takes on purpose
@@ -313,3 +313,41 @@ def test_a_ceiling_of_zero_is_a_usage_error(tmp_path: Path) -> None:
     code = main([*bench_args(tmp_path, directory), "--max-bench-micros", "0"])
 
     assert code == 2
+
+
+# --- repeats -----------------------------------------------------------------
+
+
+def test_repeats_run_the_whole_suite_again_and_compare_each_task(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The fake agent applies the same solution every time, so every task must
+    agree. A loop that ran each task once would show no agreement line at all."""
+    directory = suite_of(tmp_path, "pagination-last-page", "interval-merge")
+
+    code = main([*bench_args(tmp_path, directory), "--repeats", "2"])
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert captured.err.count("pagination-last-page") == 2
+    assert "[4/4]" in captured.err
+    assert "tasks agree   2/2" in captured.out
+
+
+def test_a_single_pass_prints_no_agreement_line(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """With one run per task, "2/2 agree" would be true and meaningless."""
+    directory = suite_of(tmp_path, "pagination-last-page", "interval-merge")
+
+    assert main(bench_args(tmp_path, directory)) == 0
+    assert "tasks agree" not in capsys.readouterr().out
+
+
+def test_repeats_below_one_is_a_usage_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    directory = suite_of(tmp_path, "interval-merge")
+
+    assert main([*bench_args(tmp_path, directory), "--repeats", "0"]) == 2
+    assert "--repeats must be at least 1" in capsys.readouterr().err

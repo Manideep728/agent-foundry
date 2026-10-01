@@ -304,3 +304,26 @@ def test_report_reads_every_run_not_the_listing_default(tmp_path: Path) -> None:
     report(tmp_path, "--out", str(tmp_path / "report.md"))
 
     assert "60 run(s) had not finished" in read_report(tmp_path)
+
+
+def test_repeated_tasks_get_a_row_saying_whether_their_runs_agreed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Benched twice into one database: two runs per task, compared per task."""
+    bench(tmp_path, "pagination-last-page", "interval-merge")
+    bench(tmp_path)
+    capsys.readouterr()
+
+    report(tmp_path, "--out", str(tmp_path / "report.md"))
+
+    text = read_report(tmp_path)
+    assert "2 of 2 task(s) agree across their repeats" in text
+    assert "| interval-merge | 2 | 2/2 | clean_patch | 1 | 1 |" in text
+
+
+def test_a_single_pass_gets_no_agreement_table(tmp_path: Path) -> None:
+    bench(tmp_path, "pagination-last-page", "interval-merge")
+
+    report(tmp_path, "--out", str(tmp_path / "report.md"))
+
+    assert "agree across their repeats" not in read_report(tmp_path)

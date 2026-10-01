@@ -158,6 +158,31 @@ def _run_row(record: RunRecord) -> str:
     )
 
 
+def _agreement(summary: SuiteSummary) -> list[str]:
+    """How each task's repeats compared, when any task was repeated.
+
+    A suite-level rate can hold steady while the tasks behind it change places,
+    so agreement is reported per task: same result, same patch, and the same
+    token count on every model call.
+    """
+    lines = [
+        f"{summary.tasks_agreeing} of {len(summary.tasks)} task(s) agree across "
+        f"their repeats on result, patch and per-call tokens.",
+        "",
+        "| task | runs | resolved | results | patches | token traces "
+        "| agent ms, min/median/max | agrees |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for task in summary.tasks:
+        lines.append(
+            f"| {task.task_id} | {task.runs} | {task.resolved}/{task.runs} "
+            f"| {', '.join(task.results)} | {task.patches} | {task.token_traces} "
+            f"| {_range(task.agent_ms)} | {'yes' if task.agrees else 'no'} |"
+        )
+    lines.append("")
+    return lines
+
+
 def _section(summary: SuiteSummary, records: Sequence[RunRecord]) -> list[str]:
     covered = _runs_for(records, summary)
     lines = [
@@ -204,6 +229,8 @@ def _section(summary: SuiteSummary, records: Sequence[RunRecord]) -> list[str]:
     )
     lines.extend(_run_row(record) for record in covered)
     lines.append("")
+    if summary.repeated:
+        lines.extend(_agreement(summary))
 
     if summary.aborted:
         lines.extend([f"{summary.aborted} run(s) aborted by the operator.", ""])

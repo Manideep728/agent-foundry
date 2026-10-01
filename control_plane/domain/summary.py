@@ -112,6 +112,40 @@ class Unmeasured:
 
 
 @dataclass(frozen=True, slots=True)
+class TaskSpread:
+    """How the repeated runs of one task compared with each other.
+
+    Reproducibility is a per-task claim: a suite that resolves 4 of 8 twice
+    can do it with different tasks each time. So each task gets its own row,
+    and three things must match for its runs to agree -- the result, the patch
+    and the token count of every model call. Matching tokens per call is the
+    strongest check available without the replies themselves: a single flipped
+    token changes what the model reads next, and the counts move with it.
+    """
+
+    task_id: str
+    runs: int
+    resolved: int
+
+    results: tuple[str, ...]
+    """Each distinct result, in the order first seen: the outcome of a scored
+    run, the failure category of a failed one, or `aborted`."""
+
+    patches: int
+    """How many different patches the scored runs produced. Zero when none
+    was scored."""
+
+    token_traces: int
+    """How many different sequences of per-call token counts the runs had."""
+
+    agent_ms: Durations | None
+
+    @property
+    def agrees(self) -> bool:
+        return len(self.results) == 1 and self.patches <= 1 and self.token_traces <= 1
+
+
+@dataclass(frozen=True, slots=True)
 class SuiteSummary:
     """What one suite's runs showed. One suite, never a total across them."""
 
@@ -148,6 +182,18 @@ class SuiteSummary:
     comparing them needs to know and a split per commit would bury.
     """
 
+    tasks: tuple[TaskSpread, ...] = ()
+    """One entry per task, in task order."""
+
+    @property
+    def repeated(self) -> bool:
+        """Whether any task ran more than once, so agreement means anything."""
+        return any(task.runs > 1 for task in self.tasks)
+
+    @property
+    def tasks_agreeing(self) -> int:
+        return sum(1 for task in self.tasks if task.agrees)
+
     def __post_init__(self) -> None:
         if self.measured + len(self.unmeasured) + self.aborted != self.runs:
             raise PreconditionViolated(
@@ -168,6 +214,8 @@ class SuiteSummary:
             raise PreconditionViolated(
                 "the outcome counts must account for every measured run"
             )
+        if self.tasks and sum(task.runs for task in self.tasks) != self.runs:
+            raise PreconditionViolated("every run belongs to exactly one task")
 
 
 def spread(values: Iterable[int]) -> Durations | None:
@@ -223,6 +271,45 @@ def _distinct(values: Iterable[str | None]) -> tuple[str, ...]:
         if value is not None and value not in seen:
             seen.append(value)
     return tuple(seen)
+
+
+def _result_of(record: RunRecord) -> str:
+    if record.outcome is not None:
+        return record.outcome.value
+    if record.run.failure is not None:
+        return record.run.failure.kind.value
+    return record.run.state.value
+
+
+def _token_trace(record: RunRecord) -> tuple[tuple[int, int], ...]:
+    return tuple(
+        (call.usage.input_tokens, call.usage.output_tokens)
+        for call in record.invocations
+    )
+
+
+def _spread_task(task_id: str, records: tuple[RunRecord, ...]) -> TaskSpread:
+    scored = tuple(r for r in records if r.run.state is RunState.SCORED)
+    return TaskSpread(
+        task_id=task_id,
+        runs=len(records),
+        resolved=sum(1 for r in scored if r.score is not None and r.score.resolved),
+        results=_distinct(_result_of(r) for r in records),
+        patches=len({r.patch_sha256 for r in scored if r.patch_sha256 is not None}),
+        token_traces=len({_token_trace(r) for r in records}),
+        # Scored runs only, by the same rule as the suite figure: a failed run
+        # contributes to no latency.
+        agent_ms=spread(r.agent_ms for r in scored if r.agent_ms is not None),
+    )
+
+
+def _spread_tasks(records: tuple[RunRecord, ...]) -> tuple[TaskSpread, ...]:
+    by_task: dict[str, list[RunRecord]] = {}
+    for record in records:
+        by_task.setdefault(str(record.run.task_id), []).append(record)
+    return tuple(
+        _spread_task(task_id, tuple(by_task[task_id])) for task_id in sorted(by_task)
+    )
 
 
 def summarise(records: Iterable[RunRecord]) -> tuple[SuiteSummary, ...]:
@@ -325,4 +412,5 @@ def _summarise_one(
         ),
         image_digests=_distinct(r.image_digest for r in records),
         harness_versions=_distinct(r.harness_version for r in records),
+        tasks=_spread_tasks(records),
     )

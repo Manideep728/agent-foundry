@@ -249,6 +249,25 @@ def _add_limit_flags(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_repeats_flag(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--repeats",
+        type=int,
+        default=1,
+        help=(
+            "how many runs per task (default 1). With more than one, the "
+            "summary says which tasks gave the same result, patch and per-call "
+            "token counts every time"
+        ),
+    )
+
+
+def _repeats_problem(args: argparse.Namespace) -> str | None:
+    if args.repeats < 1:
+        return f"--repeats must be at least 1, got {args.repeats}"
+    return None
+
+
 def _limit_problem(args: argparse.Namespace) -> str | None:
     """Zero would be a consumer that joins its group and does nothing."""
     for flag, value in (
@@ -316,6 +335,7 @@ def build_parser() -> argparse.ArgumentParser:
             "budget belongs to an experiment, not to a file"
         ),
     )
+    _add_repeats_flag(bench)
 
     dispatch_parser = subcommands.add_parser(
         "dispatch",
@@ -333,16 +353,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_agent_flags(dispatch_parser)
     _add_bus_flag(dispatch_parser)
-    dispatch_parser.add_argument(
-        "--repeats",
-        type=int,
-        default=1,
-        help=(
-            "how many runs to dispatch per task (default 1). Two identical "
-            "suites have disagreed on individual tasks at temperature 0, so a "
-            "per-task figure needs repeats before it carries a range"
-        ),
-    )
+    _add_repeats_flag(dispatch_parser)
 
     worker = subcommands.add_parser(
         "worker",
@@ -724,6 +735,15 @@ def _print_summary(summary: SuiteSummary, *, planned: int) -> None:
 
     print(f"  resolved      {summary.resolved}/{summary.measured}")
     print(f"  regressed     {summary.regressed}/{summary.measured}")
+    if summary.repeated:
+        print(f"  tasks agree   {summary.tasks_agreeing}/{len(summary.tasks)}")
+        for task in summary.tasks:
+            if not task.agrees:
+                print(
+                    f"  {'':<13} differs  {task.task_id}  "
+                    f"{', '.join(task.results)}  {task.patches} patch(es)  "
+                    f"{task.token_traces} token trace(s)"
+                )
     # Every outcome, including the zeros. A rate nobody can see is zero is a
     # rate nobody acts on.
     for outcome, count in summary.outcomes.items():
@@ -791,7 +811,7 @@ def _bench_exit_code(
 
 
 def bench_tasks(args: argparse.Namespace) -> int:
-    problem = _agent_flag_problem(args)
+    problem = _agent_flag_problem(args) or _repeats_problem(args)
     if problem is not None:
         print(f"{PROGRAM}: {problem}", file=sys.stderr)
         return EXIT_USAGE
@@ -810,6 +830,10 @@ def bench_tasks(args: argparse.Namespace) -> int:
     clock = SystemClock()
     runner, docker = _build_runners(args, clock)
 
+    # The whole suite once, then again: repeats of one task are spread across
+    # the session rather than run back to back, so a drift over time shows up
+    # as disagreement instead of hiding inside one burst.
+    schedule = [task for _ in range(args.repeats) for task in tasks]
     records: list[RunRecord] = []
     interrupted = False
     try:
@@ -826,7 +850,7 @@ def bench_tasks(args: argparse.Namespace) -> int:
                 args, repository, workspaces, runner, clock, _build_agent(args, clock)
             )
 
-            for position, task in enumerate(tasks, start=1):
+            for position, task in enumerate(schedule, start=1):
                 spent = total_micros(r.total_cost_micros for r in records)
                 if not can_start_another_run(
                     spent,
@@ -847,7 +871,7 @@ def bench_tasks(args: argparse.Namespace) -> int:
                 # Progress on stderr, data on stdout, so redirecting the
                 # results still shows which task is running.
                 print(
-                    f"{PROGRAM}: [{position}/{len(tasks)}] {task.task_id}",
+                    f"{PROGRAM}: [{position}/{len(schedule)}] {task.task_id}",
                     file=sys.stderr,
                 )
                 record = service.execute(task)
@@ -863,13 +887,13 @@ def bench_tasks(args: argparse.Namespace) -> int:
         # ninth is the behaviour this catch exists to prevent.
         interrupted = True
         print(
-            f"{PROGRAM}: aborted after {len(records)} of {len(tasks)}",
+            f"{PROGRAM}: aborted after {len(records)} of {len(schedule)}",
             file=sys.stderr,
         )
 
     for summary in summarise(records):
         _print_summary(summary, planned=len(tasks))
-    return _bench_exit_code(records, planned=len(tasks), interrupted=interrupted)
+    return _bench_exit_code(records, planned=len(schedule), interrupted=interrupted)
 
 
 def run_task(args: argparse.Namespace) -> int:
@@ -932,11 +956,9 @@ def dispatch_tasks(args: argparse.Namespace) -> int:
         print(f"{PROGRAM}: {problem}", file=sys.stderr)
         return EXIT_USAGE
 
-    if args.repeats < 1:
-        print(
-            f"{PROGRAM}: --repeats must be at least 1, got {args.repeats}",
-            file=sys.stderr,
-        )
+    problem = _repeats_problem(args)
+    if problem is not None:
+        print(f"{PROGRAM}: {problem}", file=sys.stderr)
         return EXIT_USAGE
 
     try:

@@ -330,6 +330,15 @@ same token counts on every turn. Each suite started after another client had
 left the model loaded. Before the client started every call cold, two suites
 under the same conditions disagreed on two tasks.
 
+`af bench --repeats N` runs the whole suite N times in order. When any task ran
+more than once, the summary and `af report` compare each task's runs: the
+result, the patch, and the token count of every model call. A task agrees only
+when all three match.
+
+```
+$ uv run af bench tasks --agent tools --model llama3.2:3b --prompt tools-v2 --repeats 3
+```
+
 `--agent tools` gives the model three tools -- list the files, read one, write
 one -- and a budget of turns, set by `--max-turns`. Each turn is recorded as
 its own invocation, so the loop's cost is the sum of its calls rather than its
