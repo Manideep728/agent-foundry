@@ -200,12 +200,27 @@ class ToolUseAgent:
         return self._prompt.prompt_id
 
     def edit(self, workspace: Path, task: TaskDefinition) -> AgentResult:
+        invocations: list[ModelInvocation] = []
+        try:
+            return self._converse(workspace, task, invocations)
+        except AgentError as error:
+            # Re-raised with the turns that completed. The failed call itself
+            # reported no usage, so it adds nothing; the earlier ones were
+            # spent, and the record has to say so.
+            raise AgentError(str(error), invocations=tuple(invocations)) from error
+
+    def _converse(
+        self,
+        workspace: Path,
+        task: TaskDefinition,
+        invocations: list[ModelInvocation],
+    ) -> AgentResult:
+        """The loop. Appends each completed call to `invocations` as it goes."""
         space = _Workspace(root=workspace, hidden=frozenset(task.hidden_paths))
         messages: list[Message] = [
             Message(MessageRole.SYSTEM, self._prompt.system),
             Message(MessageRole.USER, self._opening(space, task)),
         ]
-        invocations: list[ModelInvocation] = []
         wrote_anything = False
         tools_called = 0
         text_calls = 0

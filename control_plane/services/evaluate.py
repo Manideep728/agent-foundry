@@ -185,6 +185,7 @@ class EvaluationService:
                     task,
                     FailureCategory.AGENT_ERROR,
                     str(error),
+                    agent_result=AgentResult(error.invocations),
                     agent_ms=agent_ms,
                 )
                 return record

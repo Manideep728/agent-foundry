@@ -7,6 +7,8 @@ problem out of the agent's score.
 
 from __future__ import annotations
 
+from control_plane.domain.model import ModelInvocation
+
 
 class ServiceError(Exception):
     """Base for failures raised by an adapter into the orchestrator."""
@@ -33,7 +35,17 @@ class AgentError(ServiceError):
 
     A network error, an auth failure, an exhausted rate limit. The model's
     answer being poor is not this -- that is a measurement.
+
+    `invocations` are the calls that completed before the failure. A loop that
+    fails on its third turn has already been paid for two, and a run recorded
+    without them under-reports what the model consumed.
     """
+
+    def __init__(
+        self, message: str, *, invocations: tuple[ModelInvocation, ...] = ()
+    ) -> None:
+        super().__init__(message)
+        self.invocations = invocations
 
 
 class RunAlreadyExists(ServiceError):

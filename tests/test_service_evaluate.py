@@ -13,12 +13,24 @@ import pytest
 
 from control_plane.adapters.fake_agent import FakeAgent
 from control_plane.adapters.local_runner import LocalRunner
+from control_plane.adapters.prompts import LIST_FILES
 from control_plane.adapters.sqlite_repo import SqliteRunRepository
 from control_plane.adapters.task_toml import load_task
+from control_plane.adapters.tool_use_agent import ToolUseAgent
 from control_plane.adapters.workspace import WorkspaceFactory
 from control_plane.domain.errors import PreconditionViolated
 from control_plane.domain.ids import RunId
-from control_plane.domain.model import MicroUsd, ModelInvocation, ModelUsage
+from control_plane.domain.model import (
+    Message,
+    MicroUsd,
+    MicroUsdPerMTok,
+    ModelInvocation,
+    ModelResponse,
+    ModelUsage,
+    TokenPrice,
+    ToolCall,
+    ToolSpec,
+)
 from control_plane.domain.outcomes import AgentOutcome, FailureCategory
 from control_plane.domain.states import RunState
 from control_plane.domain.task import TaskDefinition
@@ -928,6 +940,54 @@ def test_an_agent_that_raised_still_records_how_long_it_took(tmp_path: Path) -> 
     stored = repo.get(record.run.run_id)
     assert stored is not None
     assert stored.agent_ms == record.agent_ms
+    repo.close()
+
+
+def test_a_loop_that_fails_mid_run_keeps_what_its_earlier_turns_spent(
+    tmp_path: Path,
+) -> None:
+    """A model that times out on turn two has already been paid for turn one.
+
+    Dropped, the failed run records no invocations and a cost of zero, so a
+    paid model's spend is under-reported on exactly the runs that went wrong,
+    and the spend ceilings sum to less than was spent.
+    """
+
+    class AnswersOnceThenTimesOut:
+        provider_id = "stub"
+        model_id = "stub-1"
+
+        def __init__(self) -> None:
+            self.turns = 0
+
+        def complete(
+            self, messages: tuple[Message, ...], tools: tuple[ToolSpec, ...] = ()
+        ) -> ModelResponse:
+            self.turns += 1
+            if self.turns > 1:
+                raise AgentError("ollama did not answer within 300s")
+            return ModelResponse(
+                text="",
+                usage=ModelUsage(input_tokens=1_000, output_tokens=200),
+                tool_calls=(ToolCall(LIST_FILES, {}),),
+            )
+
+    price = TokenPrice(
+        model_id="stub-1",
+        input_per_mtok=MicroUsdPerMTok(1_000_000),
+        output_per_mtok=MicroUsdPerMTok(5_000_000),
+    )
+    agent = ToolUseAgent(AnswersOnceThenTimesOut(), RealClock(), price=price)
+    service, repo = build(tmp_path, agent=agent)
+    record = service.execute(task())
+
+    assert record.run.failure is not None
+    assert record.run.failure.kind is FailureCategory.AGENT_ERROR
+    stored = repo.get(record.run.run_id)
+    assert stored is not None
+    assert [i.usage.input_tokens for i in stored.invocations] == [1_000]
+    # 1000 input tokens at $1/MTok plus 200 output at $5/MTok: 2000 micro-USD.
+    assert stored.total_cost_micros == MicroUsd(2_000)
     repo.close()
 
 
