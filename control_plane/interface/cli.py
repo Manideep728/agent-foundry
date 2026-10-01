@@ -49,9 +49,9 @@ from control_plane.adapters.prompts import (
 )
 from control_plane.adapters.record_json import decode as decode_result
 from control_plane.adapters.record_json import encode as encode_result
-from control_plane.adapters.run_lock import DatabaseBusy, exclusive_run_lock
+from control_plane.adapters.run_lock import DatabaseBusy
 from control_plane.adapters.single_shot_agent import SingleShotAgent
-from control_plane.adapters.sqlite_repo import SqliteRunRepository
+from control_plane.adapters.storage import database_exists, open_repository
 from control_plane.adapters.system import (
     SystemClock,
     UuidIdGenerator,
@@ -86,7 +86,11 @@ from control_plane.services.dispatch import (
 )
 from control_plane.services.evaluate import EvaluationService
 from control_plane.services.polling import poll_until
-from control_plane.services.ports import AgentPort, ValidationRunner
+from control_plane.services.ports import (
+    AgentPort,
+    RunRepository,
+    ValidationRunner,
+)
 from control_plane.services.recovery import recover_unfinished
 from control_plane.services.worker import (
     Handled,
@@ -102,7 +106,7 @@ EXIT_HARNESS_FAILED = 1
 EXIT_USAGE = 2
 EXIT_ABORTED = 130
 
-DEFAULT_DB = Path("af.sqlite3")
+DEFAULT_DB = "af.sqlite3"
 DEFAULT_RUNS = Path("runs")
 DEFAULT_FIXTURES = Path("tasks/fixtures")
 DEFAULT_SOLUTIONS = Path("tasks/solutions")
@@ -210,7 +214,7 @@ def _add_run_flags(parser: argparse.ArgumentParser) -> None:
     reading this should have to know about. What matters is that the two
     subcommands cannot drift apart: a flag added to one is added to both.
     """
-    parser.add_argument("--db", type=Path, default=DEFAULT_DB)
+    _add_db_flag(parser)
     parser.add_argument("--runs", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--fixtures", type=Path, default=DEFAULT_FIXTURES)
     parser.add_argument(
@@ -223,6 +227,14 @@ def _add_run_flags(parser: argparse.ArgumentParser) -> None:
         ),
     )
     _add_agent_flags(parser)
+
+
+def _add_db_flag(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--db",
+        default=DEFAULT_DB,
+        help=f"the database of runs (default {DEFAULT_DB})",
+    )
 
 
 def _add_bus_flag(parser: argparse.ArgumentParser) -> None:
@@ -388,13 +400,13 @@ def build_parser() -> argparse.ArgumentParser:
             "is the only writer."
         ),
     )
-    collect.add_argument("--db", type=Path, default=DEFAULT_DB)
+    _add_db_flag(collect)
     _add_bus_flag(collect)
     _add_limit_flags(collect)
 
     show = subcommands.add_parser("show", help="print a stored run")
     show.add_argument("run_id")
-    show.add_argument("--db", type=Path, default=DEFAULT_DB)
+    _add_db_flag(show)
 
     report = subcommands.add_parser(
         "report",
@@ -407,7 +419,7 @@ def build_parser() -> argparse.ArgumentParser:
             "counted."
         ),
     )
-    report.add_argument("--db", type=Path, default=DEFAULT_DB)
+    _add_db_flag(report)
     report.add_argument(
         "--out",
         type=Path,
@@ -416,7 +428,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     listing = subcommands.add_parser("list", help="list stored runs")
-    listing.add_argument("--db", type=Path, default=DEFAULT_DB)
+    _add_db_flag(listing)
     listing.add_argument("--limit", type=int, default=20)
 
     doctor = subcommands.add_parser(
@@ -544,7 +556,7 @@ def _build_runners(
 
 
 def _recover(
-    repository: SqliteRunRepository,
+    repository: RunRepository,
     workspaces: WorkspaceFactory,
     clock: SystemClock,
     remove_container: Callable[[RunId], None],
@@ -570,7 +582,7 @@ def _recover(
 
 def _build_service(
     args: argparse.Namespace,
-    repository: SqliteRunRepository,
+    repository: RunRepository,
     workspaces: WorkspaceFactory,
     runner: ValidationRunner,
     clock: SystemClock,
@@ -602,7 +614,7 @@ def _recover_and_evaluate(
     docker: DockerRunner,
     clock: SystemClock,
 ) -> RunRecord:
-    with SqliteRunRepository(args.db) as repository:
+    with open_repository(args.db, exclusive=True) as repository:
         workspaces = WorkspaceFactory(args.runs)
         _recover(repository, workspaces, clock, docker.remove_container)
         service = _build_service(
@@ -843,7 +855,7 @@ def bench_tasks(args: argparse.Namespace) -> int:
         # inner path rather than run_task: flock belongs to the open file
         # description, so a second acquisition in this same process contends
         # exactly as another process would.
-        with exclusive_run_lock(args.db), SqliteRunRepository(args.db) as repository:
+        with open_repository(args.db, exclusive=True) as repository:
             workspaces = WorkspaceFactory(args.runs)
             _recover(repository, workspaces, clock, docker.remove_container)
             service = _build_service(
@@ -915,8 +927,7 @@ def run_task(args: argparse.Namespace) -> int:
     # unfinished run is abandoned, which is only true while no other af run
     # uses this database.
     try:
-        with exclusive_run_lock(args.db):
-            record = _recover_and_evaluate(args, task, runner, docker, clock)
+        record = _recover_and_evaluate(args, task, runner, docker, clock)
     except DatabaseBusy as error:
         print(f"{PROGRAM}: {error}", file=sys.stderr)
         return EXIT_HARNESS_FAILED
@@ -1087,7 +1098,7 @@ def run_worker(args: argparse.Namespace) -> int:
         # The lock is held for the worker's whole life, as `bench` holds it for
         # a suite: recovery assumes every unfinished run in this database is
         # abandoned, and the redelivery check assumes no one else writes it.
-        with exclusive_run_lock(args.db), SqliteRunRepository(args.db) as repository:
+        with open_repository(args.db, exclusive=True) as repository:
             workspaces = WorkspaceFactory(args.runs)
             _recover(repository, workspaces, clock, docker.remove_container)
             service = _build_service(args, repository, workspaces, runner, clock, agent)
@@ -1187,7 +1198,7 @@ def run_collector(args: argparse.Namespace) -> int:
         # The same lock `bench` takes. The collector is this database's one
         # writer, and a `bench` against the same file at the same time would
         # make it two.
-        with exclusive_run_lock(args.db), SqliteRunRepository(args.db) as repository:
+        with open_repository(args.db, exclusive=True) as repository:
             consumer = KafkaConsumer(RUN_RESULTS_TOPIC, COLLECTOR_GROUP, args.bootstrap)
             try:
                 collector = Collector(
@@ -1230,10 +1241,10 @@ def run_collector(args: argparse.Namespace) -> int:
 
 
 def show_run(args: argparse.Namespace) -> int:
-    if not args.db.exists():
+    if not database_exists(args.db):
         print(f"{PROGRAM}: no database at {args.db}", file=sys.stderr)
         return EXIT_USAGE
-    with SqliteRunRepository(args.db) as repository:
+    with open_repository(args.db, exclusive=False) as repository:
         try:
             record = repository.get(RunId(args.run_id))
         except DomainError as error:
@@ -1247,11 +1258,11 @@ def show_run(args: argparse.Namespace) -> int:
 
 
 def write_report(args: argparse.Namespace) -> int:
-    if not args.db.exists():
+    if not database_exists(args.db):
         print(f"{PROGRAM}: no database at {args.db}", file=sys.stderr)
         return EXIT_USAGE
 
-    with SqliteRunRepository(args.db) as repository:
+    with open_repository(args.db, exclusive=False) as repository:
         # Every run, not the listing default. A report whose denominator was
         # silently capped at 50 would look complete and be wrong.
         records = repository.list_runs(limit=None)
@@ -1287,10 +1298,10 @@ def write_report(args: argparse.Namespace) -> int:
 
 
 def list_runs(args: argparse.Namespace) -> int:
-    if not args.db.exists():
+    if not database_exists(args.db):
         print(f"{PROGRAM}: no database at {args.db}", file=sys.stderr)
         return EXIT_USAGE
-    with SqliteRunRepository(args.db) as repository:
+    with open_repository(args.db, exclusive=False) as repository:
         records = repository.list_runs(args.limit)
 
     if not records:

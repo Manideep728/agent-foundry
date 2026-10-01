@@ -24,7 +24,6 @@ from pathlib import Path
 
 from control_plane.adapters.diffing import diff_workspace
 from control_plane.adapters.fixtures import digest_tree
-from control_plane.adapters.sqlite_repo import SqliteRunRepository
 from control_plane.adapters.workspace import WorkspaceFactory
 from control_plane.domain.errors import DomainError
 from control_plane.domain.ids import RunId
@@ -51,6 +50,7 @@ from control_plane.services.errors import (
 from control_plane.services.ports import (
     AgentPort,
     AgentResult,
+    RunRepository,
     ValidationRequest,
     ValidationRunner,
 )
@@ -88,7 +88,7 @@ class EvaluationService:
     def __init__(
         self,
         *,
-        repository: SqliteRunRepository,
+        repository: RunRepository,
         runner: ValidationRunner,
         agent: AgentPort,
         workspaces: WorkspaceFactory,

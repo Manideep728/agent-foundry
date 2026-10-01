@@ -14,6 +14,8 @@ from typing import Protocol
 from control_plane.domain.ids import RunId
 from control_plane.domain.model import ModelInvocation
 from control_plane.domain.outcomes import AgentOutcome
+from control_plane.domain.record import RunRecord
+from control_plane.domain.states import EvaluationRun, RunState
 from control_plane.domain.task import TaskDefinition
 from control_plane.domain.validation import ValidationReport
 
@@ -173,3 +175,42 @@ class AgentPort(Protocol):
         ...
 
     def edit(self, workspace: Path, task: TaskDefinition) -> AgentResult: ...
+
+
+class RunRepository(Protocol):
+    """Where runs are recorded, as the use cases see it.
+
+    The whole contract is here, so a second store is a second implementation
+    of this and not a change to any service (D11). Writes are compare-and-swap
+    on the state: `advance` and `finish` raise `ConcurrentModification` when
+    the stored state is not `expected`, and `create` and `store` raise
+    `RunAlreadyExists` for a run id already recorded.
+    """
+
+    def create(self, record: RunRecord) -> None:
+        """Record a new run, before anything has happened to it."""
+        ...
+
+    def store(self, record: RunRecord) -> None:
+        """Record a run measured elsewhere, whole, in one transaction."""
+        ...
+
+    def advance(self, run: EvaluationRun, expected: RunState) -> None:
+        """Move a run to its next state."""
+        ...
+
+    def finish(self, record: RunRecord, expected: RunState) -> None:
+        """Write a terminal state with everything measured, in one transaction."""
+        ...
+
+    def get(self, run_id: RunId) -> RunRecord | None: ...
+
+    def list_runs(self, limit: int | None = 50) -> tuple[RunRecord, ...]:
+        """The most recent runs, newest first. None means every one."""
+        ...
+
+    def list_unfinished(self) -> tuple[RunRecord, ...]:
+        """Runs in a state that is not terminal, for the recovery scan."""
+        ...
+
+    def close(self) -> None: ...

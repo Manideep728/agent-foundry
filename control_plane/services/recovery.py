@@ -13,13 +13,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from control_plane.adapters.docker_runner import RUNNER_ID as DOCKER_RUNNER_ID
-from control_plane.adapters.sqlite_repo import SqliteRunRepository
 from control_plane.adapters.workspace import Workspace, WorkspaceFactory
 from control_plane.domain.ids import RunId
 from control_plane.domain.outcomes import FailureCategory
 from control_plane.domain.ports import Clock
 from control_plane.domain.states import RecoveryAction, recovery_for
 from control_plane.services.errors import ConcurrentModification, ServiceError
+from control_plane.services.ports import RunRepository
 
 ContainerRemover = Callable[[RunId], None]
 
@@ -35,7 +35,7 @@ class Recovered:
 
 
 def recover_unfinished(
-    repository: SqliteRunRepository,
+    repository: RunRepository,
     workspaces: WorkspaceFactory,
     clock: Clock,
     remove_container: ContainerRemover,
