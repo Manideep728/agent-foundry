@@ -50,6 +50,7 @@ from control_plane.adapters.prompts import (
 from control_plane.adapters.record_json import decode as decode_result
 from control_plane.adapters.record_json import encode as encode_result
 from control_plane.adapters.run_lock import DatabaseBusy
+from control_plane.adapters.s3_artifacts import S3ArtifactStore, parse_location
 from control_plane.adapters.single_shot_agent import SingleShotAgent
 from control_plane.adapters.storage import (
     database_exists,
@@ -92,6 +93,8 @@ from control_plane.services.evaluate import EvaluationService
 from control_plane.services.polling import poll_until
 from control_plane.services.ports import (
     AgentPort,
+    ArtifactsNotStored,
+    ArtifactStore,
     RunRepository,
     ValidationRunner,
 )
@@ -284,6 +287,17 @@ def _repeats_problem(args: argparse.Namespace) -> str | None:
     return None
 
 
+def _artifacts_problem(location: str | None) -> str | None:
+    """A malformed location is refused before the worker joins its group."""
+    if location is None:
+        return None
+    try:
+        parse_location(location)
+    except ValueError as error:
+        return f"--artifacts: {error}"
+    return None
+
+
 def _limit_problem(args: argparse.Namespace) -> str | None:
     """Zero would be a consumer that joins its group and does nothing."""
     for flag, value in (
@@ -390,6 +404,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--worker-id",
         default=None,
         help="the name recorded as provenance (default: host name and pid)",
+    )
+    worker.add_argument(
+        "--artifacts",
+        default=None,
+        metavar="s3://BUCKET[/PREFIX]",
+        help=(
+            "also store each run's files under PREFIX/runs/RUN_ID/ in this "
+            "bucket, before its result is published (needs the aws extra)"
+        ),
     )
     _add_limit_flags(worker)
 
@@ -1079,7 +1102,11 @@ def run_worker(args: argparse.Namespace) -> int:
     worker cannot honour -- that is how it was started, not a harness fault --
     and 1 when the broker or the database fails it.
     """
-    problem = _agent_flag_problem(args) or _limit_problem(args)
+    problem = (
+        _agent_flag_problem(args)
+        or _limit_problem(args)
+        or _artifacts_problem(args.artifacts)
+    )
     if problem is not None:
         print(f"{PROGRAM}: {problem}", file=sys.stderr)
         return EXIT_USAGE
@@ -1097,6 +1124,9 @@ def run_worker(args: argparse.Namespace) -> int:
     runner, docker = _build_runners(args, clock)
     agent = _build_agent(args, clock)
     worker_id = args.worker_id or f"{socket.gethostname()}-{os.getpid()}"
+    artifacts: ArtifactStore | None = (
+        None if args.artifacts is None else S3ArtifactStore(args.artifacts)
+    )
 
     try:
         # The lock is held for the worker's whole life, as `bench` holds it for
@@ -1123,6 +1153,7 @@ def run_worker(args: argparse.Namespace) -> int:
                     worker_id=worker_id,
                     decode=decode_message,
                     encode=encode_result,
+                    artifacts=artifacts,
                 )
                 print(
                     f"{PROGRAM}: {worker_id} waiting for work on {TASK_RUNS_TOPIC} "
@@ -1144,7 +1175,9 @@ def run_worker(args: argparse.Namespace) -> int:
     except DatabaseBusy as error:
         print(f"{PROGRAM}: {error}", file=sys.stderr)
         return EXIT_HARNESS_FAILED
-    except (KafkaUnavailable, ResultNotDelivered) as error:
+    except (KafkaUnavailable, ResultNotDelivered, ArtifactsNotStored) as error:
+        # The message is not committed, so it comes back; the run is found
+        # stored and is uploaded and published then, not measured again.
         print(f"{PROGRAM}: {error}", file=sys.stderr)
         return EXIT_HARNESS_FAILED
     except IncompatibleMessage as error:

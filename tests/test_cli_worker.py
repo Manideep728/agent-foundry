@@ -69,3 +69,28 @@ def test_a_shorter_model_timeout_never_shortens_the_poll_interval() -> None:
     """Fifteen minutes was measured against real runs, not derived; a short
     model timeout says nothing about how long validation takes."""
     assert poll_interval_ms("--ollama-timeout", "60") == 900_000
+
+
+@pytest.mark.parametrize("location", ["af-artifacts/runs", "s3://", "https://bucket"])
+def test_an_artifact_location_that_is_not_s3_is_refused_before_joining(
+    location: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Every other path is isolated, so a regression fails on the empty task
+    directory instead of joining a real broker."""
+    code = main(
+        [
+            "worker",
+            str(tmp_path),
+            "--db",
+            str(tmp_path / "af.sqlite3"),
+            "--runs",
+            str(tmp_path),
+            "--bootstrap",
+            "127.0.0.1:1",
+            "--artifacts",
+            location,
+        ]
+    )
+
+    assert code == 2
+    assert "--artifacts:" in capsys.readouterr().err

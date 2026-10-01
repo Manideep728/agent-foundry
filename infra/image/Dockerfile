@@ -45,11 +45,11 @@ ENV UV_LINK_MODE=copy UV_COMPILE_BYTECODE=1 UV_PYTHON_DOWNLOADS=never
 # Dependencies first, so a source change does not reinstall them.
 COPY pyproject.toml uv.lock LICENSE ./
 RUN uv sync --locked --no-dev --no-install-project \
-    --extra kafka --extra postgres
+    --extra kafka --extra postgres --extra aws
 
 COPY control_plane control_plane
 COPY tasks tasks
-RUN uv sync --locked --no-dev --extra kafka --extra postgres
+RUN uv sync --locked --no-dev --extra kafka --extra postgres --extra aws
 
 ARG AF_HARNESS_VERSION
 ENV AF_HARNESS_VERSION=${AF_HARNESS_VERSION} \

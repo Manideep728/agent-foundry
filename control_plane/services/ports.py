@@ -214,3 +214,24 @@ class RunRepository(Protocol):
         ...
 
     def close(self) -> None: ...
+
+
+class ArtifactsNotStored(Exception):
+    """A run's files did not reach the artifact store.
+
+    Raised like an undelivered result: the work message stays uncommitted, the
+    worker stops, and the redelivered message finds the run stored and uploads
+    it again.
+    """
+
+
+class ArtifactStore(Protocol):
+    """Where a run's files are kept beyond the machine that measured it."""
+
+    def put_run(self, record: RunRecord) -> str:
+        """Store the files of a finished run, and return where they went.
+
+        Keyed on the run id, and safe to repeat: a second upload of the same
+        run writes the same keys with the same bytes.
+        """
+        ...

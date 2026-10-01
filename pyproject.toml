@@ -18,10 +18,12 @@ dependencies = []
 # and each fails with an installation hint rather than an ImportError.
 #
 # PostgreSQL is an extra for the same reason: SQLite is the default store and
-# ships with Python. Only a `--db postgresql://...` needs the driver.
+# ships with Python. Only a `--db postgresql://...` needs the driver. Likewise
+# boto3, which only `af worker --artifacts s3://...` needs.
 [project.optional-dependencies]
 kafka = ["confluent-kafka>=2.6,<3"]
 postgres = ["psycopg[binary]>=3.2,<4"]
+aws = ["boto3>=1.35,<2"]
 
 [project.scripts]
 af = "control_plane.interface.cli:main"
@@ -48,6 +50,11 @@ dev = [
     # it on every machine. The contract's Postgres half still skips with no
     # server.
     "psycopg[binary]>=3.2,<4",
+    # The same for S3: the client and its types, and moto, which answers the
+    # S3 API in process so the artifact store is tested without an account.
+    "boto3>=1.35,<2",
+    "boto3-stubs[s3]>=1.35,<2",
+    "moto[s3]>=5,<6",
 ]
 
 [tool.pytest.ini_options]

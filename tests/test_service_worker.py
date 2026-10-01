@@ -21,6 +21,7 @@ from control_plane.domain.states import EvaluationRun, RunState
 from control_plane.domain.task import TaskDefinition
 from control_plane.services.dispatch import IncompatibleMessage, TaskRunMessage
 from control_plane.services.polling import poll_until
+from control_plane.services.ports import ArtifactsNotStored, ArtifactStore
 from control_plane.services.worker import (
     Handled,
     Handling,
@@ -67,7 +68,12 @@ class FakeExecutor:
 class Harness:
     """A work topic, a results topic, and a worker between them."""
 
-    def __init__(self, results: FakeTopic | None = None, **config: object) -> None:
+    def __init__(
+        self,
+        results: FakeTopic | None = None,
+        artifacts: ArtifactStore | None = None,
+        **config: object,
+    ) -> None:
         self.work = FakeTopic()
         self.results = results or FakeTopic(partitions=1)
         self.consumer: FakeConsumer = self.work.consumer()
@@ -83,6 +89,7 @@ class Harness:
             worker_id="worker-01",
             decode=dispatch_json.decode,
             encode=record_json.encode,
+            artifacts=artifacts,
         )
 
     def send(self, message: TaskRunMessage) -> None:
@@ -280,3 +287,76 @@ def test_a_message_from_a_newer_build_is_left_for_a_newer_worker() -> None:
 
     assert harness.consumer.committed == 0
     assert harness.results.delivered == ()
+
+
+# --- artifacts -----------------------------------------------------------------
+
+
+class RecordingStore:
+    """An artifact store that notes how many results were out at each upload."""
+
+    def __init__(self, *, failures: int = 0) -> None:
+        self.failures = failures
+        self.harness: Harness | None = None
+        self.uploads: list[tuple[RunId, int]] = []
+
+    def put_run(self, record: RunRecord) -> str:
+        if self.failures:
+            self.failures -= 1
+            raise ArtifactsNotStored(f"{record.run.run_id}: bucket unreachable")
+        assert self.harness is not None
+        self.uploads.append((record.run.run_id, len(self.harness.published())))
+        return f"s3://bucket/runs/{record.run.run_id}/"
+
+
+def harness_with(store: RecordingStore) -> Harness:
+    harness = Harness(artifacts=store)
+    store.harness = harness
+    return harness
+
+
+def test_the_files_are_stored_before_the_result_is_published() -> None:
+    """A result the collector holds must never point at files that are not
+    there: upload first, then publish."""
+    store = RecordingStore()
+    harness = harness_with(store)
+    harness.send(make_message())
+
+    harness.worker.step(0)
+
+    assert store.uploads == [(RunId("run-0001"), 0)]
+    assert len(harness.published()) == 1
+    assert harness.consumer.committed == 1
+
+
+def test_a_failed_upload_publishes_nothing_and_commits_nothing() -> None:
+    store = RecordingStore(failures=1)
+    harness = harness_with(store)
+    harness.send(make_message())
+
+    with pytest.raises(ArtifactsNotStored, match="run-0001"):
+        harness.worker.step(0)
+
+    assert harness.published() == []
+    assert harness.consumer.committed == 0
+
+
+def test_the_redelivered_message_uploads_the_stored_run_and_then_publishes() -> None:
+    """The retry path: measured once, upload failed, message back. The run is
+    not measured again, and its files are uploaded before it is republished."""
+    failing = harness_with(RecordingStore(failures=1))
+    failing.send(make_message())
+    with pytest.raises(ArtifactsNotStored):
+        failing.worker.step(0)
+
+    store = RecordingStore()
+    harness = harness_with(store)
+    harness.executor.stored = failing.executor.stored
+    harness.send(make_message())
+    handled = harness.worker.step(0)
+
+    assert handled is not None
+    assert handled.handling is Handling.REPUBLISHED
+    assert harness.executor.executed == []
+    assert store.uploads == [(RunId("run-0001"), 0)]
+    assert harness.consumer.committed == 1

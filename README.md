@@ -308,6 +308,16 @@ at the same path as on the host, because the Docker daemon resolves the
 runner's bind mounts on the host. `AF_WORKER_IMAGE=af-control-plane:local make
 fanout-check` runs the two workers that way.
 
+`af worker --artifacts s3://BUCKET/PREFIX` also stores each run's files in S3
+under `PREFIX/runs/RUN_ID/`: the patch, the command file, `result.json`, the
+logs and the fixture manifest. The workspace copy is left out, because the
+fixture and the patch reproduce it. The worker uploads before it publishes the
+result, so every result the collector stores has its files in the bucket. When
+an upload fails, the worker stops without acknowledging the message. The next
+worker that receives it finds the run already stored, uploads the files, and
+publishes the result. The run is not measured again. The S3 client is the
+`aws` extra.
+
 ## Store runs in PostgreSQL
 
 `--db` takes a `postgresql://` URL in place of a file path, in every command.

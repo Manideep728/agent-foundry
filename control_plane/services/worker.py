@@ -4,7 +4,10 @@ A worker is the serial loop of `af bench` with the loop removed: the dispatcher
 decided what to measure, and each worker measures one message at a time and
 hands the record on. The order of the steps is the whole of the design.
 
-**Take, finish, publish, flush, and only then commit.** The committed offset is
+**Take, finish, store the files, publish, flush, and only then commit.** The
+files go to the artifact store before the result is published, so a result
+the collector holds always has its files somewhere durable. The committed
+offset is
 this worker's claim that the message is done. Committed any earlier, a crash
 between the commit and the publish loses the run for good: the offset has
 moved past it and no worker will see it again. Committed last, the same crash
@@ -47,6 +50,7 @@ from control_plane.services.dispatch import (
     TaskRunMessage,
     UndecodableMessage,
 )
+from control_plane.services.ports import ArtifactStore
 
 
 class Executor(Protocol):
@@ -111,6 +115,7 @@ class Worker:
         decode: Callable[[bytes], TaskRunMessage],
         encode: Callable[[RunResultMessage], bytes],
         flush_timeout_s: float = 30.0,
+        artifacts: ArtifactStore | None = None,
     ) -> None:
         self._consumer = consumer
         self._publisher = publisher
@@ -122,13 +127,15 @@ class Worker:
         self._decode = decode
         self._encode = encode
         self._flush_timeout_s = flush_timeout_s
+        self._artifacts = artifacts
 
     def step(self, timeout_s: float) -> Handled | None:
         """Handle at most one message. None means the topic was quiet.
 
-        Raises `IncompatibleMessage` for a message this worker must leave for
-        another, and `ResultNotDelivered` when the result did not land. In both
-        cases nothing is committed.
+        Raises `ArtifactsNotStored` when the files did not reach the store,
+        `IncompatibleMessage` for a message this worker must leave for
+        another, and `ResultNotDelivered` when the result did not land. In each
+        case nothing is committed.
         """
         delivery = self._consumer.poll(timeout_s)
         if delivery is None:
@@ -159,6 +166,11 @@ class Worker:
                 f"process is using this worker's database"
             )
 
+        # On the republish path too. A worker that stopped because an upload
+        # failed meets the same message again, finds the run stored, and must
+        # upload before it publishes, or the retry would skip the files.
+        if self._artifacts is not None:
+            self._artifacts.put_run(record)
         self._publish(message, record)
         return Handled(handling, delivery, record, committed=self._commit(delivery))
 
