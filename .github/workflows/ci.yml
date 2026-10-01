@@ -122,3 +122,37 @@ jobs:
 
       - name: Check fan-out preserves the measurement
         run: make fanout-check
+
+      # The same check with the collector writing to PostgreSQL, the store a
+      # deployed collector uses. A fresh server, so the database is empty, as
+      # the check requires.
+      - name: Start PostgreSQL
+        run: make pg-up
+
+      - name: Check fan-out into PostgreSQL
+        run: make fanout-check
+        env:
+          AF_COLLECT_DB: postgresql://agentfoundry@localhost:5432/agentfoundry
+
+  # The repository contract against a real PostgreSQL. The other jobs have no
+  # server, so the Postgres half of the contract skips there; here it runs,
+  # and `-rs` names any test that still skips.
+  postgres:
+    name: postgres
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.1.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Start PostgreSQL
+        run: make pg-up
+
+      - name: Test against PostgreSQL
+        run: uv run pytest -q -rs -m postgres

@@ -9,10 +9,16 @@
 #
 # Needs a running broker with the topics created (`sh infra/kafka/topics.sh`)
 # and the runner image (`make runner-image`).
+#
+# AF_COLLECT_DB chooses where the collector stores the results: a SQLite file
+# in the working directory by default, or a `postgresql://` URL. A URL must
+# name an empty database, because every run in it is compared with the
+# dispatch.
 set -eu
 
 IMAGE=${AF_IMAGE:-afrunner:local}
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/af-fanout-XXXXXX")
+COLLECT_DB=${AF_COLLECT_DB:-$WORK/collected.sqlite3}
 # `--no-sync`: two workers start at once, and two `uv run` calls that both
 # sync the virtualenv can break each other.
 AF="uv run --no-sync af"
@@ -31,27 +37,43 @@ for name in w1 w2; do
 done
 wait
 
-$AF collect --db "$WORK/collected.sqlite3" --idle-exit-s 5 >/dev/null
+$AF collect --db "$COLLECT_DB" --idle-exit-s 5 >/dev/null
 $AF bench --agent fake --image "$IMAGE" \
     --db "$WORK/bench.sqlite3" --runs "$WORK/bench-runs" >/dev/null 2>&1
 
-uv run --no-sync python - "$WORK" <<'PY'
-import sqlite3
+uv run --no-sync python - "$WORK" "$COLLECT_DB" <<'PY'
 import sys
 from pathlib import Path
 
+from control_plane.adapters.storage import display_name, open_repository
+
 work = Path(sys.argv[1])
-COLUMNS = "task_id, state, outcome, resolved, regressed"
+collect_db = sys.argv[2]
 
 
-def rows(name: str) -> list[tuple[object, ...]]:
-    with sqlite3.connect(work / f"{name}.sqlite3") as db:
-        return db.execute(f"SELECT {COLUMNS} FROM runs ORDER BY task_id").fetchall()
+def stored(target: str) -> list:
+    """Every run in a database, read the way `af report` reads it."""
+    with open_repository(target, exclusive=False) as repository:
+        return list(repository.list_runs(limit=None))
+
+
+def results(runs: list) -> list[tuple[object, ...]]:
+    return sorted(
+        (
+            str(r.run.task_id),
+            r.run.state.value,
+            r.outcome.value if r.outcome else None,
+            r.score.resolved if r.score else None,
+            r.score.regressed if r.score else None,
+        )
+        for r in runs
+    )
 
 
 dispatched = {line.split("\t")[0] for line in (work / "dispatched.tsv").open()}
-with sqlite3.connect(work / "collected.sqlite3") as db:
-    collected = {row[0] for row in db.execute("SELECT run_id FROM runs")}
+collected_runs = stored(collect_db)
+collected = {str(r.run.run_id) for r in collected_runs}
+bench_runs = stored(str(work / "bench.sqlite3"))
 split = {
     name: len((work / f"{name}.out").read_text().splitlines()) for name in ("w1", "w2")
 }
@@ -62,13 +84,14 @@ if collected != dispatched:
         f"collected ids differ from dispatched: {len(dispatched - collected)} "
         f"missing, {len(collected - dispatched)} unexpected"
     )
-if rows("collected") != rows("bench"):
+if results(collected_runs) != results(bench_runs):
     failures.append("per-task results differ between fan-out and bench")
 
 print(f"fanout-check: {len(dispatched)} dispatched, worker split {split}")
+print(f"fanout-check: collected into {display_name(collect_db)}")
 for failure in failures:
     print(f"fanout-check: FAILED: {failure}")
 if failures:
     sys.exit(1)
-print(f"fanout-check: identical to af bench over {len(rows('bench'))} tasks")
+print(f"fanout-check: identical to af bench over {len(bench_runs)} tasks")
 PY

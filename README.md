@@ -296,7 +296,46 @@ logged and acknowledged, because no worker can read it.
 `make fanout-check` measures the suite two times with the fake agent: once with
 `af bench`, and once with two workers in parallel and a collector. It exits
 `0` only when the per-task results are identical and the collected runs are
-exactly the dispatched runs.
+exactly the dispatched runs. `AF_COLLECT_DB` sets the collector's database, and
+CI runs the check once with SQLite and once with PostgreSQL.
+
+## Store runs in PostgreSQL
+
+`--db` takes a `postgresql://` URL in place of a file path, in every command.
+SQLite stays the default. A collector that runs on a machine that can be
+replaced needs a database that outlives that machine, and PostgreSQL is that
+database. The driver is an optional extra.
+
+```
+$ make pg-up
+sh infra/postgres/server.sh
+postgres: created af-postgres
+$ uv sync --extra postgres
+$ uv run af bench tasks --db postgresql://agentfoundry@localhost:5432/agentfoundry
+...
+  resolved      8/8
+  regressed     0/8
+$ uv run af list --db postgresql://agentfoundry@localhost:5432/agentfoundry --limit 3
+20261001-041056-1e886212  template-render          synthetic  clean_patch
+20261001-041055-08ce5c57  semver-compare           synthetic  clean_patch
+20261001-041054-fe8553ac  retry-backoff            synthetic  clean_patch
+```
+
+The two stores write the same rows with the same statements, and read them back
+through the same code. One test suite holds both to one contract. The
+differences are the ones a server needs:
+
+- Every integer column is `BIGINT`, because a millisecond timestamp does not
+  fit in 32 bits.
+- The schema version is kept in a table, and the schema is created under an
+  advisory lock, so two processes that open an empty database do not both
+  create it.
+- The run lock is a session advisory lock instead of a file lock, so it also
+  holds between machines. The server releases it when the connection ends.
+
+Give the password in `PGPASSWORD`, not in the URL. Output and reports show a
+URL without its password, but a command line can still be seen by other
+processes.
 
 ## Agents
 
@@ -374,7 +413,8 @@ af bench --agent tools --model llama3.2:3b --prompt tools-v1
 
 The C++ supervisor, the Python control plane and CLI, Docker-isolated
 validation, test-based scoring, SQLite storage with in-place schema upgrades,
-eight benchmark tasks, three agents and Markdown report generation exist. The
+PostgreSQL storage, eight benchmark tasks, three agents and Markdown report
+generation exist. The
 first release also needs a hosted-provider adapter.
 
 Distributed execution over Kafka exists on one machine. Automatic pull
