@@ -20,7 +20,7 @@ REPORT_ARGS ?=
 
 .PHONY: help sync test lint fmt typecheck check run clean \
         runner-configure runner-build runner-test runner-image doctor bench report \
-        kafka-up kafka-down fanout-check pg-up pg-down control-plane-image
+        kafka-up kafka-down fanout-check pg-up pg-down control-plane-image infra-check
 
 ## help: list the documented targets
 help:
@@ -103,6 +103,12 @@ pg-down:
 ## fanout-check: measure the suite over Kafka and compare it with af bench
 fanout-check:
 	AF_IMAGE=$(RUNNER_IMAGE) sh infra/kafka/fanout-check.sh
+
+## infra-check: format-check and validate the AWS Terraform, without credentials
+infra-check:
+	terraform -chdir=infra/aws fmt -check -recursive
+	terraform -chdir=infra/aws init -backend=false -input=false >/dev/null
+	terraform -chdir=infra/aws validate
 
 ## check: everything CI runs
 check: lint typecheck test

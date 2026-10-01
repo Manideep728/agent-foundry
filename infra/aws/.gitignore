@@ -1,0 +1,8 @@
+# Terraform's working state. The state names every resource and output of a
+# live deployment, so it stays on the machine that applied it.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+terraform.tfvars
+# The lock file is kept: it pins the provider versions this was tested with.
