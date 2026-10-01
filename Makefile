@@ -13,13 +13,14 @@ RUNNER_BUILD_TYPE ?= RelWithDebInfo
 RUNNER_BUILD_DIR  ?= $(RUNNER_SRC)/build
 RUNNER_IMAGE      ?= afrunner:local
 RUNNER_JOBS       ?= $(shell nproc 2>/dev/null || echo 2)
+CONTROL_IMAGE     ?= af-control-plane:local
 
 BENCH_ARGS  ?=
 REPORT_ARGS ?=
 
 .PHONY: help sync test lint fmt typecheck check run clean \
         runner-configure runner-build runner-test runner-image doctor bench report \
-        kafka-up kafka-down fanout-check
+        kafka-up kafka-down fanout-check pg-up pg-down control-plane-image
 
 ## help: list the documented targets
 help:
@@ -64,6 +65,11 @@ runner-image:
 	docker build --target runtime \
 		--build-arg BUILD_TYPE=$(RUNNER_BUILD_TYPE) --build-arg JOBS=$(RUNNER_JOBS) \
 		-t $(RUNNER_IMAGE) $(RUNNER_SRC)
+
+## control-plane-image: build the af image from the committed tree (refuses a dirty one)
+control-plane-image:
+	@git diff --quiet HEAD -- || { 		echo "control-plane-image: commit first; the image is built from HEAD" >&2; 		exit 1; }
+	git archive --format=tar HEAD | docker build -f infra/image/Dockerfile 		--build-arg AF_HARNESS_VERSION=$$(uv run python -c 			'from control_plane.adapters.system import harness_version; print(harness_version())') 		-t $(CONTROL_IMAGE) -
 
 ## doctor: check that the container runtime enforces the validation limits
 doctor:

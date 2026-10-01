@@ -82,3 +82,24 @@ def test_no_git_executable_names_no_build(
     monkeypatch.setenv("PATH", "")
 
     assert harness_version(checkout) is None
+
+
+def test_an_image_without_a_checkout_names_the_build_it_was_made_from(
+    tmp_path: Path,
+) -> None:
+    """The control-plane image has no `.git`; it carries its version instead."""
+    baked = {"AF_HARNESS_VERSION": "0.1.0+62540b902356"}
+
+    assert harness_version(tmp_path, baked) == "0.1.0+62540b902356"
+
+
+def test_a_checkout_outranks_a_baked_version(checkout: Path) -> None:
+    """A stale variable left in a shell must not rename a real checkout."""
+    commit = git(checkout, "rev-parse", "--short=12", "HEAD")
+    baked = {"AF_HARNESS_VERSION": "0.0.0+stale"}
+
+    assert harness_version(checkout, baked) == f"{__version__}+{commit}"
+
+
+def test_an_empty_baked_version_is_no_version(tmp_path: Path) -> None:
+    assert harness_version(tmp_path, {"AF_HARNESS_VERSION": ""}) is None

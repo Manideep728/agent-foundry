@@ -6,9 +6,11 @@ services never import `time`, `uuid` or `subprocess` themselves.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import time
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
 
 from control_plane import __version__
@@ -18,6 +20,9 @@ _CHECKOUT = Path(__file__).resolve().parents[2]
 """The directory holding `control_plane/`, a git checkout in development."""
 
 _DESCRIBE_TIMEOUT_S = 5.0
+
+BAKED_VERSION = "AF_HARNESS_VERSION"
+"""Where an image built without `.git` keeps the version it was built from."""
 
 
 class SystemClock:
@@ -45,21 +50,26 @@ class UuidIdGenerator:
         return RunId(f"{stamp}-{uuid.uuid4().hex[:8]}")
 
 
-def harness_version(checkout: Path = _CHECKOUT) -> str | None:
+def harness_version(
+    checkout: Path = _CHECKOUT, environ: Mapping[str, str] = os.environ
+) -> str | None:
     """The package version and the commit it was built from.
 
     `0.1.0+62540b902356`, or `0.1.0+62540b902356.dirty` when tracked files
     differ from that commit -- a run measured on uncommitted code names the
     commit it started from and says that it is not exactly that commit.
 
-    None when there is no checkout to ask, as for an installed wheel. The
-    package version alone is not returned in that case: it changes once per
-    release, so it would name dozens of different builds with one string.
+    With no checkout to ask, as in the control-plane image, the version the
+    image was built from: `make control-plane-image` builds from a committed
+    tree and bakes its version into `AF_HARNESS_VERSION`. None when neither
+    exists, as for an installed wheel. The package version alone is not
+    returned in that case: it changes once per release, so it would name
+    dozens of different builds with one string.
     """
     # Checked rather than left to git, which would walk up the tree and report
     # the commit of whatever repository happens to contain an installation.
     if not (checkout / ".git").exists():
-        return None
+        return environ.get(BAKED_VERSION) or None
     try:
         described = subprocess.run(
             # `--exclude '*'` ignores tags, so the answer is always the commit
