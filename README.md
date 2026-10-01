@@ -397,7 +397,8 @@ requests and a web interface are outside the scope of the project.
 - **One task exceeds the client timeout.** `template-render` asks the model for
   a whole file and has not answered inside 300 s in six attempts. It is
   reported as `agent_error`, which produces no measurement, rather than as a
-  model failure.
+  model failure. `--ollama-timeout SECONDS` raises the bound; a worker's Kafka
+  poll interval rises with it, so a long call is not mistaken for a dead worker.
 - **Tool calls do not always arrive on the tool channel.** `llama3.2:3b` uses
   the documented `tool_calls` field; both `qwen2.5-coder` models write the call
   into the message body instead, and the 3B one sends several JSON objects

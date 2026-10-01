@@ -29,12 +29,17 @@ from control_plane.adapters.fake_agent import FakeAgent
 from control_plane.adapters.fixtures import digest_tree
 from control_plane.adapters.kafka_bus import (
     DEFAULT_BOOTSTRAP,
+    DEFAULT_MAX_POLL_INTERVAL_MS,
     KafkaConsumer,
     KafkaPublisher,
     KafkaUnavailable,
 )
 from control_plane.adapters.local_runner import LocalRunner
-from control_plane.adapters.ollama_client import DEFAULT_BASE_URL, OllamaClient
+from control_plane.adapters.ollama_client import (
+    DEFAULT_BASE_URL,
+    DEFAULT_TIMEOUT_S,
+    OllamaClient,
+)
 from control_plane.adapters.prompts import (
     DEFAULT_SINGLE_SHOT_PROMPT,
     DEFAULT_TOOL_PROMPT,
@@ -182,6 +187,18 @@ def _add_agent_flags(parser: argparse.ArgumentParser) -> None:
         "--ollama-url",
         default=DEFAULT_BASE_URL,
         help=f"where the ollama server is (default {DEFAULT_BASE_URL})",
+    )
+    parser.add_argument(
+        "--ollama-timeout",
+        type=int,
+        default=int(DEFAULT_TIMEOUT_S),
+        metavar="SECONDS",
+        help=(
+            f"how long one model call may take before the run fails as an agent "
+            f"error (default {int(DEFAULT_TIMEOUT_S)}). A setting of this "
+            f"machine, like --ollama-url, so it is not part of what a run is "
+            f"grouped on"
+        ),
     )
 
 
@@ -592,19 +609,37 @@ def _build_agent(args: argparse.Namespace, clock: SystemClock) -> AgentPort:
     """
     if args.agent == AGENT_OLLAMA:
         return SingleShotAgent(
-            OllamaClient(args.model, base_url=args.ollama_url),
+            _ollama_client(args),
             clock,
             prompt=_prompt(args, DEFAULT_SINGLE_SHOT_PROMPT),
         )
     if args.agent == AGENT_TOOLS:
         return ToolUseAgent(
-            OllamaClient(args.model, base_url=args.ollama_url),
+            _ollama_client(args),
             clock,
             max_turns=args.max_turns,
             prompt=_prompt(args, DEFAULT_TOOL_PROMPT),
             run_ceiling=_ceiling(args.max_run_micros),
         )
     return FakeAgent(args.solutions, clock)
+
+
+def _ollama_client(args: argparse.Namespace) -> OllamaClient:
+    return OllamaClient(
+        args.model, base_url=args.ollama_url, timeout_s=args.ollama_timeout
+    )
+
+
+def _poll_interval_ms(args: argparse.Namespace) -> int:
+    """How long a worker may hold one message before its group evicts it (D32).
+
+    D29 set fifteen minutes as three times the longest handling measured, and
+    found that the longest is set by the model client's timeout, not by the
+    task. So the interval follows the timeout at the same ratio, and never
+    drops below the measured fifteen minutes.
+    """
+    timeout_ms: int = args.ollama_timeout * 1000
+    return max(DEFAULT_MAX_POLL_INTERVAL_MS, 3 * timeout_ms)
 
 
 def _prompt(args: argparse.Namespace, fallback: str) -> PromptVariant:
@@ -615,13 +650,15 @@ def _ceiling(value: int | None) -> MicroUsd | None:
     return None if value is None else MicroUsd(value)
 
 
-def _prompt_problem(args: argparse.Namespace) -> str | None:
-    """Why the --prompt flag cannot be honoured, if it cannot.
+def _agent_flag_problem(args: argparse.Namespace) -> str | None:
+    """Why the agent flags cannot be honoured, if they cannot.
 
     Checked before a run is created, so a typo costs nothing. Resolved inside
     the agent instead, it would create a row and spend tokens before failing,
     and leave an unfinished run behind for the recovery scan.
     """
+    if args.ollama_timeout < 1:
+        return f"--ollama-timeout must be at least 1, got {args.ollama_timeout}"
     try:
         validate_ceiling(_ceiling(args.max_run_micros), "--max-run-micros")
         validate_ceiling(
@@ -754,7 +791,7 @@ def _bench_exit_code(
 
 
 def bench_tasks(args: argparse.Namespace) -> int:
-    problem = _prompt_problem(args)
+    problem = _agent_flag_problem(args)
     if problem is not None:
         print(f"{PROGRAM}: {problem}", file=sys.stderr)
         return EXIT_USAGE
@@ -836,7 +873,7 @@ def bench_tasks(args: argparse.Namespace) -> int:
 
 
 def run_task(args: argparse.Namespace) -> int:
-    problem = _prompt_problem(args)
+    problem = _agent_flag_problem(args)
     if problem is not None:
         print(f"{PROGRAM}: {problem}", file=sys.stderr)
         return EXIT_USAGE
@@ -890,7 +927,7 @@ def dispatch_tasks(args: argparse.Namespace) -> int:
     take: the contention this project guards against is two processes writing
     runs, and a dispatcher writes none.
     """
-    problem = _prompt_problem(args)
+    problem = _agent_flag_problem(args)
     if problem is not None:
         print(f"{PROGRAM}: {problem}", file=sys.stderr)
         return EXIT_USAGE
@@ -1005,7 +1042,7 @@ def run_worker(args: argparse.Namespace) -> int:
     worker cannot honour -- that is how it was started, not a harness fault --
     and 1 when the broker or the database fails it.
     """
-    problem = _prompt_problem(args) or _limit_problem(args)
+    problem = _agent_flag_problem(args) or _limit_problem(args)
     if problem is not None:
         print(f"{PROGRAM}: {problem}", file=sys.stderr)
         return EXIT_USAGE
@@ -1032,7 +1069,12 @@ def run_worker(args: argparse.Namespace) -> int:
             workspaces = WorkspaceFactory(args.runs)
             _recover(repository, workspaces, clock, docker.remove_container)
             service = _build_service(args, repository, workspaces, runner, clock, agent)
-            consumer = KafkaConsumer(TASK_RUNS_TOPIC, WORKER_GROUP, args.bootstrap)
+            consumer = KafkaConsumer(
+                TASK_RUNS_TOPIC,
+                WORKER_GROUP,
+                args.bootstrap,
+                max_poll_interval_ms=_poll_interval_ms(args),
+            )
             try:
                 worker = Worker(
                     consumer=consumer,

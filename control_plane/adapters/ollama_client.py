@@ -54,6 +54,10 @@ class OllamaClient:
         temperature: float = 0.0,
         num_predict: int | None = None,
     ) -> None:
+        # Zero would not mean "no timeout": the socket would be non-blocking,
+        # and every call would fail at once with an error about the socket.
+        if timeout_s <= 0:
+            raise ValueError(f"timeout_s must be positive, got {timeout_s}")
         self._model = model
         self._base_url = base_url.rstrip("/")
         self._timeout_s = timeout_s

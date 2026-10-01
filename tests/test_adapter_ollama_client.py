@@ -9,6 +9,7 @@ worth catching here are HTTP failures.
 from __future__ import annotations
 
 import json
+import socket
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
@@ -207,6 +208,23 @@ def test_an_unreachable_server_is_an_agent_error() -> None:
 
     with pytest.raises(AgentError, match="could not reach ollama"):
         client.complete(ASK)
+
+
+def test_a_server_that_never_answers_fails_at_the_configured_timeout() -> None:
+    """The bound is the one the run asked for. A task that needs longer is
+    given it with --ollama-timeout, not by editing a constant."""
+    with socket.create_server(("127.0.0.1", 0)) as silent:
+        port = silent.getsockname()[1]
+        client = OllamaClient("m", base_url=f"http://127.0.0.1:{port}", timeout_s=1)
+
+        with pytest.raises(AgentError, match="did not answer within 1s"):
+            client.complete(ASK)
+
+
+@pytest.mark.parametrize("timeout_s", [0, -1])
+def test_a_timeout_that_is_not_positive_is_refused(timeout_s: float) -> None:
+    with pytest.raises(ValueError, match="must be positive"):
+        OllamaClient("m", timeout_s=timeout_s)
 
 
 def test_the_request_pins_the_sampler_and_sends_every_message(

@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from control_plane import __version__
 from control_plane.interface.cli import main
+
+UNREACHABLE = "127.0.0.1:1"
 
 
 def test_version_flag_prints_version_and_exits_zero(
@@ -81,3 +85,31 @@ def test_fixture_hash_on_a_missing_directory_is_a_usage_error(
 ) -> None:
     assert main(["fixture-hash", "/definitely/not/here"]) == 2
     assert "not a directory" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("command", ["run", "bench", "dispatch", "worker"])
+def test_an_ollama_timeout_below_one_second_is_a_usage_error(
+    command: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Every path points somewhere empty or unreachable. If the check ever
+    stops refusing, the command fails on a missing task instead of measuring
+    the real suite into the default database and joining a real broker."""
+    target = tmp_path / "task.toml" if command == "run" else tmp_path
+    isolated = {
+        "run": ["--db", str(tmp_path / "af.sqlite3"), "--runs", str(tmp_path)],
+        "bench": ["--db", str(tmp_path / "af.sqlite3"), "--runs", str(tmp_path)],
+        "dispatch": ["--bootstrap", UNREACHABLE],
+        "worker": [
+            "--db",
+            str(tmp_path / "af.sqlite3"),
+            "--runs",
+            str(tmp_path),
+            "--bootstrap",
+            UNREACHABLE,
+        ],
+    }[command]
+
+    code = main([command, str(target), *isolated, "--ollama-timeout", "0"])
+
+    assert code == 2
+    assert "--ollama-timeout must be at least 1" in capsys.readouterr().err

@@ -6,6 +6,7 @@ default Docker runner either expect it to fail cleanly or skip without the image
 
 from __future__ import annotations
 
+import socket
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,7 @@ from control_plane.adapters.single_shot_agent import SingleShotAgent
 from control_plane.adapters.system import SystemClock
 from control_plane.adapters.tool_use_agent import DEFAULT_MAX_TURNS, ToolUseAgent
 from control_plane.interface.cli import (
+    EXIT_HARNESS_FAILED,
     EXIT_USAGE,
     _build_agent,
     build_parser,
@@ -329,3 +331,26 @@ def test_an_agent_built_with_no_prompt_flag_uses_the_measured_one() -> None:
     agent = _build_agent(args, SystemClock())
 
     assert agent.prompt_id == "tools-v2"
+
+
+def test_the_ollama_timeout_flag_bounds_each_model_call(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A server that accepts the connection and never answers fails the run at
+    the bound the flag set, not at the five-minute default."""
+    with socket.create_server(("127.0.0.1", 0)) as silent:
+        port = silent.getsockname()[1]
+        code = main(
+            [
+                *run_args(tmp_path),
+                "--agent",
+                "ollama",
+                "--ollama-url",
+                f"http://127.0.0.1:{port}",
+                "--ollama-timeout",
+                "1",
+            ]
+        )
+
+    assert code == EXIT_HARNESS_FAILED
+    assert "ollama did not answer within 1s" in capsys.readouterr().out

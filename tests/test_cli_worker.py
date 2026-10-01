@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from control_plane.interface.cli import build_parser, main
+from control_plane.interface.cli import _poll_interval_ms, build_parser, main
 
 
 @pytest.mark.parametrize("flag", ["--max-messages", "--idle-exit-s"])
@@ -49,3 +49,23 @@ def test_a_worker_takes_the_configuration_it_compares_messages_against() -> None
 def test_a_worker_takes_the_execution_flags_a_run_needs() -> None:
     """Unlike the dispatcher, a worker measures, so it has its own database."""
     assert {"db", "runs", "runner", "fixtures", "bootstrap"} <= worker_settings()
+
+
+def poll_interval_ms(*flags: str) -> int:
+    return _poll_interval_ms(build_parser().parse_args(["worker", *flags]))
+
+
+def test_the_default_model_timeout_keeps_the_measured_poll_interval() -> None:
+    assert poll_interval_ms() == 900_000
+
+
+def test_a_longer_model_timeout_lengthens_the_poll_interval_with_it() -> None:
+    """D32: a run that waits 900 s on one model call must not be evicted, and
+    measured a second time, for holding its message past fifteen minutes."""
+    assert poll_interval_ms("--ollama-timeout", "900") == 2_700_000
+
+
+def test_a_shorter_model_timeout_never_shortens_the_poll_interval() -> None:
+    """Fifteen minutes was measured against real runs, not derived; a short
+    model timeout says nothing about how long validation takes."""
+    assert poll_interval_ms("--ollama-timeout", "60") == 900_000

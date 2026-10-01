@@ -22,6 +22,9 @@ if TYPE_CHECKING:  # pragma: no cover - import only for the type checker
 
 DEFAULT_BOOTSTRAP = "localhost:9092"
 
+DEFAULT_MAX_POLL_INTERVAL_MS = 900_000
+"""Fifteen minutes: three times the longest handling measured (D29)."""
+
 
 class KafkaUnavailable(Exception):
     """The client is not installed, or no broker answered."""
@@ -90,7 +93,7 @@ class KafkaConsumer:
         group_id: str,
         bootstrap: str = DEFAULT_BOOTSTRAP,
         *,
-        max_poll_interval_ms: int = 900_000,
+        max_poll_interval_ms: int = DEFAULT_MAX_POLL_INTERVAL_MS,
     ) -> None:
         client = _require_client()
         self._client = client
@@ -112,9 +115,8 @@ class KafkaConsumer:
                 # to take longer than that. A consumer that exceeds it is
                 # judged dead, its partitions are reassigned, and the work is
                 # delivered to somebody else while the first worker is still
-                # doing it. Fifteen minutes is above the per-task ceiling this
-                # project sets; it is a starting value to measure, not a
-                # settled one.
+                # doing it. The worker raises it with the model client's
+                # timeout (D32).
                 "max.poll.interval.ms": max_poll_interval_ms,
             }
         )
