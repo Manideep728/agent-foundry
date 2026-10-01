@@ -299,6 +299,15 @@ logged and acknowledged, because no worker can read it.
 exactly the dispatched runs. `AF_COLLECT_DB` sets the collector's database, and
 CI runs the check once with SQLite and once with PostgreSQL.
 
+`make control-plane-image` packages `af` as an image, built from the committed
+tree, with the version of that commit recorded on every run it measures. A
+worker in the image does not validate inside its own container. It starts the
+runner image next to itself through the host's Docker socket, so the runner is
+still PID 1 of its own container. The worker's runs directory must be mounted
+at the same path as on the host, because the Docker daemon resolves the
+runner's bind mounts on the host. `AF_WORKER_IMAGE=af-control-plane:local make
+fanout-check` runs the two workers that way.
+
 ## Store runs in PostgreSQL
 
 `--db` takes a `postgresql://` URL in place of a file path, in every command.

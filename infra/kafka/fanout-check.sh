@@ -14,6 +14,12 @@
 # in the working directory by default, or a `postgresql://` URL. A URL must
 # name an empty database, because every run in it is compared with the
 # dispatch.
+#
+# AF_WORKER_IMAGE runs the two workers as containers of the control-plane
+# image (`make control-plane-image`) instead of as local processes: the shape
+# a deployment has. Each mounts the host's Docker socket, to start the runner
+# image beside itself, and the working directory at the same path it has here,
+# because the daemon resolves the runner's bind mounts on the host.
 set -eu
 
 IMAGE=${AF_IMAGE:-afrunner:local}
@@ -30,8 +36,18 @@ $AF collect --db "$WORK/drained.sqlite3" --idle-exit-s 5 >/dev/null 2>&1
 
 $AF dispatch --agent fake --image "$IMAGE" >"$WORK/dispatched.tsv"
 
+if [ -n "${AF_WORKER_IMAGE:-}" ]; then
+    WORKER="docker run --rm --network host --user $(id -u):$(id -g)
+        --group-add $(stat -c %g /var/run/docker.sock)
+        -v /var/run/docker.sock:/var/run/docker.sock -v $WORK:$WORK
+        $AF_WORKER_IMAGE"
+else
+    WORKER=$AF
+fi
+
 for name in w1 w2; do
-    $AF worker --agent fake --image "$IMAGE" --worker-id "$name" \
+    # Unquoted on purpose: $WORKER is a command and its arguments.
+    $WORKER worker --agent fake --image "$IMAGE" --worker-id "$name" \
         --db "$WORK/$name.sqlite3" --runs "$WORK/$name-runs" \
         --idle-exit-s 15 >"$WORK/$name.out" 2>"$WORK/$name.err" &
 done

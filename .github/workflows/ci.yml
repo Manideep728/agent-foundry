@@ -123,6 +123,16 @@ jobs:
       - name: Check fan-out preserves the measurement
         run: make fanout-check
 
+      # The workers again, as containers of the control-plane image: the shape
+      # a deployment runs. They start the runner through the host's socket.
+      - name: Build the control-plane image
+        run: make control-plane-image
+
+      - name: Check fan-out with containerised workers
+        run: make fanout-check
+        env:
+          AF_WORKER_IMAGE: af-control-plane:local
+
       # The same check with the collector writing to PostgreSQL, the store a
       # deployed collector uses. A fresh server, so the database is empty, as
       # the check requires.
