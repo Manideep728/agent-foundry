@@ -55,6 +55,9 @@ dev = [
     "boto3>=1.35,<2",
     "boto3-stubs[s3]>=1.35,<2",
     "moto[s3]>=5,<6",
+    # The same for Kafka: the client, so the type checker sees its types on
+    # every machine. Tests that need a broker still skip without one.
+    "confluent-kafka>=2.6,<3",
 ]
 
 [tool.pytest.ini_options]

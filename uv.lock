@@ -25,6 +25,7 @@ postgres = [
 dev = [
     { name = "boto3" },
     { name = "boto3-stubs", extra = ["s3"] },
+    { name = "confluent-kafka" },
     { name = "moto", extra = ["s3"] },
     { name = "mypy" },
     { name = "psycopg", extra = ["binary"] },
@@ -44,6 +45,7 @@ provides-extras = ["aws", "kafka", "postgres"]
 dev = [
     { name = "boto3", specifier = ">=1.35,<2" },
     { name = "boto3-stubs", extras = ["s3"], specifier = ">=1.35,<2" },
+    { name = "confluent-kafka", specifier = ">=2.6,<3" },
     { name = "moto", extras = ["s3"], specifier = ">=5,<6" },
     { name = "mypy", specifier = ">=1.13" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2,<4" },
