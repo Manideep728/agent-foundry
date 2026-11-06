@@ -9,8 +9,10 @@
 # with `terraform -chdir=infra/aws destroy`.
 #
 # What it proves, in order: the images run on ECS; every dispatched run reaches
-# the RDS database exactly once, even though one worker is stopped partway;
-# each run's files are in S3; and afterwards nothing is left running.
+# the RDS database exactly once; each run's files are in S3; and afterwards
+# nothing is left running. It also stops one worker after the dispatch, but
+# with the fake agent the suite can finish first, so a pass does not prove
+# redelivery.
 #
 # Every wait has a deadline. Whatever the exit, success or not, the script
 # prints what it can about the deployment, then destroys it and checks that

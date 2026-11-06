@@ -356,6 +356,66 @@ Give the password in `PGPASSWORD`, not in the URL. Output and reports show a
 URL without its password, but a command line can still be seen by other
 processes.
 
+## Run on AWS
+
+`infra/aws/` deploys the distributed path to one AWS account with Terraform:
+
+- ECS on one EC2 container instance runs the broker, the collector and two
+  workers. A worker starts the runner through the instance's Docker socket,
+  and Fargate does not give a task that socket.
+- RDS PostgreSQL holds the results. RDS keeps the password in Secrets Manager,
+  and ECS gives it to the tasks as `PGPASSWORD`.
+- S3 holds the run artifacts. ECR holds the two images.
+- A budget sends an email at 50% of $10 a month.
+
+`infra/aws/smoke.sh` builds the images from `HEAD`, deploys, dispatches the
+suite two times with the fake agent, and stops one worker. Then it checks that
+every dispatched run is in RDS exactly once and has its files in S3. At the
+end it destroys the deployment and checks that nothing is left. It destroys
+the deployment on a failure too, after it prints the task logs and the
+instance's boot messages. Each wait has a time limit.
+
+```
+$ AF_REGION=us-east-2 AF_ALERT_EMAIL=you@example.com sh infra/aws/smoke.sh
+...
+== dispatch: every task x 2 (23:09:22Z)
+af: dispatched 16 run(s) for 8 task(s) to agentfoundry-task-runs at localhost:9092
+...
+== waiting until all 16 runs are in RDS (23:09:43Z)
+stored 16 of 16
+every dispatched run is stored exactly once
+
+== the report, read from RDS (23:09:58Z)
+# AgentFoundry benchmark report
+...
+16 run(s) recorded, 16 of them measured, across 1 configuration(s).
+...
+| resolved | 16/16 |
+| regressed | 0/16 |
+...
+- Architecture: x86_64
+- Supervisor was PID 1: True
+...
+== artifacts in S3 (23:10:13Z)
+artifacts for all 16 runs
+...
+== destroy (23:10:14Z)
+Destroy complete! Resources: 36 destroyed.
+
+== nothing left (23:13:29Z)
+nothing left
+smoke: exit 0
+```
+
+This run took 11 minutes: 5 for the deployment and 3 for the destroy. The fake
+agent and one-second validations most likely finished the suite before the
+worker stopped.
+Thus this run does not show redelivery after a worker stops.
+
+The default instance type is `m7i-flex.large`, because an account on the AWS
+free plan can start only free-tier-eligible types. Set
+`TF_VAR_instance_type` to change it.
+
 ## Agents
 
 Three agents exist behind one interface, so they are comparable on the same
@@ -436,7 +496,8 @@ PostgreSQL storage, eight benchmark tasks, three agents and Markdown report
 generation exist. The
 first release also needs a hosted-provider adapter.
 
-Distributed execution over Kafka exists on one machine. Automatic pull
+Distributed execution over Kafka exists on one machine, and on AWS ECS with
+RDS and S3. Automatic pull
 requests and a web interface are outside the scope of the project.
 
 ## Limitations
