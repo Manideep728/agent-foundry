@@ -67,6 +67,9 @@ def open_repository(target: str, *, exclusive: bool) -> Iterator[RunRepository]:
             return
         path = Path(target)
         if exclusive:
+            # A writer may be the first to use its directory: a worker on a
+            # fresh host is given `<root>/<worker id>/worker.sqlite3`.
+            path.parent.mkdir(parents=True, exist_ok=True)
             stack.enter_context(exclusive_run_lock(path))
         yield stack.enter_context(SqliteRunRepository(path))
 

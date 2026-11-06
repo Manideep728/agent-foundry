@@ -48,6 +48,17 @@ def test_the_lock_is_released_when_the_block_ends(tmp_path: Path) -> None:
         assert repository.list_unfinished() == ()
 
 
+def test_a_writer_creates_the_directory_its_database_goes_in(
+    tmp_path: Path,
+) -> None:
+    """A worker on a fresh host is given `--db <root>/w1/worker.sqlite3`."""
+    target = tmp_path / "w1" / "worker.sqlite3"
+
+    with open_repository(str(target), exclusive=True) as repository:
+        assert repository.list_runs() == ()
+    assert target.exists()
+
+
 def test_a_path_that_holds_nothing_is_not_a_database(tmp_path: Path) -> None:
     assert not database_exists(str(tmp_path / "missing.sqlite3"))
 
