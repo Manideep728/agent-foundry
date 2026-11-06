@@ -22,6 +22,11 @@ output "database_endpoint" {
   value = aws_db_instance.results.endpoint
 }
 
+# No password: the tasks that read the database receive it as PGPASSWORD.
+output "database_url" {
+  value = local.database_url
+}
+
 output "log_group" {
   value = aws_cloudwatch_log_group.tasks.name
 }
