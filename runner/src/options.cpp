@@ -21,10 +21,11 @@ struct NumberFlag {
     bool allow_zero;
 };
 
-constexpr std::array<StringFlag, 4> string_flags{{
+constexpr std::array<StringFlag, 5> string_flags{{
     {"--commands", &Options::commands},
     {"--workdir", &Options::workdir},
     {"--result", &Options::result},
+    {"--oom-result", &Options::oom_result},
     {"--log-dir", &Options::log_dir},
 }};
 

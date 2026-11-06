@@ -150,6 +150,8 @@ def test_docker_options_precede_the_image_and_runner_flags_follow(
         "/work",
         "--result",
         "/out/result.json",
+        "--oom-result",
+        "/out/oom.json",
         "--log-dir",
         "/out/logs",
         "--timeout-ms",
@@ -189,6 +191,12 @@ def test_a_path_with_a_comma_is_refused(tmp_path: Path) -> None:
 # --- running and interpreting ----------------------------------------------
 
 
+_OOM_NONE = b'{"oom_kills":0}'
+# What the runner writes when it cannot read its cgroup: cgroup v1, or no
+# private cgroup namespace.
+_OOM_UNKNOWN = b'{"oom_kills":null}'
+
+
 class FakeDocker:
     """Records each call and plays the part of `docker` and the runner."""
 
@@ -196,6 +204,7 @@ class FakeDocker:
         self,
         returncode: int = 0,
         result: bytes | None = None,
+        oom_file: bytes | None = _OOM_NONE,
         raises: Exception | None = None,
         stderr: bytes = b"",
         oom_killed: bool = False,
@@ -209,6 +218,7 @@ class FakeDocker:
         self.image_inspect_fails = image_inspect_fails
         self.returncode = returncode
         self.result = result
+        self.oom_file = oom_file
         # Called with the result path during `docker run`, standing in for a
         # patch that writes something hostile to /out.
         self.plant = plant
@@ -247,6 +257,8 @@ class FakeDocker:
         if self.raises is not None:
             raise self.raises
         assert self.out_dir is not None
+        if self.oom_file is not None:
+            (self.out_dir / "oom.json").write_bytes(self.oom_file)
         if self.result is not None:
             (self.out_dir / "result.json").write_bytes(self.result)
         if self.plant is not None:
@@ -387,7 +399,7 @@ def test_a_host_timeout_removes_the_container(tmp_path: Path) -> None:
 # --- memory limit and container lifetime -----------------------------------
 
 
-def test_a_clean_run_is_inspected_then_removed(tmp_path: Path) -> None:
+def test_a_counted_clean_run_is_removed_without_an_inspect(tmp_path: Path) -> None:
     docker = FakeDocker(result=encode(sample_report()))
     runner, request = _runner(tmp_path, docker)
 
@@ -395,7 +407,16 @@ def test_a_clean_run_is_inspected_then_removed(tmp_path: Path) -> None:
 
     # "image" is the digest probe, and it comes first on purpose: the image is
     # resolved before the container starts, so a run that dies still names the
-    # image it died in.
+    # image it died in. The runner's OOM count answers, so Docker is not asked.
+    assert docker.verbs() == ["image", "run", "rm"]
+
+
+def test_an_uncounted_clean_run_is_inspected_then_removed(tmp_path: Path) -> None:
+    docker = FakeDocker(result=encode(sample_report()), oom_file=_OOM_UNKNOWN)
+    runner, request = _runner(tmp_path, docker)
+
+    runner.run(request)
+
     assert docker.verbs() == ["image", "run", "inspect", "rm"]
     assert docker.calls[2][-1] == container_name(RUN_ID)
 
@@ -407,12 +428,22 @@ def test_a_clean_run_is_inspected_then_removed(tmp_path: Path) -> None:
         pytest.param(7, _signal_report(), id="exit-7"),
     ],
 )
+@pytest.mark.parametrize(
+    ("oom_file", "docker_flag"),
+    [
+        # The regression: Docker lost the OOM event and says false, but the
+        # kernel counted the kill. Seen on loaded CI runners and reproduced
+        # locally under CPU load.
+        pytest.param(b'{"oom_kills":1}', False, id="counted-docker-lost-it"),
+        pytest.param(_OOM_UNKNOWN, True, id="uncounted-docker-fallback"),
+    ],
+)
 def test_an_oom_kill_overrides_a_valid_report(
-    tmp_path: Path, code: int, result: bytes
+    tmp_path: Path, code: int, result: bytes, oom_file: bytes, docker_flag: bool
 ) -> None:
     # The report may say `exited 137` for a test: without the verdict it would
     # score as a failed test rather than a resource limit.
-    docker = FakeDocker(code, result=result, oom_killed=True)
+    docker = FakeDocker(code, result=result, oom_file=oom_file, oom_killed=docker_flag)
     runner, request = _runner(tmp_path, docker)
 
     with pytest.raises(RunnerUnavailable, match="memory limit of 1073741824 bytes"):
@@ -421,8 +452,67 @@ def test_an_oom_kill_overrides_a_valid_report(
     assert docker.verbs()[-1] == "rm"
 
 
+def test_a_zero_count_overrides_a_docker_flag(tmp_path: Path) -> None:
+    # The count is exact and Docker's flag is not, so a zero count is trusted
+    # without asking Docker at all.
+    docker = FakeDocker(result=encode(sample_report()), oom_killed=True)
+    runner, request = _runner(tmp_path, docker)
+
+    assert runner.run(request).exit_reason is ExitReason.COMPLETED
+    assert "inspect" not in docker.verbs()
+
+
+@pytest.mark.parametrize(
+    ("oom_file", "message"),
+    [
+        pytest.param(None, "wrote no OOM file", id="absent"),
+        pytest.param(b"oom_kill 1", "not JSON", id="not-json"),
+        pytest.param(b"[1]", "exactly one key", id="not-an-object"),
+        pytest.param(b'{"oom_kills":0,"x":1}', "exactly one key", id="extra-key"),
+        pytest.param(b'{"oom_kills":-1}', "not a count", id="negative"),
+        pytest.param(b'{"oom_kills":true}', "not a count", id="bool"),
+        pytest.param(b'{"oom_kills":"1"}', "not a count", id="string"),
+    ],
+)
+def test_a_bad_oom_file_is_runner_failed(
+    tmp_path: Path, oom_file: bytes | None, message: str
+) -> None:
+    docker = FakeDocker(result=encode(sample_report()), oom_file=oom_file)
+    runner, request = _runner(tmp_path, docker)
+
+    with pytest.raises(RunnerFailed, match=message):
+        runner.run(request)
+
+    assert "inspect" not in docker.verbs()
+
+
+def test_an_oom_file_symlinked_to_a_host_file_is_not_followed(tmp_path: Path) -> None:
+    host_file = tmp_path / "host-secret"
+    host_file.write_bytes(b'{"oom_kills":0}')
+
+    def plant(result: Path) -> None:
+        (result.parent / "oom.json").symlink_to(host_file)
+
+    docker = FakeDocker(result=encode(sample_report()), oom_file=None, plant=plant)
+    runner, request = _runner(tmp_path, docker)
+
+    with pytest.raises(RunnerFailed, match="OOM file cannot be opened"):
+        runner.run(request)
+
+
+def test_an_oom_file_left_from_an_earlier_run_is_not_read(tmp_path: Path) -> None:
+    docker = FakeDocker(result=encode(sample_report()), oom_file=None)
+    runner, request = _runner(tmp_path, docker)
+    (request.output_dir / "oom.json").write_bytes(b'{"oom_kills":0}')
+
+    with pytest.raises(RunnerFailed, match="wrote no OOM file"):
+        runner.run(request)
+
+
 def test_a_failed_inspect_is_unavailable_not_a_pass(tmp_path: Path) -> None:
-    docker = FakeDocker(result=encode(sample_report()), inspect_fails=True)
+    docker = FakeDocker(
+        result=encode(sample_report()), oom_file=_OOM_UNKNOWN, inspect_fails=True
+    )
     runner, request = _runner(tmp_path, docker)
 
     with pytest.raises(RunnerUnavailable, match="could not inspect"):

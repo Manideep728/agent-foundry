@@ -9,6 +9,7 @@ struct Options {
     std::string commands;
     std::string workdir;
     std::string result;
+    std::string oom_result;
     std::string log_dir;
     long long timeout_ms = 0;
     long long total_timeout_ms = 0;

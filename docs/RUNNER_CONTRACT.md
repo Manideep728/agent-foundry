@@ -19,6 +19,7 @@ Schema version: **1**.
 afrunner --commands    /in/commands.txt
          --workdir     /work
          --result      /out/result.json
+         --oom-result  /out/oom.json
          --log-dir     /out/logs
          --timeout-ms  120000
          --total-timeout-ms 600000
@@ -41,7 +42,7 @@ does not store the `docker run` command line yet.
 | Path | Mode | Contents |
 |---|---|---|
 | `/in` | read-only | `commands.txt` |
-| `/out` | read-write | `result.json`, `logs/` |
+| `/out` | read-write | `result.json`, `oom.json`, `logs/` |
 | `/work` | read-write | the repository copy the agent patched |
 
 `/in` is read-only because the patch under test is model-generated and executes with the same
@@ -151,6 +152,27 @@ exiting, and stops early when no child is left. It does not wait after a stop re
 does the per-command wait. An orphan that outlives that wait is not counted; in the container it
 ends with PID 1.
 
+## OOM count
+
+Written to `--oom-result` after the last command, before `result.json`, and in the same atomic way.
+A reader that finds `result.json` can therefore rely on this file too.
+
+```
+{"oom_kills":1}
+```
+
+`oom_kills` is the `oom_kill` counter of the runner's cgroup, read from
+`/sys/fs/cgroup/memory.events`: the number of processes in the cgroup that the OOM killer killed
+during the run. In a container with a private cgroup namespace, which is the Docker default on
+cgroups v2, that cgroup is the container. The kernel increments the counter before it sends
+`SIGKILL`, so the count is final when the runner reads it.
+
+The value is `null` when the counter cannot be read: on cgroups v1, or on a host's root cgroup,
+which has no `memory.events`. `null` means "unknown", never zero.
+
+The file is separate from `result.json` because only the Docker runner uses it. A run with a
+nonzero count never becomes a measurement, so the count has no place in the stored report.
+
 ## Exit codes
 
 **The exit code describes the runner, not the commands.** Whether validation passed is in
@@ -162,7 +184,7 @@ ends with PID 1.
 | 2 | Usage error: unknown flag, missing flag, unparseable number. |
 | 3 | Command file unreadable, not a regular file, malformed, or holding no commands. |
 | 4 | `--workdir` missing or not a directory. |
-| 5 | Could not write the result file or log directory. |
+| 5 | Could not write the result file, the OOM file or the log directory. |
 | 6 | Internal error: `fork`, `pipe2`, `poll` or `signalfd` failed. |
 | 7 | Aborted by a signal to the runner itself. A partial result is written where possible. |
 
@@ -181,9 +203,10 @@ host's memory ceiling as agent failures across an entire benchmark.
 The same kill can also reach the runner inside a command. `/bin/sh` in the image forks even a
 simple command, so when the memory limit kills the command's process, the shell exits `137` and the
 runner reports `exited` with exit code `137`. The runner cannot tell that from a command that exits
-137 by itself. The control plane can: after the container stops, it reads `State.OOMKilled` from
-`docker inspect`, which is true when the memory limit killed any process in the container. A run
-with that flag set is a harness failure whatever the result file says.
+137 by itself from its exit status alone. The OOM count can: a run with a nonzero `oom_kills` is a
+harness failure whatever the result file says. When the count is `null`, the control plane reads
+`State.OOMKilled` from `docker inspect` instead. That flag comes from an asynchronous Docker event,
+and under CPU load the event is sometimes lost, so the flag is only the fallback.
 
 ## Rules that decide what a result means
 

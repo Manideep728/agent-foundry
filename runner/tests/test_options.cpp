@@ -36,6 +36,7 @@ std::vector<std::string> contract_args() {
         "--commands",           "/in/commands.txt",
         "--workdir",            "/work",
         "--result",             "/out/result.json",
+        "--oom-result",         "/out/oom.json",
         "--log-dir",            "/out/logs",
         "--timeout-ms",         "120000",
         "--total-timeout-ms",   "600000",
@@ -179,8 +180,8 @@ TEST(Options, AcceptsAZeroGraceAndDrainWindow) {
 
 TEST(Options, RejectsEachMissingRequiredFlag) {
     for (const std::string_view flag :
-         {"--commands", "--workdir", "--result", "--log-dir", "--timeout-ms",
-          "--total-timeout-ms", "--grace-ms", "--max-log-bytes", "--tail-bytes",
+         {"--commands", "--workdir", "--result", "--oom-result", "--log-dir",
+          "--timeout-ms", "--total-timeout-ms", "--grace-ms", "--max-log-bytes", "--tail-bytes",
           "--drain-after-exit-ms"}) {
         SCOPED_TRACE(flag);
         EXPECT_EQ(error_code(parse(args_without(flag))), afrunner::exit_codes::usage);

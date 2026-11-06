@@ -13,21 +13,26 @@ Three directories are mounted:
 - `in/` read-only at `/in`, holding `commands.txt`. It sits beside `out/`, not
   inside it, because `/out` is writable and a patch that could rewrite the
   command file could rewrite the thing judging it.
-- `out/` read-write at `/out`, where the runner writes `result.json` and logs.
+- `out/` read-write at `/out`, where the runner writes `result.json`,
+  `oom.json` and logs.
 - the repository copy read-write at `/work`.
 
-Because the patch can write to `/out`, `result.json` is untrusted when it comes
-back: it is opened without following symlinks, its size is capped, and it is
-decoded strictly.
+Because the patch can write to `/out`, both files are untrusted when they come
+back: they are opened without following symlinks, their size is capped, and
+they are decoded strictly.
 
-After the container stops, `docker inspect` reports whether the memory limit
-killed anything inside it. That verdict overrides the runner's own result,
-because the runner sees an OOM-killed command only as an exit status.
+Whether the memory limit killed anything inside the container overrides the
+runner's own result, because the runner sees an OOM-killed command only as an
+exit status. The runner reads the kernel's count of OOM kills in its cgroup and
+writes it to `oom.json`. `docker inspect` answers only when the runner could not
+read that count, because Docker learns of a kill from an event that is lost
+under load.
 """
 
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import re
 import stat
@@ -125,8 +130,9 @@ def build_argv(request: ValidationRequest, config: DockerConfig) -> list[str]:
             f"{request.output_dir}, so the container cannot see it"
         ) from error
 
-    # No --rm: the stopped container must still exist for `docker inspect` to
-    # read State.OOMKilled. DockerRunner.run removes it on every path.
+    # No --rm: when the runner cannot read the OOM count, the stopped container
+    # must still exist for `docker inspect` to read State.OOMKilled.
+    # DockerRunner.run removes it on every path.
     argv = [
         "docker",
         "run",
@@ -166,6 +172,8 @@ def build_argv(request: ValidationRequest, config: DockerConfig) -> list[str]:
         "/work",
         "--result",
         "/out/result.json",
+        "--oom-result",
+        "/out/oom.json",
         "--log-dir",
         f"/out/{log_dir.as_posix()}",
         "--timeout-ms",
@@ -286,6 +294,7 @@ class DockerRunner:
         result_path = request.output_dir / "result.json"
         # A file from anything but this container must not be read as its result.
         result_path.unlink(missing_ok=True)
+        (request.output_dir / "oom.json").unlink(missing_ok=True)
 
         argv = build_argv(request, self._config)
         try:
@@ -326,8 +335,9 @@ class DockerRunner:
         # through /bin/sh as an ordinary `exited 137`, which the runner cannot
         # tell from a command that chose to exit 137, and which would otherwise
         # be scored as a failed test.
-        if completed.returncode in (_EXIT_OK, _EXIT_ABORTED) and self._oom_killed(
-            request.run_id
+        code = completed.returncode
+        if code in (_EXIT_OK, _EXIT_ABORTED) and self._oom_killed(
+            request.run_id, request.output_dir / "oom.json", code
         ):
             raise RunnerUnavailable(
                 "a process in the container was killed by the memory limit of "
@@ -336,12 +346,26 @@ class DockerRunner:
             )
         return _interpret(completed, result_path)
 
-    def _oom_killed(self, run_id: RunId) -> bool:
-        """Whether the kernel's OOM killer acted inside the run's container.
+    def _oom_killed(self, run_id: RunId, oom_path: Path, code: int) -> bool:
+        """Whether the kernel's OOM killer acted inside the run's container."""
+        try:
+            kills = _decode_oom_kills(_read_output(oom_path, "OOM file"))
+        except MalformedResult as error:
+            raise RunnerFailed(
+                f"afrunner exited {code} but {oom_path} is malformed: {error}"
+            ) from error
+        if kills is not None:
+            return kills > 0
+        return self._docker_says_oom_killed(run_id)
+
+    def _docker_says_oom_killed(self, run_id: RunId) -> bool:
+        """The fallback for a runner that could not read its cgroup's count.
 
         Docker sets State.OOMKilled for a kill of any process in the container's
         cgroup, not only PID 1: observed true for a killed child while afrunner
-        exited 0, and false for a command that exited 137 by itself.
+        exited 0, and false for a command that exited 137 by itself. But it
+        learns of the kill from an asynchronous event, and under CPU load that
+        event is sometimes lost for good, so the runner's count comes first.
         """
         name = container_name(run_id)
         try:
@@ -390,7 +414,7 @@ def _interpret(
         raise RunnerUnavailable(f"docker run exited {code}: {_stderr_tail(completed)}")
 
     try:
-        report = decode_report(_read_result(result_path))
+        report = decode_report(_read_output(result_path, "result file"))
     except MalformedResult as error:
         raise RunnerFailed(
             f"afrunner exited {code} but {result_path} is malformed: {error}"
@@ -406,26 +430,43 @@ def _interpret(
     return report
 
 
-def _read_result(path: Path) -> bytes:
-    # The patch can write to /out. O_NOFOLLOW stops a result.json symlinked to a
+def _read_output(path: Path, what: str) -> bytes:
+    # The patch can write to /out. O_NOFOLLOW stops a file there symlinked to a
     # host file from being read through, and O_NONBLOCK stops a FIFO in its
     # place from blocking the open forever.
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError as error:
-        raise MalformedResult("the runner wrote no result file") from error
+        raise MalformedResult(f"the runner wrote no {what}") from error
     except OSError as error:
-        raise MalformedResult(f"the result file cannot be opened: {error}") from error
+        raise MalformedResult(f"the {what} cannot be opened: {error}") from error
 
     if not stat.S_ISREG(os.fstat(descriptor).st_mode):
         os.close(descriptor)
-        raise MalformedResult("the result file is not a regular file")
+        raise MalformedResult(f"the {what} is not a regular file")
 
     with os.fdopen(descriptor, "rb") as handle:
         data = handle.read(_MAX_RESULT_BYTES + 1)
     if len(data) > _MAX_RESULT_BYTES:
-        raise MalformedResult(f"the result file exceeds {_MAX_RESULT_BYTES} bytes")
+        raise MalformedResult(f"the {what} exceeds {_MAX_RESULT_BYTES} bytes")
     return data
+
+
+def _decode_oom_kills(data: bytes) -> int | None:
+    """`{"oom_kills": N}` or `{"oom_kills": null}`, and nothing else."""
+    try:
+        raw = json.loads(data)
+    except ValueError as error:
+        raise MalformedResult(f"not JSON: {error}") from error
+    if not isinstance(raw, dict) or raw.keys() != {"oom_kills"}:
+        raise MalformedResult('expected exactly one key, "oom_kills"')
+    kills = raw["oom_kills"]
+    if kills is None:
+        return None
+    # bool is a subclass of int, and true is not a count.
+    if type(kills) is not int or kills < 0:
+        raise MalformedResult(f"oom_kills is {kills!r}, not a count or null")
+    return kills
 
 
 def _stderr_tail(completed: subprocess.CompletedProcess[bytes]) -> str:

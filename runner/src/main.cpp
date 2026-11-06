@@ -4,6 +4,7 @@
 #include <string>
 #include <variant>
 
+#include "cgroup.hpp"
 #include "commands.hpp"
 #include "exit_codes.hpp"
 #include "options.hpp"
@@ -85,6 +86,16 @@ int main(int argc, char** argv) {
         !problem.empty()) {
         return fail("the report violates its own contract: " + problem,
                     af::exit_codes::internal);
+    }
+
+    // Before result.json, whose presence says the runner finished, so a reader
+    // that finds the result can rely on this file too. Read after every
+    // command and orphan is reaped, so the count covers the whole run.
+    if (const std::string problem = af::write_atomically(
+            options.oom_result,
+            af::serialise_oom_kills(af::read_oom_kills(af::memory_events_path)));
+        !problem.empty()) {
+        return fail(problem, af::exit_codes::output);
     }
 
     // Written even when the run was cut short. A partial result names every

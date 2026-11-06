@@ -359,7 +359,7 @@ a static build of `afrunner` that removes the need to match the distribution.
 
 ## D16 — A memory-limit kill is detected from outside the container
 
-*2026-09-15*
+*2026-09-15. Superseded in part by D36: `docker inspect` is now the fallback.*
 
 **Context.** The validation image's `/bin/sh` forks even a simple `sh -c`
 command. When the memory limit kills a command, the shell survives and exits
@@ -567,3 +567,38 @@ name the environment's interpreter rather than `python3`, and the failing tests
 arrive in a separate patch that has to be applied after the agent has finished
 and before validation starts. The harness already captures the patch before
 validation, so the place to apply it is clean; the work around it is not.
+
+## D36 — The runner counts memory-limit kills
+
+*2026-11-06*
+
+**Context.** D16 trusted `State.OOMKilled`. Docker sets that flag when it
+receives an OOM event from containerd, and under CPU load the event is
+sometimes lost. On a loaded machine the kernel counted the kill
+(`oom_kill 1` in the cgroup's `memory.events`), the command exited 137, and
+the flag stayed false permanently. A wait or a retry cannot correct it. The
+test of a memory-limit kill failed in three of four CI jobs on 2026-11-06, and
+in about one of every hundred trials under local CPU load.
+
+**Options.** (a) Treat every command that exits 137 as a harness failure.
+(b) Have the runner read the kernel's counter and write it beside
+`result.json`. (c) Add the counter to `result.json`.
+
+**Decision: (b).** The runner reads `oom_kill` from
+`/sys/fs/cgroup/memory.events` after the last command and writes
+`{"oom_kills": N}` to `--oom-result`. A nonzero count is a harness failure.
+`docker inspect` answers only when the count is `null`. (a) is the option D16
+rejected: it refuses every suite that exits 137 by itself. (c) changes the
+domain report, the wire format and both database schemas for a value that no
+stored report can hold, because a run with a nonzero count is never stored.
+
+**Consequence.** The verdict comes from the kernel and not from an event, so
+load cannot change it. A clean run on cgroups v2 makes one Docker call fewer.
+The counter is readable only while the container exists, so only a process
+inside the container can read it; that is the runner. The file is untrusted
+like `result.json`, and the runner writes it after every command has ended, so
+a planted copy is replaced.
+
+**What would change it.** A Docker runtime without a private cgroup namespace.
+The count is then `null` on every run, and the fallback is the D16 flag with
+its weakness.

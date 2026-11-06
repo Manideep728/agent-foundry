@@ -13,6 +13,7 @@ PID 1 and `afrunner` is its child.
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 import subprocess
@@ -71,6 +72,8 @@ class Container:
             "/work",
             "--result",
             "/out/result.json",
+            "--oom-result",
+            "/out/oom.json",
             "--log-dir",
             "/out/logs",
             "--timeout-ms",
@@ -99,6 +102,9 @@ class Container:
     def report(self) -> ValidationReport:
         return decode_report(self.result.read_bytes())
 
+    def oom_kills(self) -> object:
+        return json.loads((self.out / "oom.json").read_bytes())["oom_kills"]
+
 
 def test_the_runner_is_pid_1_unless_an_init_is_injected(tmp_path: Path) -> None:
     container = Container(tmp_path, "true\n")
@@ -110,6 +116,21 @@ def test_the_runner_is_pid_1_unless_an_init_is_injected(tmp_path: Path) -> None:
     # Never emulated: the container runs on the host's architecture.
     assert report.arch == platform.machine()
     assert report.shell == "/usr/bin/dash"
+    assert container.oom_kills() == 0
+
+
+def test_the_runner_counts_a_command_the_memory_limit_killed(tmp_path: Path) -> None:
+    # The runner survives and exits 0, and the command reads as `exited 137`.
+    # Only the count says the kernel killed it, and unlike Docker's OOMKilled
+    # flag the count cannot be lost under load.
+    container = Container(
+        tmp_path, "python3 -c \"b = b'x' * (512 * 1024 * 1024)\"\ntrue\n"
+    )
+
+    assert container.run("--memory", "64m", "--memory-swap", "64m") == 0
+
+    assert container.oom_kills() == 1
+    assert container.report().commands[0].exit_code == 137
 
 
 def test_an_orphan_that_left_the_group_is_reaped(tmp_path: Path) -> None:

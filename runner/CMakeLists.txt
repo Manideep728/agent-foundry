@@ -18,6 +18,7 @@ target_compile_options(afrunner_flags INTERFACE -Wall -Wextra -Werror)
 # Everything except main.cpp, so the test binary can link the same objects
 # without inheriting a second main().
 add_library(afrunner_core OBJECT
+    src/cgroup.cpp
     src/child.cpp
     src/clock.cpp
     src/commands.cpp
@@ -60,6 +61,7 @@ if(AFRUNNER_BUILD_TESTS)
 
     add_executable(runner_tests
         tests/test_version.cpp
+        tests/test_cgroup.cpp
         tests/test_child.cpp
         tests/test_commands.cpp
         tests/test_json.cpp
