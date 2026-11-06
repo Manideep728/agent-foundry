@@ -22,9 +22,9 @@ variable "budget_usd" {
 }
 
 variable "instance_type" {
-  description = "The container instance. Each validation is capped at 1 GiB, two run at once, and the broker needs about 1 GiB."
+  description = "The container instance. Each validation is capped at 1 GiB, two run at once, and the broker needs about 1 GiB. An account on the AWS free plan can start only free-tier-eligible types; m7i-flex.large is one, with 2 vCPU and 8 GiB."
   type        = string
-  default     = "t3.large"
+  default     = "m7i-flex.large"
 }
 
 variable "image_tag" {
