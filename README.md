@@ -410,11 +410,50 @@ smoke: exit 0
 This run took 11 minutes: 5 for the deployment and 3 for the destroy. The fake
 agent and one-second validations most likely finished the suite before the
 worker stopped.
-Thus this run does not show redelivery after a worker stops.
+Thus this run does not show redelivery after a worker stops. The local
+measurement in the next section shows it.
 
 The default instance type is `m7i-flex.large`, because an account on the AWS
 free plan can start only free-tier-eligible types. Set
 `TF_VAR_instance_type` to change it.
+
+## Throughput, worker loss and isolation cost
+
+These figures come from one machine: 24 CPUs, WSL2, a local broker, the fake
+agent, and real validation in Docker. Each trial measures 64 runs (8 tasks, 8
+repeats) from the dispatch to the last stored result. The table shows the
+median of three trials.
+
+| Workers | Runs per minute | Speedup |
+|---|---|---|
+| 1 | 104 | 1.0x |
+| 2 | 170 | 1.6x |
+| 4 | 255 | 2.5x |
+
+Four workers cannot share the six partitions of the work topic equally. With
+twelve partitions, four workers measured 274 runs per minute (2.6x). The rest
+of the difference from 4x is the dispatch and start time inside each trial,
+and the one Docker daemon that every worker uses.
+
+One trial stops a worker with `SIGKILL` after it has measured five runs. Kafka
+gives the stopped worker's partitions to the other worker after the 45 s
+session timeout. The other worker measures the remaining 59 runs, including
+the run that the stopped worker was validating. The collector stores 64 of 64
+runs, each one time.
+
+Isolation cost, from 40 runs of each arm in turn, for the two commands of
+`semver-compare`:
+
+| Arm | p50 | p95 |
+|---|---|---|
+| Container, supervisor as PID 1 | 461 ms | 482 ms |
+| Container, `/bin/sh` as PID 1 | 464 ms | 481 ms |
+| Host, no container | 60 ms | 62 ms |
+
+The supervisor adds no time that this measurement can find: the difference is
+3 ms or less, and its sign changes. The container adds about 400 ms per
+validation. For the command `true`, the container adds 195 ms, which is the
+start and stop of the container alone.
 
 ## Agents
 
