@@ -63,7 +63,10 @@ read, because a field may have changed meaning and guessing produces plausible
 wrong data.
 
 Eight benchmark tasks exist, of deliberately varied difficulty and defect
-shape. No benchmark results are published.
+shape. [Benchmark results](#benchmark-results) gives the measured figures for
+two local models, and
+[Throughput, worker loss and isolation cost](#throughput-worker-loss-and-isolation-cost)
+gives the figures for the harness itself.
 
 Design decisions are in [docs/DECISIONS.md](docs/DECISIONS.md). The interface
 between the control plane and the supervisor is in
@@ -81,11 +84,19 @@ make test     # tests only
 ```
 
 Without Docker and the image, the tests that start containers are skipped and
-say so. CI runs two jobs: `make check`, and a runner job that builds the
-supervisor and the image, runs the suite with the container tests active,
-repeats those tests under `docker run --init`, and runs `make doctor`. One test
-skips even there: the `ollama` marker asks a real local model to answer, and the
-hosted runners have neither the server nor the pulled weights.
+say so. CI runs four jobs:
+
+- `control plane` runs the lint, the type check and the tests.
+- `runner` builds the supervisor and the image, and runs the tests with the
+  container tests active. It runs the container tests again under
+  `docker run --init`, and then runs `make doctor`.
+- `kafka` starts a broker and runs the tests with it. Then it runs
+  `make fanout-check` with local workers, with containerised workers, and with
+  a PostgreSQL collector.
+- `postgres` runs the PostgreSQL tests against a real server.
+
+One test skips in every job: the `ollama` marker asks a real local model to
+answer, and the hosted runners have neither the server nor the pulled weights.
 
 `make help` lists the documented targets. Nothing in the project requires
 make; every target is a plain `uv`, `cmake` or `docker` command.
@@ -248,9 +259,11 @@ so a change between two benchmarks is a diff.
 ## Run distributed
 
 A pool of workers can also measure a suite, over Kafka. `af dispatch`
-publishes one message for each task. Each `af worker` measures the messages it
-receives and publishes each record. `af collect` stores the records in one
-database. Kafka is an optional extra: `af run` and `af bench` do not need it.
+publishes one message for each run, keyed by the run identifier, so the runs
+spread over the partitions of the work topic (D37). Each `af worker` measures
+the messages it receives and publishes each record. `af collect` stores the
+records in one database. Kafka is an optional extra: `af run` and `af bench`
+do not need it.
 
 ```
 $ make kafka-up
@@ -286,6 +299,13 @@ once: for example, when a worker stops after it publishes a result and before
 it commits the offset. The worker then republishes the stored record and does
 not measure the task again. The collector stores the first arrival of each run
 and reports a later arrival with different content.
+
+A worker that stops during a validation does not acknowledge the message, so
+Kafka gives the run to another worker after the session timeout. Each
+validation container has a name for one attempt at a run. The container of the
+stopped attempt can therefore stay on the host, and the next attempt still
+starts. Recovery finds every attempt of a run by its `agentfoundry.run_id`
+label.
 
 A worker measures with its own flags. A message for a different agent, model,
 prompt or image, or for a task this checkout does not hold, stops the worker
@@ -409,9 +429,8 @@ smoke: exit 0
 
 This run took 11 minutes: 5 for the deployment and 3 for the destroy. The fake
 agent and one-second validations most likely finished the suite before the
-worker stopped.
-Thus this run does not show redelivery after a worker stops. The local
-measurement in the next section shows it.
+worker stopped. Thus this run does not show redelivery after a worker stops.
+The local measurement in the next section shows it.
 
 The default instance type is `m7i-flex.large`, because an account on the AWS
 free plan can start only free-tier-eligible types. Set
@@ -527,17 +546,62 @@ af run tasks/template-render.toml --agent tools --max-turns 8
 af bench --agent tools --model llama3.2:3b --prompt tools-v1
 ```
 
+## Benchmark results
+
+These figures come from one machine: an RTX 4060 with 8 GiB, under WSL2, with
+Ollama. Every model call starts cold. Each figure counts runs, and the
+durations are ranges. Eight tasks are a small sample; see
+[Limitations](#limitations).
+
+The single-shot agent with `qwen2.5-coder:7b` resolves five of the eight tasks:
+
+```
+$ uv run af bench tasks --agent ollama --model qwen2.5-coder:7b
+...
+suite synthetic  8 task(s)  8 measured of 8 attempted
+  config        single-shot/ollama/qwen2.5-coder:7b [single-shot-v1]
+  image         sha256:41485236f78ec596568ee3a1f07fe144b3a8d1a31e92400f68e8b556dcc4ea6a
+  harness       0.1.0+5b301d6d6bd9
+  resolved      5/8
+  regressed     1/8
+                clean_patch              5
+                patch_with_regressions   1
+                tests_still_failing      2
+...
+  agent         min 4836ms  median 6732ms  max 13737ms
+  validation    min 538ms  median 587ms  max 1708ms
+```
+
+The tool loop with `llama3.2:3b` writes patches, and each one breaks a test
+that passed before. `template-render`, run three times with a 900 s client
+timeout, gives the same result each time. The directory `template-only` holds
+only a copy of `tasks/template-render.toml`:
+
+```
+$ uv run af bench template-only --agent tools --model llama3.2:3b \
+    --prompt tools-v2 --ollama-timeout 900 --repeats 3
+...
+suite synthetic  1 task(s)  3 measured of 3 attempted
+  config        tools/ollama/llama3.2:3b [tools-v2]
+  image         sha256:41485236f78ec596568ee3a1f07fe144b3a8d1a31e92400f68e8b556dcc4ea6a
+  harness       0.1.0+5b301d6d6bd9
+  resolved      0/3
+  regressed     3/3
+  tasks agree   1/1
+...
+  agent         min 467981ms  median 469171ms  max 476688ms
+```
+
 ## Planned scope
 
 The C++ supervisor, the Python control plane and CLI, Docker-isolated
 validation, test-based scoring, SQLite storage with in-place schema upgrades,
 PostgreSQL storage, eight benchmark tasks, three agents and Markdown report
-generation exist. The
-first release also needs a hosted-provider adapter.
+generation exist. The first release also needs a hosted-provider adapter.
 
-Distributed execution over Kafka exists on one machine, and on AWS ECS with
-RDS and S3. Automatic pull
-requests and a web interface are outside the scope of the project.
+Distributed execution over Kafka exists on one machine, and on AWS ECS with RDS
+and S3. Automatic pull requests and a web interface are outside the scope of
+the project.
 
 ## Limitations
 
@@ -551,8 +615,9 @@ requests and a web interface are outside the scope of the project.
   contents are already trusted.
 - **`--agent tools` writes patches, and none of them is correct yet.** Under
   the prompt `tools-v2` and `llama3.2:3b`, four of seven measured tasks produce
-  a patch and all four break a test that passed before. `resolved` is 0/7. The
-  prompt fixed the mechanism, not the repair.
+  a patch and all four break a test that passed before. `template-render`,
+  measured on its own, also breaks a test in three of three runs. `resolved` is
+  zero in every run. The prompt fixed the mechanism, not the repair.
 - **Reproducibility is shown on one machine.** The repeated suites ran on one
   GPU with one Ollama build. Another GPU or build can compute a different
   result, which is why every run records its environment and harness build.
@@ -562,11 +627,16 @@ requests and a web interface are outside the scope of the project.
   run records the named prompt it used, and a summary groups on it, so two
   prompts are two rows. The same eight tasks chose the prompt and then scored
   it, so the figure is an upper bound on an unseen task.
-- **One task exceeds the client timeout.** `template-render` asks the model for
-  a whole file and has not answered inside 300 s in six attempts. It is
-  reported as `agent_error`, which produces no measurement, rather than as a
-  model failure. `--ollama-timeout SECONDS` raises the bound; a worker's Kafka
-  poll interval rises with it, so a long call is not mistaken for a dead worker.
+- **One task needs a long client timeout.** `template-render` asks the model
+  for a whole file. Under the default 300 s it did not answer in six attempts,
+  and each one was reported as `agent_error`, which produces no measurement.
+  With `--ollama-timeout 900`, each of three runs finished in 468 to 477 s. A
+  worker's Kafka poll interval rises with the timeout, so a long call is not
+  mistaken for a dead worker.
+- **A stopped worker's container stays on the host.** The next attempt of the
+  run starts beside it, but nothing removes the stopped container. When no
+  worker is running, remove all of them with
+  `docker container prune --filter label=agentfoundry.run_id`.
 - **Tool calls do not always arrive on the tool channel.** `llama3.2:3b` uses
   the documented `tool_calls` field; both `qwen2.5-coder` models write the call
   into the message body instead, and the 3B one sends several JSON objects
@@ -575,9 +645,9 @@ requests and a web interface are outside the scope of the project.
   Guessing at a malformed call produces a plausible patch from a misread reply,
   which is worse than refusing it.
 
-Benchmark numbers, when they exist, will name the machine that produced them
-and be reported as ranges across runs. Results from different model providers
-will not be averaged together.
+Each measured figure in this file names the machine that produced it, and
+durations are ranges across runs. Results from different model providers are
+never averaged together.
 
 ## Licence
 
