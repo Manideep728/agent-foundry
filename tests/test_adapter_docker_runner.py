@@ -39,6 +39,8 @@ from tests.result_samples import encode, sample_report
 
 REPO = Path(__file__).resolve().parent.parent
 RUN_ID = RunId("run-0001")
+ATTEMPT = "a1b2c3d4"
+NAME = container_name(RUN_ID, ATTEMPT)
 
 
 def _request(root: Path, *, stop_on_failure: bool = False) -> ValidationRequest:
@@ -85,7 +87,7 @@ def test_every_bind_source_is_an_absolute_path(tmp_path: Path, monkeypatch) -> N
         log_dir=Path("runs/out/logs"),
     )
 
-    argv = build_argv(relative, DockerConfig())
+    argv = build_argv(relative, DockerConfig(), name=NAME)
 
     sources = [
         part.split("source=", 1)[1].split(",", 1)[0]
@@ -99,7 +101,7 @@ def test_every_bind_source_is_an_absolute_path(tmp_path: Path, monkeypatch) -> N
 def test_the_container_has_no_network_and_no_capabilities(tmp_path: Path) -> None:
     # A project invariant: validation runs with --network none, asserted on the
     # argv rather than trusted to an integration test.
-    argv = build_argv(_request(tmp_path), DockerConfig())
+    argv = build_argv(_request(tmp_path), DockerConfig(), name=NAME)
 
     assert _value_after(argv, "--network") == "none"
     assert _value_after(argv, "--pull") == "never"
@@ -109,7 +111,7 @@ def test_the_container_has_no_network_and_no_capabilities(tmp_path: Path) -> Non
 
 def test_the_limits_are_integers_and_swap_cannot_exceed_memory(tmp_path: Path) -> None:
     config = DockerConfig(memory_bytes=268_435_456, pids_limit=64, cpu_quota_us=50_000)
-    argv = build_argv(_request(tmp_path), config)
+    argv = build_argv(_request(tmp_path), config, name=NAME)
 
     assert _value_after(argv, "--memory") == "268435456"
     assert _value_after(argv, "--memory-swap") == "268435456"
@@ -120,7 +122,7 @@ def test_the_limits_are_integers_and_swap_cannot_exceed_memory(tmp_path: Path) -
 
 def test_the_command_file_is_mounted_read_only_outside_out(tmp_path: Path) -> None:
     request = _request(tmp_path)
-    argv = build_argv(request, DockerConfig())
+    argv = build_argv(request, DockerConfig(), name=NAME)
     mounts = [arg for arg in argv if arg.startswith("--mount=")]
 
     assert mounts == [
@@ -134,13 +136,13 @@ def test_docker_options_precede_the_image_and_runner_flags_follow(
     tmp_path: Path,
 ) -> None:
     config = DockerConfig(image="afrunner:test", grace_ms=1_500, user="1000:1000")
-    argv = build_argv(_request(tmp_path), config)
+    argv = build_argv(_request(tmp_path), config, name=NAME)
     image_at = argv.index("afrunner:test")
 
     assert argv[:2] == ["docker", "run"]
     # Kept after exit so `docker inspect` can read State.OOMKilled.
     assert "--rm" not in argv
-    assert _value_after(argv, "--name") == "af-run-0001"
+    assert _value_after(argv, "--name") == "af-run-0001-a1b2c3d4"
     assert "--user" in argv[:image_at]
     runner_flags = argv[image_at + 1 :]
     assert runner_flags == [
@@ -170,22 +172,24 @@ def test_docker_options_precede_the_image_and_runner_flags_follow(
 
 
 def test_stop_on_failure_is_passed_only_when_requested(tmp_path: Path) -> None:
-    assert "--stop-on-failure" not in build_argv(_request(tmp_path), DockerConfig())
-    assert build_argv(_request(tmp_path, stop_on_failure=True), DockerConfig())[-1] == (
-        "--stop-on-failure"
+    assert "--stop-on-failure" not in build_argv(
+        _request(tmp_path), DockerConfig(), name=NAME
     )
+    assert build_argv(
+        _request(tmp_path, stop_on_failure=True), DockerConfig(), name=NAME
+    )[-1] == ("--stop-on-failure")
 
 
 def test_a_log_dir_outside_out_is_refused(tmp_path: Path) -> None:
     outside = replace(_request(tmp_path), log_dir=tmp_path / "elsewhere")
 
     with pytest.raises(RunnerFailed, match="not inside output_dir"):
-        build_argv(outside, DockerConfig())
+        build_argv(outside, DockerConfig(), name=NAME)
 
 
 def test_a_path_with_a_comma_is_refused(tmp_path: Path) -> None:
     with pytest.raises(RunnerFailed, match="comma"):
-        build_argv(_request(tmp_path / "a,b"), DockerConfig())
+        build_argv(_request(tmp_path / "a,b"), DockerConfig(), name=NAME)
 
 
 # --- running and interpreting ----------------------------------------------
@@ -213,7 +217,10 @@ class FakeDocker:
         plant: Callable[[Path], None] | None = None,
         image_digest: bytes = b"sha256:" + b"a" * 64 + b"\n",
         image_inspect_fails: bool = False,
+        listed: bytes = b"",
     ) -> None:
+        # What `docker ps` answers: the containers recovery finds by label.
+        self.listed = listed
         self.image_digest = image_digest
         self.image_inspect_fails = image_inspect_fails
         self.returncode = returncode
@@ -245,6 +252,8 @@ class FakeDocker:
             if self.image_inspect_fails:
                 return subprocess.CompletedProcess(argv, 1, b"", b"No such image")
             return subprocess.CompletedProcess(argv, 0, self.image_digest, b"")
+        if argv[:2] == ["docker", "ps"]:
+            return subprocess.CompletedProcess(argv, 0, self.listed, b"")
         if argv[:2] == ["docker", "rm"]:
             if self.rm_fails:
                 return subprocess.CompletedProcess(argv, 1, b"", b"daemon went away")
@@ -271,7 +280,10 @@ def _runner(
 ) -> tuple[DockerRunner, ValidationRequest]:
     request = _request(tmp_path)
     docker.out_dir = request.output_dir
-    return DockerRunner(DockerConfig(user="1000:1000"), run_process=docker), request
+    runner = DockerRunner(
+        DockerConfig(user="1000:1000"), run_process=docker, new_attempt=lambda: ATTEMPT
+    )
+    return runner, request
 
 
 def _signal_report() -> bytes:
@@ -393,7 +405,7 @@ def test_a_host_timeout_removes_the_container(tmp_path: Path) -> None:
     with pytest.raises(RunnerUnavailable, match="host budget"):
         runner.run(request)
 
-    assert docker.calls[-1] == ["docker", "rm", "--force", container_name(RUN_ID)]
+    assert docker.calls[-1] == ["docker", "rm", "--force", NAME]
 
 
 # --- memory limit and container lifetime -----------------------------------
@@ -418,7 +430,7 @@ def test_an_uncounted_clean_run_is_inspected_then_removed(tmp_path: Path) -> Non
     runner.run(request)
 
     assert docker.verbs() == ["image", "run", "inspect", "rm"]
-    assert docker.calls[2][-1] == container_name(RUN_ID)
+    assert docker.calls[2][-1] == NAME
 
 
 @pytest.mark.parametrize(
@@ -708,3 +720,57 @@ def test_a_runner_reports_no_digest_before_it_has_run(tmp_path: Path) -> None:
     runner, _ = _runner(tmp_path, FakeDocker(result=encode(sample_report())))
 
     assert runner.image_digest is None
+
+
+# --- one container per attempt ---------------------------------------------
+
+
+def test_a_redelivered_run_does_not_reuse_the_dead_attempts_container_name(
+    tmp_path: Path,
+) -> None:
+    """A worker killed mid-validation leaves `af-<run>-<attempt>` behind; the
+    worker that receives the run again must not ask Docker for that name."""
+    docker = FakeDocker(result=encode(sample_report()))
+    request = _request(tmp_path)
+    docker.out_dir = request.output_dir
+    runner = DockerRunner(DockerConfig(user="1000:1000"), run_process=docker)
+
+    runner.run(request)
+    runner.run(request)
+
+    runs = [call for call in docker.calls if call[1] == "run"]
+    names = [_value_after(call, "--name") for call in runs]
+    assert len(set(names)) == 2
+    for call in runs:
+        assert _value_after(call, "--label") == f"agentfoundry.run_id={RUN_ID.value}"
+
+
+def test_recovery_removes_every_container_the_run_left(tmp_path: Path) -> None:
+    docker = FakeDocker(listed=b"0f1e2d3c4b5a\n9a8b7c6d5e4f\n")
+    runner, _ = _runner(tmp_path, docker)
+
+    runner.remove_container(RUN_ID)
+
+    assert docker.calls == [
+        [
+            "docker",
+            "ps",
+            "--all",
+            "--quiet",
+            "--filter",
+            f"label=agentfoundry.run_id={RUN_ID.value}",
+        ],
+        ["docker", "rm", "--force", "0f1e2d3c4b5a"],
+        ["docker", "rm", "--force", "9a8b7c6d5e4f"],
+    ]
+
+
+def test_recovery_of_a_run_with_no_container_left_removes_nothing(
+    tmp_path: Path,
+) -> None:
+    docker = FakeDocker(listed=b"")
+    runner, _ = _runner(tmp_path, docker)
+
+    runner.remove_container(RUN_ID)
+
+    assert docker.verbs() == ["ps"]

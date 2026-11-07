@@ -35,6 +35,7 @@ import contextlib
 import json
 import os
 import re
+import secrets
 import stat
 import subprocess
 from collections.abc import Callable
@@ -111,16 +112,29 @@ def _run_process(
     return subprocess.run(argv, capture_output=True, timeout=timeout_s, check=False)
 
 
-def container_name(run_id: RunId) -> str:
-    """The name recovery uses to find a container a crashed run left behind."""
-    return f"af-{run_id.value}"
+def container_name(run_id: RunId, attempt: str) -> str:
+    """One container per attempt at a run, never one per run.
+
+    A worker killed during a validation leaves its container behind, and Kafka
+    redelivers the run to another worker. Under a name made of the run id
+    alone, that worker's `docker run` is refused (exit 125, name in use) and the
+    run is stored as an infrastructure failure. Recovery does not need the
+    name: it finds every attempt by the `agentfoundry.run_id` label.
+    """
+    return f"af-{run_id.value}-{attempt}"
+
+
+def _new_attempt() -> str:
+    return secrets.token_hex(4)
 
 
 def inbox_for(request: ValidationRequest) -> Path:
     return request.output_dir.parent / "in"
 
 
-def build_argv(request: ValidationRequest, config: DockerConfig) -> list[str]:
+def build_argv(
+    request: ValidationRequest, config: DockerConfig, *, name: str
+) -> list[str]:
     """The complete `docker run` command line. Pure, so it is tested directly."""
     try:
         log_dir = request.log_dir.relative_to(request.output_dir)
@@ -137,7 +151,7 @@ def build_argv(request: ValidationRequest, config: DockerConfig) -> list[str]:
         "docker",
         "run",
         "--name",
-        container_name(request.run_id),
+        name,
         "--label",
         f"agentfoundry.run_id={request.run_id.value}",
         # A missing image is an error, never a silent download: the image is
@@ -218,9 +232,11 @@ class DockerRunner:
         self,
         config: DockerConfig | None = None,
         run_process: ProcessRunner = _run_process,
+        new_attempt: Callable[[], str] = _new_attempt,
     ) -> None:
         self._config = config or DockerConfig()
         self._run_process = run_process
+        self._new_attempt = new_attempt
         self._image_digest: str | None = None
 
     @property
@@ -296,22 +312,27 @@ class DockerRunner:
         result_path.unlink(missing_ok=True)
         (request.output_dir / "oom.json").unlink(missing_ok=True)
 
-        argv = build_argv(request, self._config)
+        name = container_name(request.run_id, self._new_attempt())
+        argv = build_argv(request, self._config, name=name)
         try:
-            report = self._execute(request, argv, result_path)
+            report = self._execute(request, argv, result_path, name)
         except BaseException:
             # Every failure path, including a timeout and ^C, still removes the
             # container, and a failed removal must not hide the original error.
             with contextlib.suppress(RunnerUnavailable):
-                self.remove_container(request.run_id)
+                self._remove(name)
             raise
         # On success a container that cannot be removed is a host problem worth
         # stopping for, so this one is allowed to raise.
-        self.remove_container(request.run_id)
+        self._remove(name)
         return report
 
     def _execute(
-        self, request: ValidationRequest, argv: list[str], result_path: Path
+        self,
+        request: ValidationRequest,
+        argv: list[str],
+        result_path: Path,
+        name: str,
     ) -> ValidationReport:
         budget_ms = (
             request.total_timeout_ms
@@ -337,7 +358,7 @@ class DockerRunner:
         # be scored as a failed test.
         code = completed.returncode
         if code in (_EXIT_OK, _EXIT_ABORTED) and self._oom_killed(
-            request.run_id, request.output_dir / "oom.json", code
+            name, request.output_dir / "oom.json", code
         ):
             raise RunnerUnavailable(
                 "a process in the container was killed by the memory limit of "
@@ -346,7 +367,7 @@ class DockerRunner:
             )
         return _interpret(completed, result_path)
 
-    def _oom_killed(self, run_id: RunId, oom_path: Path, code: int) -> bool:
+    def _oom_killed(self, name: str, oom_path: Path, code: int) -> bool:
         """Whether the kernel's OOM killer acted inside the run's container."""
         try:
             kills = _decode_oom_kills(_read_output(oom_path, "OOM file"))
@@ -356,9 +377,9 @@ class DockerRunner:
             ) from error
         if kills is not None:
             return kills > 0
-        return self._docker_says_oom_killed(run_id)
+        return self._docker_says_oom_killed(name)
 
-    def _docker_says_oom_killed(self, run_id: RunId) -> bool:
+    def _docker_says_oom_killed(self, name: str) -> bool:
         """The fallback for a runner that could not read its cgroup's count.
 
         Docker sets State.OOMKilled for a kill of any process in the container's
@@ -367,7 +388,6 @@ class DockerRunner:
         learns of the kill from an asynchronous event, and under CPU load that
         event is sometimes lost for good, so the runner's count comes first.
         """
-        name = container_name(run_id)
         try:
             completed = self._run_process(
                 ["docker", "inspect", "--format", "{{.State.OOMKilled}}", name],
@@ -384,8 +404,28 @@ class DockerRunner:
         return answer == b"true"
 
     def remove_container(self, run_id: RunId) -> None:
-        """Force-remove the run's container. A container already gone is fine."""
-        name = container_name(run_id)
+        """Force-remove every container of the run, from any attempt.
+
+        Recovery's call: the attempt that crashed is not known, so the run-id
+        label finds it. A run with no container left is fine.
+        """
+        label = f"label=agentfoundry.run_id={run_id.value}"
+        try:
+            listed = self._run_process(
+                ["docker", "ps", "--all", "--quiet", "--filter", label],
+                _DOCKER_CALL_TIMEOUT_S,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as error:
+            raise RunnerUnavailable(f"could not list containers of {run_id}") from error
+        if listed.returncode != 0:
+            raise RunnerUnavailable(
+                f"could not list containers of {run_id}: {_stderr_tail(listed)}"
+            )
+        for container in listed.stdout.decode("ascii", errors="replace").split():
+            self._remove(container)
+
+    def _remove(self, name: str) -> None:
+        """Force-remove one container. A container already gone is fine."""
         try:
             completed = self._run_process(
                 ["docker", "rm", "--force", name], _DOCKER_CALL_TIMEOUT_S
