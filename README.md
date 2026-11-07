@@ -1,76 +1,152 @@
 # AgentFoundry
 
-Claims about AI coding agents are usually unreproducible. A demo shows a patch
-that worked once, on an unnamed repository, with no record of what the model
-was asked, what it cost, how long it took, or what it broke elsewhere in the
-codebase.
+**A test harness for AI coding agents.** AgentFoundry gives an agent a real
+repository task, runs the agent's patch against the repository's own tests in a
+locked-down container, and records the result: what passed, what broke, how
+long it took, and what it cost.
 
-AgentFoundry is an execution and evaluation harness that makes those runs
-measurable. It gives an agent a repository-level task, runs the agent against
-an isolated copy of the repository, validates the resulting patch by executing
-the repository's own tests, and records the patch, the captured output, the
-exit status, wall-clock duration, token usage and estimated cost. The same task
-run twice produces two comparable records.
+[![CI](https://github.com/Manideep728/agent-foundry/actions/workflows/ci.yml/badge.svg)](https://github.com/Manideep728/agent-foundry/actions/workflows/ci.yml)
+![Python 3.12](https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white)
+![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-sandboxed-2496ED?logo=docker&logoColor=white)
+![Kafka](https://img.shields.io/badge/Kafka-distributed-231F20?logo=apachekafka&logoColor=white)
+![AWS](https://img.shields.io/badge/AWS-ECS%20%C2%B7%20RDS%20%C2%B7%20S3-FF9900?logo=amazonwebservices&logoColor=white)
+![License: MIT](https://img.shields.io/badge/license-MIT-green)
 
-## Status
+> A demo of an AI agent shows one patch that worked once. AgentFoundry turns
+> that demo into a measurement: the same task, run the same way, gives a record
+> that you can compare with the next run.
 
-Eight tasks run end to end, in one command: the harness verifies a
-fixture against its pinned content hash, copies it to an isolated workspace,
-invokes an agent, captures the patch, executes the repository's own tests
-inside a container, scores the result, stores it, and writes a report over
-everything it has stored.
+## Headline numbers
 
-`afrunner` is the C++ execution supervisor. It reads a command file,
-runs each line under `/bin/sh -c` in its own process group, captures both
-streams to capped log files, enforces a per-command and a total deadline,
-escalates from `SIGTERM` to `SIGKILL` after a grace period, reaps orphaned
-descendants, and writes a `result.json` the control plane parses. A conformance
-test runs the real binary and reads its output back through the Python types,
-so the two languages cannot drift apart silently.
+Every figure comes from a run of this repository, on the machine named in its
+section below.
 
-A container suite runs the image and checks the behaviour that exists only
-when `afrunner` is PID 1: it reaps orphans that left the command's process
-group, it records a fork refused by `--pids-limit` as `spawn_failed`, it
-writes a partial result and exits 7 on `docker stop`, and it reports a command
-killed by the memory limit. The suite also runs under `docker run --init`.
+| | |
+|---|---|
+| **No lost work** | One worker killed with `SIGKILL` during a suite: **64 of 64 runs** stored, each one time |
+| **Scales out** | **2.5x** throughput with 4 workers (104 to 255 runs per minute) |
+| **Cheap isolation** | The C++ supervisor as PID 1 adds **no measurable time** (3 ms or less); the container adds about 400 ms |
+| **Deployed** | ECS, RDS and S3 on AWS with Terraform: deploy, measure 16 runs, destroy in **11 minutes** |
+| **Reproducible** | 3 repeated suites agree on **8 of 8 tasks**, down to the patch hash and the token count of each call |
+| **Tested** | **1,049** Python tests and **146** C++ tests, in 4 CI jobs with real Docker, Kafka and PostgreSQL |
 
-`make runner-image` packages `afrunner` as a container entrypoint, and `af run`
-validates inside that container by default. The container has no network, no
-capabilities, a read-only command file, and fixed memory, CPU and process
-limits. When the memory limit kills a process, the run is recorded as an
-infrastructure failure, not as a failed test. A run that the control plane did
-not finish has its container removed the next time `af run` starts.
+## How it works
 
-`--runner local` runs the commands directly on the host instead, with no
-isolation, no resource limits and no network restriction -- development only.
-Every run it produces records `pid1=false` and a runner version naming it, so
-those rows are identifiable in the data rather than only in this paragraph.
+```mermaid
+flowchart LR
+    T["Task<br/>fixture + pinned hash<br/>+ test commands"] --> W["Isolated copy<br/>of the repository"]
+    W --> A["Agent<br/>fake · Ollama · tool loop"]
+    A --> P["Patch"]
+    P --> V["Validation container<br/>afrunner as PID 1<br/>no network · no capabilities<br/>memory, CPU and pid limits"]
+    V --> S["Score<br/>fail→pass · pass→pass<br/>regressions"]
+    S --> D[("SQLite or<br/>PostgreSQL")]
+    D --> R["Markdown report"]
+```
 
-Every run records the environment it validated in: the architecture, whether
-the supervisor was PID 1, and the content digest of the image. A run that
-cannot name the environment that produced it is not reproducible, so a
-benchmark table can require those fields rather than trusting them.
+1. **Load the task.** The harness checks the fixture against its pinned content
+   hash and refuses a fixture that changed.
+2. **Run the agent** against a copy of the repository, never the fixture
+   itself, and capture its patch.
+3. **Validate the patch.** `afrunner`, a C++20 supervisor, runs the
+   repository's own tests as PID 1 of a container with no network.
+4. **Score and store.** A task is resolved when its failing tests pass and no
+   passing test breaks. Each run records its tokens, cost, durations, image
+   digest and harness build.
 
-Every run also records the harness build that measured it: the package version
-and the commit, for example `0.1.0+62540b902356`. The suffix `.dirty` shows that
-tracked files differed from that commit. The report lists each build that a
-group of runs spans, so a reader can see when one group of numbers comes from
-two versions of the scoring code.
+## Quick start
 
-The database carries a schema version and upgrades itself in place when an
-older one is opened. A database written by a newer build is refused rather than
-read, because a field may have changed meaning and guessing produces plausible
-wrong data.
+Needs Linux (or WSL2), Docker and [uv](https://docs.astral.sh/uv/).
 
-Eight benchmark tasks exist, of deliberately varied difficulty and defect
-shape. [Benchmark results](#benchmark-results) gives the measured figures for
-two local models, and
-[Throughput, worker loss and isolation cost](#throughput-worker-loss-and-isolation-cost)
-gives the figures for the harness itself.
+```
+$ make runner-image                       # build the validation image
+$ uv run af run tasks/csv-quoted-fields.toml
+run 20260917-030423-1d5f524b  csv-quoted-fields  [synthetic]
+  state       scored
+  outcome     clean_patch
+  resolved    yes         regressed   no
+  fail->pass  1/1          pass->pass  1/1
+  duration    agent 1ms   validation 1227ms
+  ...
+$ uv run af bench                         # every task, one summary per suite
+$ uv run af report --out report.md        # Markdown over everything stored
+```
 
-Design decisions are in [docs/DECISIONS.md](docs/DECISIONS.md). The interface
-between the control plane and the supervisor is in
-[docs/RUNNER_CONTRACT.md](docs/RUNNER_CONTRACT.md).
+The default agent is a scripted fake, so this runs offline. Use
+`--agent ollama --model qwen2.5-coder:7b` for a real local model.
+
+## Distributed and on AWS
+
+```mermaid
+flowchart LR
+    D["af dispatch"] -->|"one message per run"| K[["Kafka<br/>work topic"]]
+    K --> W1["af worker"]
+    K --> W2["af worker"]
+    K --> W3["af worker"]
+    W1 & W2 & W3 -->|"start"| C["afrunner<br/>containers"]
+    W1 & W2 & W3 -->|"run files"| S3[("S3")]
+    W1 & W2 & W3 -->|"records"| K2[["Kafka<br/>results topic"]]
+    K2 --> CO["af collect"] --> DB[("PostgreSQL<br/>RDS")]
+```
+
+Workers take runs from Kafka and validate each run in its own container. A
+collector stores the results in one database. A worker that dies does not
+acknowledge its run, so Kafka gives that run to another worker. `infra/aws/`
+deploys the same layout to ECS, RDS and S3 with Terraform, and
+`infra/aws/smoke.sh` proves it end to end and then destroys it.
+
+## Tech stack
+
+| Layer | Technology |
+|---|---|
+| Execution supervisor | C++20, POSIX process groups, `SIGTERM` to `SIGKILL` escalation, cgroup v2 OOM count |
+| Control plane and CLI | Python 3.12, strict mypy, ruff, pytest |
+| Isolation | Docker: `--network none`, `--cap-drop=ALL`, memory, CPU and pid limits |
+| Storage | SQLite or PostgreSQL behind one contract test suite |
+| Distribution | Kafka (KRaft): idempotent workers and collector |
+| Cloud | AWS ECS on EC2, RDS PostgreSQL, S3, ECR, Terraform |
+| Models | Ollama (local), cold calls at temperature 0 |
+
+The code follows four layers with dependencies that point inward: domain,
+services, adapters and interface. A test reads the imports of `domain/` and
+fails when that code reaches files, the clock, Docker or a model API.
+
+## Contents
+
+- [Build and test](#build-and-test)
+- [Run a task](#run-a-task) · [Run a suite](#run-a-suite) · [Write a report](#write-a-report)
+- [Run distributed](#run-distributed) · [Store runs in PostgreSQL](#store-runs-in-postgresql) · [Run on AWS](#run-on-aws)
+- [Throughput, worker loss and isolation cost](#throughput-worker-loss-and-isolation-cost)
+- [Agents](#agents) · [Benchmark results](#benchmark-results)
+- [Planned scope](#planned-scope) · [Limitations](#limitations)
+- Design: [docs/DECISIONS.md](docs/DECISIONS.md), each decision with its options and its reason, and the supervisor interface, [docs/RUNNER_CONTRACT.md](docs/RUNNER_CONTRACT.md)
+
+## What exists
+
+`afrunner` reads a command file and runs each line under `/bin/sh -c` in its
+own process group. It captures both streams to capped log files and enforces a
+deadline per command and in total. After a grace period it escalates from
+`SIGTERM` to `SIGKILL`, it reaps orphaned descendants, and it writes a
+`result.json`. A conformance test runs the real binary and reads its output
+through the Python types, so the two languages cannot drift apart silently.
+
+A container suite checks the behaviour that exists only when `afrunner` is
+PID 1. It reaps orphans that left the command's process group. It records a
+fork that `--pids-limit` refuses as `spawn_failed`. It writes a partial result
+and exits 7 on `docker stop`. It reports a command that the memory limit
+killed as a harness failure, not as a failed test. The suite also runs under
+`docker run --init`.
+
+`--runner local` runs the commands on the host, with no isolation and no
+limits, for development only. Every run it produces records `pid1=false`, so
+those rows are identifiable in the data.
+
+Every run records the environment that validated it: the architecture,
+whether the supervisor was PID 1, and the image digest. It also records the
+harness build, for example `0.1.0+62540b902356`, with `.dirty` when tracked
+files differed from that commit. The database carries a schema version and
+upgrades itself in place. It refuses a database from a newer build, because a
+field can change meaning, and a guess gives plausible wrong data.
 
 ## Build and test
 
