@@ -602,3 +602,35 @@ a planted copy is replaced.
 **What would change it.** A Docker runtime without a private cgroup namespace.
 The count is then `null` on every run, and the fallback is the D16 flag with
 its weakness.
+
+
+## D37 — Work is keyed by run, not by task
+
+*2026-11-06*
+
+**Context.** `af dispatch` keyed each work message by its task, so that a
+re-dispatch of a task was consumed after the original. A throughput
+measurement with the fake agent, 64 runs (8 tasks, 8 repeats) on a 24-CPU
+machine, found that every repeat of a task shared one partition. Five of the
+eight tasks hashed to one of the six partitions. With four workers, one worker
+measured 40 runs and one measured none. Two workers gave 1.27 times the
+throughput of one, and four workers gave 1.48 times.
+
+**Options.** (a) Keep the task key and accept the imbalance. (b) Key by run
+id. (c) Add partitions.
+
+**Decision: (b).** The run is the unit of work, and a run id is unique, so the
+hash spreads runs evenly. No consumer reads the order that the task key gave:
+the worker, the collector and the report identify each run by its id. (c) does
+not help, because eight keys still fill at most eight partitions, and the
+hash can put several of them on one partition.
+
+**Consequence.** Two dispatches of one task can be consumed in either order.
+The repeats of one task can run on different workers, so a per-task range can
+include more than one machine. Each run records its architecture, image and
+harness build, so the report shows that mix. The partition count is still the
+limit on concurrent workers.
+
+**What would change it.** A consumer that needs the runs of one task in
+dispatch order, for example a run that depends on the result of an earlier
+run.

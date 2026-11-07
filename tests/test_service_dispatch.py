@@ -57,19 +57,17 @@ def test_a_valid_message_is_accepted() -> None:
     assert message.prompt_id == "tools-v2"
 
 
-def test_the_partition_key_is_the_task_not_the_run() -> None:
-    """Keying on the run would spread every message and order nothing.
+def test_two_runs_of_one_task_have_different_partition_keys() -> None:
+    """Repeats of a task must be free to land on different partitions (D37).
 
-    Kafka orders within a partition only. Two dispatches of the same task must
-    land on the same partition so the second cannot overtake the first; two
-    runs of it have different `run_id`s, so a run-keyed message is effectively
-    randomly placed.
+    Keyed on the task, all of them shared one partition, so one worker measured
+    every repeat while the others waited.
     """
     first = make_message(run_id=RunId("run-0001"))
     second = make_message(run_id=RunId("run-0002"))
 
-    assert first.partition_key == b"csv-parser-001"
-    assert first.partition_key == second.partition_key
+    assert first.partition_key == b"run-0001"
+    assert first.partition_key != second.partition_key
 
 
 def test_a_worker_refuses_a_task_whose_fixture_differs() -> None:
@@ -233,13 +231,13 @@ def test_repeats_produce_separate_runs_of_the_same_task() -> None:
     assert [m.task_id.value for m in sent].count("alpha-001") == 2
 
 
-def test_repeats_of_one_task_share_a_partition() -> None:
-    """Repeats are keyed by task, so a range is read from one partition."""
+def test_repeats_of_one_task_spread_over_partitions() -> None:
+    """Repeats are keyed by run (D37), so several workers can share one task."""
     topic = FakeTopic()
 
     run_dispatch([make_task(task_id=TaskId("alpha-001"))], topic, repeats=4)
 
-    assert len({d.partition for d in topic.delivered}) == 1
+    assert len({d.partition for d in topic.delivered}) > 1
 
 
 def test_the_dispatch_is_flushed() -> None:

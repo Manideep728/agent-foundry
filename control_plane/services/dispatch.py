@@ -166,20 +166,16 @@ class TaskRunMessage:
 
     @property
     def partition_key(self) -> bytes:
-        """What Kafka hashes to choose a partition.
+        """What Kafka hashes to choose a partition: the run, not the task (D37).
 
-        The task, not the run. Kafka guarantees order only within a partition,
-        and the order worth having here is per task: every run of
-        `template-render` lands on one partition, so a re-dispatch of a task
-        cannot overtake the original and the two are consumed in the order they
-        were produced. Keying on `run_id` instead would spread each task evenly
-        and guarantee nothing, because every key would be unique.
-
-        The cost is honest and worth naming: a suite whose tasks are unevenly
-        expensive will not balance perfectly across partitions. Throughput is
-        not what this project measures.
+        A run is the unit of work, so the key with a distinct value per run is
+        the one that spreads work evenly over the partitions. Keyed on the
+        task, every repeat of a task shared one partition, and eight tasks over
+        six partitions gave one of four workers 40 of 64 runs. The order that
+        task keys bought, a re-dispatch consumed after the original, is one no
+        consumer reads: runs are stored, deduplicated and reported by run id.
         """
-        return self.task_id.value.encode("utf-8")
+        return self.run_id.value.encode("utf-8")
 
     def accepts(self, task: TaskDefinition) -> None:
         """Raise unless the worker's own copy of the task matches the sender's.
