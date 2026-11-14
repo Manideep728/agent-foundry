@@ -14,8 +14,7 @@ import pytest
 
 from control_plane.adapters.run_lock import exclusive_run_lock
 from control_plane.domain.model import MicroUsd, ModelInvocation, ModelUsage
-from control_plane.interface import cli
-from control_plane.interface.cli import build_parser, main
+from control_plane.interface.cli import bench, build_parser, main
 from control_plane.services.ports import AgentResult
 
 REPO = Path(__file__).resolve().parent.parent
@@ -266,7 +265,7 @@ def test_a_benchmark_stops_before_the_task_that_would_break_the_ceiling(
     abandoning it half-way or spending 300 of an allowed 250, and refusing to
     begin is the only choice that keeps both numbers true.
     """
-    monkeypatch.setattr(cli, "_build_agent", lambda args, clock: SpendingAgent())
+    monkeypatch.setattr(bench, "build_agent", lambda args, clock: SpendingAgent())
     directory = suite_of(
         tmp_path, "csv-quoted-fields", "interval-merge", "path-normalise"
     )
@@ -289,7 +288,7 @@ def test_a_suite_within_its_ceiling_runs_every_task(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The complement: the ceiling must not end a suite it can afford.
-    monkeypatch.setattr(cli, "_build_agent", lambda args, clock: SpendingAgent())
+    monkeypatch.setattr(bench, "build_agent", lambda args, clock: SpendingAgent())
     directory = suite_of(tmp_path, "csv-quoted-fields", "interval-merge")
 
     code = main(

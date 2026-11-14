@@ -11,7 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from control_plane.interface.cli import _poll_interval_ms, build_parser, main
+from control_plane.interface.cli import build_parser, main
+from control_plane.interface.cli import flags as cli_flags
 
 
 @pytest.mark.parametrize("flag", ["--max-messages", "--idle-exit-s"])
@@ -52,7 +53,7 @@ def test_a_worker_takes_the_execution_flags_a_run_needs() -> None:
 
 
 def poll_interval_ms(*flags: str) -> int:
-    return _poll_interval_ms(build_parser().parse_args(["worker", *flags]))
+    return cli_flags.poll_interval_ms(build_parser().parse_args(["worker", *flags]))
 
 
 def test_the_default_model_timeout_keeps_the_measured_poll_interval() -> None:

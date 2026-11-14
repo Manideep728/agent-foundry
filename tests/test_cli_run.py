@@ -15,13 +15,9 @@ from control_plane.adapters.fake_agent import FakeAgent
 from control_plane.adapters.single_shot_agent import SingleShotAgent
 from control_plane.adapters.system import SystemClock
 from control_plane.adapters.tool_use_agent import DEFAULT_MAX_TURNS, ToolUseAgent
-from control_plane.interface.cli import (
-    EXIT_HARNESS_FAILED,
-    EXIT_USAGE,
-    _build_agent,
-    build_parser,
-    main,
-)
+from control_plane.interface.cli import build_parser, main
+from control_plane.interface.cli.common import EXIT_HARNESS_FAILED, EXIT_USAGE
+from control_plane.interface.cli.wiring import build_agent
 from tests.docker_support import IMAGE, requires_image
 
 REPO = Path(__file__).resolve().parent.parent
@@ -65,7 +61,7 @@ def test_run_defaults_to_the_fake_agent() -> None:
     args = build_parser().parse_args(["run", str(TASK_FILE)])
 
     assert args.agent == "fake"
-    assert isinstance(_build_agent(args, SystemClock()), FakeAgent)
+    assert isinstance(build_agent(args, SystemClock()), FakeAgent)
 
 
 def test_the_ollama_agent_is_built_from_the_flags() -> None:
@@ -82,7 +78,7 @@ def test_the_ollama_agent_is_built_from_the_flags() -> None:
         ]
     )
 
-    agent = _build_agent(args, SystemClock())
+    agent = build_agent(args, SystemClock())
 
     assert isinstance(agent, SingleShotAgent)
     # The record must name the model, not this wrapper (D6).
@@ -248,7 +244,7 @@ def test_the_tools_flag_builds_the_loop_with_its_turn_budget() -> None:
         ]
     )
 
-    agent = _build_agent(args, SystemClock())
+    agent = build_agent(args, SystemClock())
 
     assert isinstance(agent, ToolUseAgent)
     # The record names the model, not the wrapper (D6), so the two agents stay
@@ -319,7 +315,7 @@ def test_the_tools_flag_builds_the_loop_with_the_prompt_it_was_given() -> None:
         ["run", "t.toml", "--agent", "tools", "--prompt", "tools-v2"]
     )
 
-    agent = _build_agent(args, SystemClock())
+    agent = build_agent(args, SystemClock())
 
     assert isinstance(agent, ToolUseAgent)
     assert agent.prompt_id == "tools-v2"
@@ -328,7 +324,7 @@ def test_the_tools_flag_builds_the_loop_with_the_prompt_it_was_given() -> None:
 def test_an_agent_built_with_no_prompt_flag_uses_the_measured_one() -> None:
     args = build_parser().parse_args(["run", "t.toml", "--agent", "tools"])
 
-    agent = _build_agent(args, SystemClock())
+    agent = build_agent(args, SystemClock())
 
     assert agent.prompt_id == "tools-v2"
 
