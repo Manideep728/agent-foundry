@@ -48,6 +48,15 @@ class AgentError(ServiceError):
         self.invocations = invocations
 
 
+class GradingPatchNotApplied(ServiceError):
+    """A task's test patch did not apply to its own fixture.
+
+    The files it touches are restored to the fixture first, so the agent cannot
+    cause this: the patch and the fixture disagree, which makes the task wrong.
+    Becomes `FailureCategory.TASK_INVALID`.
+    """
+
+
 class RunAlreadyExists(ServiceError):
     """A run id was recorded twice.
 

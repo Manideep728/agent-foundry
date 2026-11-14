@@ -21,6 +21,7 @@ from control_plane.adapters.local_runner import (
 )
 from control_plane.domain.ids import RunId
 from control_plane.domain.validation import CommandOutcome, ExitReason
+from control_plane.services.errors import RunnerFailed
 from control_plane.services.ports import ValidationRequest
 
 
@@ -276,3 +277,13 @@ def test_the_local_runner_reports_no_image_digest() -> None:
     ones -- the same failure `isolated` and `pid1` exist to prevent.
     """
     assert LocalRunner(RealClock()).image_digest is None
+
+
+def test_a_task_that_needs_an_image_is_refused_on_the_host(tmp_path: Path) -> None:
+    """Its tests would fail for want of the image's interpreter, not the patch."""
+    from dataclasses import replace
+
+    request = replace(request_for(tmp_path, ("true",)), image="afrunner-oss:x")
+
+    with pytest.raises(RunnerFailed, match="use --runner docker"):
+        LocalRunner(RealClock()).run(request)

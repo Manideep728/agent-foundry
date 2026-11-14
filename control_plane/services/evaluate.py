@@ -20,6 +20,7 @@ and the recovery scan marks it INTERRUPTED.
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 from pathlib import Path
 
 from control_plane.adapters.diffing import diff_workspace
@@ -40,16 +41,18 @@ from control_plane.domain.scoring import (
     score,
 )
 from control_plane.domain.states import EvaluationRun, RunState
-from control_plane.domain.task import TaskDefinition
+from control_plane.domain.task import Suite, TaskDefinition
 from control_plane.domain.validation import ValidationReport
 from control_plane.services.errors import (
     AgentError,
+    GradingPatchNotApplied,
     RunnerFailed,
     RunnerUnavailable,
 )
 from control_plane.services.ports import (
     AgentPort,
     AgentResult,
+    GradingPatcher,
     RunRepository,
     ValidationRequest,
     ValidationRunner,
@@ -62,6 +65,19 @@ A run that never reached validation genuinely does not know what architecture
 it would have run on, and a benchmark table that filters on arch will exclude
 it -- which is correct, because it produced no measurement.
 """
+
+
+def _in_environment(
+    request: ValidationRequest, task: TaskDefinition
+) -> ValidationRequest:
+    """The request, with the image and mount point the task names, if any."""
+    if task.environment is None:
+        return request
+    return replace(
+        request,
+        image=task.environment.image,
+        container_workdir=task.environment.workdir,
+    )
 
 
 def _reached_validation(run: EvaluationRun) -> bool:
@@ -96,6 +112,8 @@ class EvaluationService:
         ids: IdGenerator,
         fixtures_root: Path,
         harness_version: str | None,
+        oss_fixtures_root: Path | None = None,
+        grading_patcher: GradingPatcher | None = None,
     ) -> None:
         # Required although it may be None: a default would let a new caller
         # forget it and store every run as "build unknown" without a word.
@@ -107,6 +125,11 @@ class EvaluationService:
         self._ids = ids
         self._fixtures_root = fixtures_root
         self._harness_version = harness_version
+        # A real repository's fixture is extracted from its image into a cache
+        # by `af fetch`, never committed, so it lives apart from the synthetic
+        # fixtures in the source tree.
+        self._oss_fixtures_root = oss_fixtures_root or fixtures_root
+        self._grading_patcher = grading_patcher
 
     def execute(self, task: TaskDefinition, run_id: RunId | None = None) -> RunRecord:
         """Measure `task` once, under `run_id` if the caller already minted one.
@@ -141,7 +164,12 @@ class EvaluationService:
         try:
             run = self._advance(run, RunState.PREPARING)
 
-            fixture_root = self._fixtures_root / task.fixture_id
+            root = (
+                self._oss_fixtures_root
+                if task.suite is Suite.OSS
+                else self._fixtures_root
+            )
+            fixture_root = root / task.fixture_id
             try:
                 digest, entries = digest_tree(fixture_root)
             except DomainError as error:
@@ -204,18 +232,36 @@ class EvaluationService:
                     agent_result.raw_reply, encoding="utf-8"
                 )
 
+            # After the patch is captured, so the graded tests are never part
+            # of what the agent is credited with writing.
+            problem = self._apply_grading_patch(task, workspace.repo, fixture_root)
+            if problem is not None:
+                record = self._fail(
+                    run,
+                    task,
+                    FailureCategory.TASK_INVALID,
+                    problem,
+                    patch=patch,
+                    agent_result=agent_result,
+                    agent_ms=agent_ms,
+                )
+                return record
+
             run = self._advance(run, RunState.VALIDATING)
             validation_started = self._clock.monotonic_ms()
             try:
                 report = self._runner.run(
-                    ValidationRequest(
-                        run_id=run.run_id,
-                        workdir=workspace.repo,
-                        output_dir=workspace.out,
-                        log_dir=workspace.logs,
-                        commands=task.command_file_lines(),
-                        per_command_timeout_ms=task.per_command_timeout_ms,
-                        total_timeout_ms=task.total_timeout_ms,
+                    _in_environment(
+                        ValidationRequest(
+                            run_id=run.run_id,
+                            workdir=workspace.repo,
+                            output_dir=workspace.out,
+                            log_dir=workspace.logs,
+                            commands=task.command_file_lines(),
+                            per_command_timeout_ms=task.per_command_timeout_ms,
+                            total_timeout_ms=task.total_timeout_ms,
+                        ),
+                        task,
                     )
                 )
             except RunnerUnavailable as error:
@@ -294,6 +340,20 @@ class EvaluationService:
                 self._workspaces.discard_repo(workspace)
 
     # --- steps ---------------------------------------------------------------
+
+    def _apply_grading_patch(
+        self, task: TaskDefinition, repo: Path, fixture_root: Path
+    ) -> str | None:
+        """Put the task's graded tests in place, or say why they could not be."""
+        if task.test_patch is None:
+            return None
+        if self._grading_patcher is None:
+            return "the task has a test patch and this service has no patcher"
+        try:
+            self._grading_patcher.apply(repo, fixture_root, task.test_patch)
+        except GradingPatchNotApplied as error:
+            return str(error)
+        return None
 
     def _advance(self, run: EvaluationRun, state: RunState) -> EvaluationRun:
         previous = run.state

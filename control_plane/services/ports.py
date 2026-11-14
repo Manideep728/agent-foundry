@@ -40,6 +40,13 @@ class ValidationRequest:
     total_timeout_ms: int
     stop_on_failure: bool = False
 
+    image: str | None = None
+    """The task's validation image (D39); None means the runner's own."""
+
+    container_workdir: str = "/work"
+    """Where the repository is mounted. A real repository's image installed
+    its environment from a fixed path, and the tests import what is there."""
+
 
 class ValidationRunner(Protocol):
     """Executes validation commands and reports what happened."""
@@ -214,6 +221,17 @@ class RunRepository(Protocol):
         ...
 
     def close(self) -> None: ...
+
+
+class GradingPatcher(Protocol):
+    """Puts a task's graded tests into a workspace after the agent is done."""
+
+    def apply(self, repo: Path, fixture_root: Path, patch: str) -> None:
+        """Restore the files `patch` touches from the fixture, then apply it.
+
+        Raises `GradingPatchNotApplied` when the patch does not apply.
+        """
+        ...
 
 
 class ArtifactsNotStored(Exception):

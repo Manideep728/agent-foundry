@@ -184,12 +184,12 @@ def build_argv(
         config.user,
         _bind(inbox_for(request), "/in", read_only=True),
         _bind(request.output_dir, "/out", read_only=False),
-        _bind(request.workdir, "/work", read_only=False),
-        config.image,
+        _bind(request.workdir, request.container_workdir, read_only=False),
+        request.image or config.image,
         "--commands",
         "/in/commands.txt",
         "--workdir",
-        "/work",
+        request.container_workdir,
         "--result",
         "/out/result.json",
         "--oom-result",
@@ -249,6 +249,7 @@ class DockerRunner:
         self._config = config or DockerConfig()
         self._run_process = run_process
         self._new_attempt = new_attempt
+        self._image = self._config.image
         self._image_digest: str | None = None
 
     @property
@@ -257,7 +258,10 @@ class DockerRunner:
 
     @property
     def runner_version(self) -> str:
-        return f"afrunner in docker image {self._config.image}"
+        # The image the last run validated in. A real-repository task names its
+        # own, and a record claiming the default image would point a reader at
+        # an environment that never ran its tests.
+        return f"afrunner in docker image {self._image}"
 
     @property
     def isolated(self) -> bool:
@@ -267,7 +271,7 @@ class DockerRunner:
     def image_digest(self) -> str | None:
         return self._image_digest
 
-    def _resolve_image_digest(self) -> str | None:
+    def _resolve_image_digest(self, image: str) -> str | None:
         """The content address of the image this run will validate in.
 
         `.Id`, not `RepoDigests[0]`: a repository digest comes from a registry,
@@ -291,7 +295,7 @@ class DockerRunner:
                     "inspect",
                     "--format",
                     "{{.Id}}",
-                    self._config.image,
+                    image,
                 ],
                 _DOCKER_CALL_TIMEOUT_S,
             )
@@ -302,7 +306,7 @@ class DockerRunner:
         answer = completed.stdout.strip().decode("ascii", errors="replace")
         if not _IMAGE_DIGEST.fullmatch(answer):
             raise RunnerUnavailable(
-                f"docker image inspect {self._config.image} exited 0 but "
+                f"docker image inspect {image} exited 0 but "
                 f"answered {answer!r}, which is not an image digest"
             )
         return answer
@@ -313,7 +317,8 @@ class DockerRunner:
         # every run that died -- image missing, daemon down, 137, afrunner
         # crashing -- which are exactly the runs whose provenance gets asked
         # for. One extra call buys a column that is populated when it matters.
-        self._image_digest = self._resolve_image_digest()
+        self._image = request.image or self._config.image
+        self._image_digest = self._resolve_image_digest(self._image)
         inbox = inbox_for(request)
         inbox.mkdir(exist_ok=True)
         (inbox / "commands.txt").write_text(

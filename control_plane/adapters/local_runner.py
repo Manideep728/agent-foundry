@@ -44,6 +44,7 @@ from control_plane.domain.validation import (
     StreamCapture,
     ValidationReport,
 )
+from control_plane.services.errors import RunnerFailed
 from control_plane.services.ports import ValidationRequest
 
 RUNNER_ID = "local-subprocess"
@@ -204,6 +205,14 @@ class LocalRunner:
         return None
 
     def run(self, request: ValidationRequest) -> ValidationReport:
+        if request.image is not None:
+            # A real repository's tests need the interpreter and packages its
+            # image carries. Run on the host they would fail for reasons that
+            # have nothing to do with the patch, and score as the agent's.
+            raise RunnerFailed(
+                f"the task needs the validation image {request.image}; "
+                f"the local runner has no image, so use --runner docker"
+            )
         request.log_dir.mkdir(parents=True, exist_ok=True)
 
         started_at = self._clock.now_unix_ms()

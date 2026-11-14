@@ -180,6 +180,23 @@ def test_stop_on_failure_is_passed_only_when_requested(tmp_path: Path) -> None:
     )[-1] == ("--stop-on-failure")
 
 
+def test_a_task_image_replaces_the_default_and_mounts_where_it_was_built(
+    tmp_path: Path,
+) -> None:
+    """D39: the image's environment imports the code at its own source path."""
+    request = replace(
+        _request(tmp_path), image="afrunner-oss:flask", container_workdir="/testbed"
+    )
+
+    argv = build_argv(request, DockerConfig(image="afrunner:local"), name=NAME)
+
+    assert "afrunner:local" not in argv
+    assert f"--mount=type=bind,source={tmp_path / 'repo'},target=/testbed" in argv
+    image_at = argv.index("afrunner-oss:flask")
+    assert _value_after(argv[image_at:], "--workdir") == "/testbed"
+    assert _value_after(argv, "--network") == "none", "the invariant still holds"
+
+
 def test_a_log_dir_outside_out_is_refused(tmp_path: Path) -> None:
     outside = replace(_request(tmp_path), log_dir=tmp_path / "elsewhere")
 
