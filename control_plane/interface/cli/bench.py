@@ -27,6 +27,7 @@ from control_plane.interface.cli.common import (
 from control_plane.interface.cli.flags import (
     agent_flag_problem,
     ceiling,
+    oss_problem,
     repeats_problem,
 )
 from control_plane.interface.cli.printing import print_line, print_summary
@@ -76,6 +77,10 @@ def bench_tasks(args: argparse.Namespace) -> int:
         # Never EXIT_MEASURED. A benchmark of nothing that exits 0 is a green
         # CI job asserting that zero tasks passed.
         print(f"{PROGRAM}: no task files in {args.directory}", file=sys.stderr)
+        return EXIT_USAGE
+    problem = oss_problem(args, tasks)
+    if problem is not None:
+        print(f"{PROGRAM}: {problem}", file=sys.stderr)
         return EXIT_USAGE
 
     clock = SystemClock()

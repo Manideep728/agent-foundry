@@ -35,6 +35,7 @@ from control_plane.interface.cli.flags import (
     artifacts_problem,
     idle_exit_ms,
     limit_problem,
+    oss_problem,
     poll_interval_ms,
     repeats_problem,
 )
@@ -87,6 +88,10 @@ def dispatch_tasks(args: argparse.Namespace) -> int:
         # The same rule as `bench`: dispatching nothing and exiting 0 is a
         # green command that sent no work.
         print(f"{PROGRAM}: no task files in {args.directory}", file=sys.stderr)
+        return EXIT_USAGE
+    problem = oss_problem(args, tasks)
+    if problem is not None:
+        print(f"{PROGRAM}: {problem}", file=sys.stderr)
         return EXIT_USAGE
 
     clock = SystemClock()
@@ -149,6 +154,10 @@ def run_worker(args: argparse.Namespace) -> int:
         return EXIT_USAGE
     if not tasks:
         print(f"{PROGRAM}: no task files in {args.directory}", file=sys.stderr)
+        return EXIT_USAGE
+    problem = oss_problem(args, tasks)
+    if problem is not None:
+        print(f"{PROGRAM}: {problem}", file=sys.stderr)
         return EXIT_USAGE
 
     clock = SystemClock()

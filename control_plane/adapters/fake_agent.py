@@ -15,6 +15,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+from control_plane.adapters.test_patch import apply_patch
 from control_plane.domain.model import (
     Message,
     MessageRole,
@@ -27,6 +28,7 @@ from control_plane.domain.model import (
 )
 from control_plane.domain.ports import Clock
 from control_plane.domain.task import TaskDefinition
+from control_plane.services.errors import AgentError, GradingPatchNotApplied
 from control_plane.services.ports import AgentResult
 
 AGENT_ID = "fake"
@@ -120,13 +122,24 @@ class FakeAgent:
         )
 
         solution = self._solutions_root / task.fixture_id
+        patch = self._solutions_root / f"{task.fixture_id}.patch"
         if solution.is_dir():
             # dirs_exist_ok because the workspace is already populated: this
             # overlays the solution rather than replacing the tree.
             shutil.copytree(solution, workspace, dirs_exist_ok=True)
-        # A missing solution directory is not an error. It is how a
-        # do-nothing agent is expressed, and the run is then scored as
-        # NO_PATCH_PRODUCED -- which is a measurement, not a failure.
+        elif patch.is_file():
+            # A real-repository task's reference fix comes as the upstream
+            # patch. A copy of every changed file would duplicate a repository
+            # this project does not commit.
+            try:
+                apply_patch(
+                    workspace, patch.read_text(encoding="utf-8"), what="the solution"
+                )
+            except GradingPatchNotApplied as error:
+                raise AgentError(str(error)) from error
+        # A missing solution is not an error. It is how a do-nothing agent is
+        # expressed, and the run is then scored as NO_PATCH_PRODUCED -- which
+        # is a measurement, not a failure.
 
         # No outcome: this agent never reports on its own output. It either
         # applied a solution or found none, and scoring reads the patch to see

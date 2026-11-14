@@ -7,8 +7,12 @@ from pathlib import Path
 
 from control_plane import __version__
 from control_plane.interface.cli.common import (
+    DEFAULT_DATASET,
     DEFAULT_IMAGE,
+    DEFAULT_OSS_DOCKERFILE_DIR,
+    DEFAULT_OSS_TASKS,
     DEFAULT_REPORT,
+    DEFAULT_SOLUTIONS,
     DEFAULT_TASKS,
     PROGRAM,
 )
@@ -17,6 +21,7 @@ from control_plane.interface.cli.flags import (
     add_bus_flag,
     add_db_flag,
     add_limit_flags,
+    add_oss_fixtures_flag,
     add_repeats_flag,
     add_run_flags,
 )
@@ -172,5 +177,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="check that the container runtime enforces the validation limits",
     )
     doctor.add_argument("--image", default=DEFAULT_IMAGE)
+
+    fetch = subcommands.add_parser(
+        "fetch",
+        help="pull and build what the real-repository tasks in a directory need",
+        description=(
+            "For each task that names a base image: pull it by digest, copy "
+            "its source tree out as the fixture and check it against the "
+            "task's pin, then build the validation image with afrunner added. "
+            "Needs the network and several GB per task; a run never does this."
+        ),
+    )
+    fetch.add_argument("directory", type=Path, nargs="?", default=DEFAULT_OSS_TASKS)
+    add_oss_fixtures_flag(fetch)
+    fetch.add_argument(
+        "--dockerfile-dir", type=Path, default=DEFAULT_OSS_DOCKERFILE_DIR
+    )
+
+    importer = subcommands.add_parser(
+        "import-swebench",
+        help="write task files for SWE-bench Lite instances",
+        description=(
+            "Read instances from a downloaded SWE-bench Lite JSONL file and "
+            "write, for each, a task file, its test patch and its reference "
+            "fix. Pulls each instance image to pin it and hash its fixture."
+        ),
+    )
+    importer.add_argument("instances", nargs="+", metavar="INSTANCE_ID")
+    importer.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
+    importer.add_argument("--out", type=Path, default=DEFAULT_OSS_TASKS)
+    importer.add_argument("--solutions", type=Path, default=DEFAULT_SOLUTIONS)
+    add_oss_fixtures_flag(importer)
 
     return parser

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+from collections.abc import Sequence
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -23,6 +24,7 @@ from control_plane.adapters.tool_use_agent import DEFAULT_MAX_TURNS
 from control_plane.domain.budget import validate_ceiling
 from control_plane.domain.errors import DomainError
 from control_plane.domain.model import MicroUsd
+from control_plane.domain.task import Suite, TaskDefinition
 from control_plane.interface.cli.common import (
     AGENT_FAKE,
     AGENT_OLLAMA,
@@ -32,6 +34,7 @@ from control_plane.interface.cli.common import (
     DEFAULT_FIXTURES,
     DEFAULT_IMAGE,
     DEFAULT_MODEL,
+    DEFAULT_OSS_FIXTURES,
     DEFAULT_RUNS,
     DEFAULT_SOLUTIONS,
     PROVIDER_OLLAMA,
@@ -165,6 +168,7 @@ def add_run_flags(parser: argparse.ArgumentParser) -> None:
     add_db_flag(parser)
     parser.add_argument("--runs", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--fixtures", type=Path, default=DEFAULT_FIXTURES)
+    add_oss_fixtures_flag(parser)
     parser.add_argument(
         "--runner",
         choices=(RUNNER_DOCKER, RUNNER_LOCAL),
@@ -175,6 +179,38 @@ def add_run_flags(parser: argparse.ArgumentParser) -> None:
         ),
     )
     add_agent_flags(parser)
+
+
+def add_oss_fixtures_flag(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--oss-fixtures",
+        type=Path,
+        default=DEFAULT_OSS_FIXTURES,
+        help=(
+            "where real-repository fixtures are, as af fetch wrote them "
+            f"(default {DEFAULT_OSS_FIXTURES}, or $AF_FIXTURE_CACHE)"
+        ),
+    )
+
+
+def oss_problem(
+    args: argparse.Namespace, tasks: Sequence[TaskDefinition]
+) -> str | None:
+    """Why these flags cannot measure the real-repository tasks given, if any."""
+    oss = [task for task in tasks if task.suite is Suite.OSS]
+    if not oss:
+        return None
+    if getattr(args, "runner", RUNNER_DOCKER) == RUNNER_LOCAL:
+        return (
+            f"{oss[0].task_id} needs its validation image, and --runner "
+            f"{RUNNER_LOCAL} has none"
+        )
+    if args.agent in (AGENT_SINGLE_SHOT, AGENT_OLLAMA):
+        return (
+            f"{oss[0].task_id} is a whole repository, which does not fit one "
+            f"prompt; use --agent {AGENT_TOOLS}"
+        )
+    return None
 
 
 def add_db_flag(parser: argparse.ArgumentParser) -> None:

@@ -18,7 +18,7 @@ from control_plane.interface.cli.common import (
     RUNNER_DOCKER,
     exit_code_for,
 )
-from control_plane.interface.cli.flags import agent_flag_problem
+from control_plane.interface.cli.flags import agent_flag_problem, oss_problem
 from control_plane.interface.cli.printing import print_record
 from control_plane.interface.cli.wiring import build_runners, recover_and_evaluate
 
@@ -33,6 +33,10 @@ def run_task(args: argparse.Namespace) -> int:
         task = load_task(args.task_file)
     except DomainError as error:
         print(f"{PROGRAM}: {error}", file=sys.stderr)
+        return EXIT_USAGE
+    problem = oss_problem(args, (task,))
+    if problem is not None:
+        print(f"{PROGRAM}: {problem}", file=sys.stderr)
         return EXIT_USAGE
 
     clock = SystemClock()

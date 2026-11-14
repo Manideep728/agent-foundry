@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from control_plane.domain.record import RunRecord
@@ -19,6 +20,13 @@ DEFAULT_RUNS = Path("runs")
 DEFAULT_FIXTURES = Path("tasks/fixtures")
 DEFAULT_SOLUTIONS = Path("tasks/solutions")
 DEFAULT_TASKS = Path("tasks")
+DEFAULT_OSS_TASKS = Path("tasks/oss")
+DEFAULT_DATASET = Path("~/.cache/agentfoundry/swe-bench-lite-test.jsonl").expanduser()
+DEFAULT_OSS_DOCKERFILE_DIR = Path("infra/oss")
+DEFAULT_OSS_FIXTURES = Path(
+    os.environ.get("AF_FIXTURE_CACHE", "~/.cache/agentfoundry/fixtures")
+).expanduser()
+"""Real-repository fixtures: extracted from their images, never committed."""
 DEFAULT_REPORT = Path("report.md")
 DEFAULT_IMAGE = "afrunner:local"
 

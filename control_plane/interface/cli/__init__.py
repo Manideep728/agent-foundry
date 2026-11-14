@@ -27,6 +27,7 @@ from control_plane.interface.cli.distributed import (
     run_collector,
     run_worker,
 )
+from control_plane.interface.cli.oss import fetch_tasks, import_swebench
 from control_plane.interface.cli.parser import build_parser
 from control_plane.interface.cli.run import run_task
 from control_plane.interface.cli.stored import (
@@ -73,6 +74,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         report, code = run_doctor(args.image)
         print(report)
         return code
+    if args.command == "fetch":
+        return fetch_tasks(args)
+    if args.command == "import-swebench":
+        return import_swebench(args)
 
     print(f"{PROGRAM}: unknown command {args.command!r}", file=sys.stderr)
     return EXIT_USAGE

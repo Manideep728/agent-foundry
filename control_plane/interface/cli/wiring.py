@@ -25,6 +25,7 @@ from control_plane.adapters.system import (
     UuidIdGenerator,
     harness_version,
 )
+from control_plane.adapters.test_patch import GitTestPatcher
 from control_plane.adapters.tool_use_agent import ToolUseAgent
 from control_plane.adapters.workspace import WorkspaceFactory
 from control_plane.domain.ids import RunId
@@ -123,6 +124,8 @@ def build_service(
         ids=UuidIdGenerator(),
         fixtures_root=args.fixtures,
         harness_version=harness_version(),
+        oss_fixtures_root=args.oss_fixtures,
+        grading_patcher=GitTestPatcher(),
     )
 
 
