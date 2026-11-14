@@ -933,3 +933,47 @@ limit on concurrent workers.
 **What would change it.** A consumer that needs the runs of one task in
 dispatch order, for example a run that depends on the result of an earlier
 run.
+
+
+## D38 — Hosted models come through one OpenAI-compatible adapter, on free tiers
+
+*2026-11-14*
+
+**Context.** Every model in the benchmark ran on one 8 GiB GPU, so the
+largest was 7B. A comparison between a small local model and a large hosted
+one is the comparison worth making, and the project pays for no model calls.
+
+**Options.** (a) One adapter per hosted provider, each with its SDK. (b) One
+adapter for the OpenAI chat-completions API, which free tiers and local
+servers such as llama.cpp and vLLM share. (c) Local models only.
+
+**Decision: (b).** `adapters/openai_compat_client.py` uses the standard library
+only, like the Ollama client, so the core still has no dependency. The run
+records the host as its provider unless `--provider-name` says otherwise,
+because the provider is part of the grouping key (D20). The key comes from the
+variable `--api-key-env` names, and is never a flag, a record field or an
+artifact.
+
+**Rate limits.** A free tier answers 429 above its rate. The client waits as
+`Retry-After` says, or 5 s doubling when it says nothing, for at most 6
+attempts and 60 s per wait. The time it waits is reported apart from the
+model's time:
+
+- Each call's recorded latency excludes the wait.
+- The run's agent note says how long the run waited.
+- The run's agent-phase duration still includes the wait. A hosted run's
+  agent time is therefore an upper bound on the model's time.
+
+A column for the wait was rejected for this release. It changes both database
+schemas and the message version (D30) for a figure that the note already
+carries.
+
+**Consequence.** A free tier costs nothing, so its runs record 0 micro-USD,
+which is what was paid. Its tokens are real. Temperature 0 and a fixed seed
+are sent, but a hosted model does not promise to be deterministic under them,
+so repeats measure that rather than assume it. The prompts may be retained by
+the provider under its free-tier terms, which is acceptable for synthetic and
+open-source fixtures only.
+
+**What would change it.** A paid run, which needs a price per model in place of
+`TokenPrice.free`, or a provider whose API differs from chat completions.
