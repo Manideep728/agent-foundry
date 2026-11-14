@@ -180,6 +180,14 @@ class ToolCall:
     name: str
     arguments: dict[str, object]
 
+    call_id: str | None = None
+    """The provider's identifier for this call, when it gives one.
+
+    OpenAI-style APIs match a tool's answer to its call by this identifier, not
+    by name, because one turn can call the same tool twice. Ollama gives none,
+    and a call read out of the reply text has none either.
+    """
+
 
 @dataclass(frozen=True, slots=True)
 class ToolSpec:
@@ -205,7 +213,10 @@ class Message:
     """
 
     tool_name: str | None = None
-    """Which tool a TOOL message answers. Providers match replies by name."""
+    """Which tool a TOOL message answers. Ollama matches replies by name."""
+
+    tool_call_id: str | None = None
+    """Which call a TOOL message answers, when the call had an identifier."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,6 +242,34 @@ class ModelResponse:
     agent can only report that the output was malformed, and a benchmark would
     blame the model for a limit the harness chose.
     """
+
+    waited_ms: int = 0
+    """Time the client spent waiting on the provider's rate limit.
+
+    Part of the call's wall time and not of the model's. A free API tier
+    refuses requests above its rate, and a call that waited 20 s for a slot
+    did not take the model 20 s to answer.
+    """
+
+    def __post_init__(self) -> None:
+        if self.waited_ms < 0:
+            raise PreconditionViolated("waited_ms must be >= 0")
+
+
+def model_latency_ms(elapsed_ms: int, response: ModelResponse) -> int:
+    """How long the model took, without the time spent waiting for a slot.
+
+    Floored at zero, because the wait and the elapsed time come from separate
+    clock reads and a call answered at once can read a millisecond apart.
+    """
+    return max(0, elapsed_ms - response.waited_ms)
+
+
+def rate_limit_note(waited_ms: int) -> str | None:
+    """What a run records about rate limiting, when it waited at all."""
+    if waited_ms == 0:
+        return None
+    return f"waited {waited_ms} ms on the provider's rate limit"
 
 
 @dataclass(frozen=True, slots=True)

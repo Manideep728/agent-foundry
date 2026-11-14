@@ -51,6 +51,8 @@ from control_plane.domain.model import (
     TokenPrice,
     ToolCall,
     cost_micros,
+    model_latency_ms,
+    rate_limit_note,
     total_micros,
 )
 from control_plane.domain.outcomes import AgentOutcome
@@ -224,6 +226,16 @@ class ToolUseAgent:
         wrote_anything = False
         tools_called = 0
         text_calls = 0
+        waited_ms = 0
+
+        def note(ending: str | None = None) -> str | None:
+            return _note(
+                text_calls,
+                tools_called,
+                wrote=wrote_anything,
+                ending=ending,
+                waited_ms=waited_ms,
+            )
 
         for _ in range(self._max_turns):
             spent = total_micros(call.cost for call in invocations)
@@ -235,19 +247,15 @@ class ToolUseAgent:
                 # ceiling exists to bound.
                 return AgentResult(
                     tuple(invocations),
-                    outcome_detail=_note(
-                        text_calls,
-                        tools_called,
-                        wrote=wrote_anything,
-                        ending=(
-                            f"stopped at the {self._run_ceiling} micro-USD "
-                            f"run ceiling, having spent {spent}"
-                        ),
+                    outcome_detail=note(
+                        f"stopped at the {self._run_ceiling} micro-USD "
+                        f"run ceiling, having spent {spent}"
                     ),
                 )
 
             response, invocation = self._call(messages)
             invocations.append(invocation)
+            waited_ms += response.waited_ms
 
             tool_calls = response.tool_calls
             if not tool_calls:
@@ -269,17 +277,12 @@ class ToolUseAgent:
                 # model made, and inflates the one rate that must not read
                 # wrong.
                 if tools_called or wrote_anything:
-                    return AgentResult(
-                        tuple(invocations),
-                        outcome_detail=_note(
-                            text_calls, tools_called, wrote=wrote_anything
-                        ),
-                    )
+                    return AgentResult(tuple(invocations), outcome_detail=note())
                 return AgentResult(
                     tuple(invocations),
                     outcome=AgentOutcome.MALFORMED_OUTPUT,
                     raw_reply=response.text,
-                    outcome_detail="the model never called a tool",
+                    outcome_detail=note("the model never called a tool"),
                 )
 
             messages.append(
@@ -289,7 +292,14 @@ class ToolUseAgent:
                 answer, wrote = self._run_tool(space, call)
                 tools_called += 1
                 wrote_anything = wrote_anything or wrote
-                messages.append(Message(MessageRole.TOOL, answer, tool_name=call.name))
+                messages.append(
+                    Message(
+                        MessageRole.TOOL,
+                        answer,
+                        tool_name=call.name,
+                        tool_call_id=call.call_id,
+                    )
+                )
 
         # Out of turns, which is only reachable by calling a tool on every one
         # of them: any turn that produced no call returned above. So the model
@@ -297,12 +307,7 @@ class ToolUseAgent:
         # budget, which the note records because the outcome cannot.
         return AgentResult(
             tuple(invocations),
-            outcome_detail=_note(
-                text_calls,
-                tools_called,
-                wrote=wrote_anything,
-                ending=f"stopped after the {self._max_turns} turn budget",
-            ),
+            outcome_detail=note(f"stopped after the {self._max_turns} turn budget"),
         )
 
     def _opening(self, space: _Workspace, task: TaskDefinition) -> str:
@@ -317,7 +322,7 @@ class ToolUseAgent:
             model_id=self._client.model_id,
             usage=response.usage,
             cost=cost_micros(response.usage, self._price),
-            latency_ms=self._clock.monotonic_ms() - started,
+            latency_ms=model_latency_ms(self._clock.monotonic_ms() - started, response),
         )
 
     def _run_tool(self, space: _Workspace, call: ToolCall) -> tuple[str, bool]:
@@ -351,7 +356,12 @@ _TOOL_NAMES = frozenset(tool.name for tool in TOOLS)
 
 
 def _note(
-    text_calls: int, tools_called: int, *, wrote: bool, ending: str | None = None
+    text_calls: int,
+    tools_called: int,
+    *,
+    wrote: bool,
+    ending: str | None = None,
+    waited_ms: int = 0,
 ) -> str | None:
     """What to record about how the model worked, when there is anything to say.
 
@@ -375,6 +385,9 @@ def _note(
         )
     if tools_called and not wrote:
         parts.append(f"{tools_called} tool call(s) but no file written")
+    waited = rate_limit_note(waited_ms)
+    if waited is not None:
+        parts.append(waited)
     return "; ".join(parts) if parts else None
 
 

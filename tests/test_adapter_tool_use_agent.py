@@ -675,3 +675,61 @@ def test_a_free_model_is_never_stopped_by_a_ceiling(tmp_path: Path) -> None:
 def test_a_ceiling_of_zero_is_refused_by_the_loop() -> None:
     with pytest.raises(PreconditionViolated, match="positive"):
         ToolUseAgent(ScriptedClient([]), FakeClock(), run_ceiling=MicroUsd(0))
+
+
+# --- identifiers and rate limits ----------------------------------------------
+
+
+def test_each_tool_answer_names_the_call_it_answers(tmp_path: Path) -> None:
+    """One turn may call one tool twice; only the identifier tells them apart."""
+    _, _, client = run(
+        tmp_path,
+        [
+            calls(
+                ToolCall(LIST_FILES, {}, call_id="call-a"),
+                ToolCall(LIST_FILES, {}, call_id="call-b"),
+            ),
+            says("done"),
+        ],
+    )
+
+    answers = [m for m in client.conversations[1] if m.role is MessageRole.TOOL]
+    assert [m.tool_call_id for m in answers] == ["call-a", "call-b"]
+
+
+class WaitingClient(ScriptedClient):
+    """Moves the clock the way a call that waited for a rate-limit slot does."""
+
+    def __init__(
+        self, turns: list[ModelResponse], clock: FakeClock, elapsed_ms: int
+    ) -> None:
+        super().__init__(turns)
+        self._clock = clock
+        self._elapsed_ms = elapsed_ms
+
+    def complete(
+        self,
+        messages: tuple[Message, ...],
+        tools: tuple[ToolSpec, ...] = (),
+    ) -> ModelResponse:
+        self._clock.advance(self._elapsed_ms)
+        return super().complete(messages, tools)
+
+
+def test_a_rate_limit_wait_is_noted_and_not_counted_as_model_time(
+    tmp_path: Path,
+) -> None:
+    task, repo = prepared(tmp_path)
+    clock = FakeClock()
+    waited = ModelResponse(
+        text="done", usage=ModelUsage(input_tokens=1, output_tokens=1), waited_ms=1_500
+    )
+    client = WaitingClient(
+        [calls(ToolCall(LIST_FILES, {})), waited], clock, elapsed_ms=2_000
+    )
+
+    result = ToolUseAgent(client, clock).edit(repo, task)
+
+    assert [call.latency_ms for call in result.invocations] == [2_000, 500]
+    assert result.outcome_detail is not None
+    assert "waited 1500 ms on the provider's rate limit" in result.outcome_detail

@@ -31,6 +31,8 @@ from control_plane.domain.model import (
     ModelInvocation,
     TokenPrice,
     cost_micros,
+    model_latency_ms,
+    rate_limit_note,
 )
 from control_plane.domain.outcomes import AgentOutcome
 from control_plane.domain.ports import Clock
@@ -123,8 +125,9 @@ class SingleShotAgent:
             model_id=self._client.model_id,
             usage=response.usage,
             cost=cost_micros(response.usage, self._price),
-            latency_ms=self._clock.monotonic_ms() - started,
+            latency_ms=model_latency_ms(self._clock.monotonic_ms() - started, response),
         )
+        waited = rate_limit_note(response.waited_ms)
 
         try:
             if response.truncated:
@@ -144,10 +147,10 @@ class SingleShotAgent:
                 (invocation,),
                 outcome=AgentOutcome.MALFORMED_OUTPUT,
                 raw_reply=response.text,
-                outcome_detail=str(error),
+                outcome_detail="; ".join(filter(None, (str(error), waited))),
             )
 
-        return AgentResult((invocation,))
+        return AgentResult((invocation,), outcome_detail=waited)
 
     def _build_prompt(self, workspace: Path, task: TaskDefinition) -> str:
         hidden = set(task.hidden_paths)
