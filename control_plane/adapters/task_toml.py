@@ -8,21 +8,25 @@ looks fine, and the budget it ran under was not the one anyone wrote down.
 
 from __future__ import annotations
 
+import hashlib
 import tomllib
 from pathlib import Path
 from typing import Any
 
 from control_plane.domain.errors import DomainError, InvalidTaskDefinition
 from control_plane.domain.ids import TaskId
-from control_plane.domain.task import CommandRole, Suite, TaskDefinition
+from control_plane.domain.task import CommandRole, Environment, Suite, TaskDefinition
 
 SCHEMA_VERSION = 1
 
 _TOP_LEVEL_KEYS = frozenset(
-    {"schema_version", "task", "fixture", "timeouts", "commands"}
+    {"schema_version", "task", "fixture", "environment", "timeouts", "commands"}
 )
 _TASK_KEYS = frozenset({"id", "suite", "description"})
-_FIXTURE_KEYS = frozenset({"id", "sha256", "hidden_paths"})
+_FIXTURE_KEYS = frozenset(
+    {"id", "sha256", "hidden_paths", "test_patch", "test_patch_sha256"}
+)
+_ENVIRONMENT_KEYS = frozenset({"image", "workdir", "base_image"})
 _TIMEOUT_KEYS = frozenset({"per_command_ms", "total_ms"})
 _COMMAND_KEYS = frozenset({"role", "command"})
 
@@ -101,6 +105,62 @@ def _integer(where: str, table: dict[str, Any], key: str) -> int:
     return value
 
 
+def _environment(where: str, raw: dict[str, Any]) -> Environment | None:
+    """The optional [environment] table. `base_image` is read by `af fetch`."""
+    if "environment" not in raw:
+        return None
+    table = _table(where, raw, "environment")
+    _reject_unknown(f"{where} [environment]", table, _ENVIRONMENT_KEYS)
+    return Environment(
+        image=_string(f"{where} [environment]", table, "image"),
+        workdir=_string(f"{where} [environment]", table, "workdir"),
+    )
+
+
+def _test_patch(path: Path, fixture: dict[str, Any]) -> str | None:
+    """The test patch's text, read beside the task file and checked against its pin.
+
+    Pinned like the fixture, because the patch decides what the task grades,
+    and a changed patch is a changed task.
+    """
+    where = f"{path} [fixture]"
+    if "test_patch" not in fixture:
+        if "test_patch_sha256" in fixture:
+            raise InvalidTaskDefinition(
+                f"{where}: test_patch_sha256 without test_patch"
+            )
+        return None
+    relative = _string(where, fixture, "test_patch")
+    pinned = _string(where, fixture, "test_patch_sha256")
+    base = path.parent.resolve()
+    target = (base / relative).resolve()
+    if not target.is_relative_to(base):
+        raise InvalidTaskDefinition(f"{where}: test_patch {relative!r} leaves {base}")
+    try:
+        data = target.read_bytes()
+    except FileNotFoundError as error:
+        raise InvalidTaskDefinition(f"{where}: no test patch at {target}") from error
+    digest = hashlib.sha256(data).hexdigest()
+    if digest != pinned:
+        raise InvalidTaskDefinition(
+            f"{where}: test patch is {digest}, the task pins {pinned}"
+        )
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise InvalidTaskDefinition(f"{where}: test patch is not UTF-8") from error
+
+
+def base_image(path: Path) -> str | None:
+    """The image a task's fixture and environment are built from, if it has one."""
+    raw = tomllib.loads(path.read_text(encoding="utf-8"))
+    table = raw.get("environment")
+    if not isinstance(table, dict):
+        return None
+    value = table.get("base_image")
+    return value if isinstance(value, str) else None
+
+
 def load_task(path: Path) -> TaskDefinition:
     """Read one task file, or raise `InvalidTaskDefinition` naming the problem."""
     where = str(path)
@@ -169,6 +229,8 @@ def load_task(path: Path) -> TaskDefinition:
             fixture_id=_string(f"{where} [fixture]", fixture, "id"),
             fixture_sha256=_string(f"{where} [fixture]", fixture, "sha256"),
             hidden_paths=_string_list(f"{where} [fixture]", fixture, "hidden_paths"),
+            environment=_environment(where, raw),
+            test_patch=_test_patch(path, fixture),
             commands=TaskDefinition.index_commands(pairs),
             per_command_timeout_ms=_integer(
                 f"{where} [timeouts]", timeouts, "per_command_ms"

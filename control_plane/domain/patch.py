@@ -112,3 +112,30 @@ class Patch:
     @staticmethod
     def empty() -> Patch:
         return Patch(changes=(), unified_diff="")
+
+
+_DIFF_PREFIXES = ("--- ", "+++ ")
+
+
+def paths_in_unified_diff(text: str) -> tuple[str, ...]:
+    """Every file a unified diff reads or writes, sorted, each once.
+
+    Taken from the `---` and `+++` headers, with their `a/` and `b/` prefixes
+    removed. `/dev/null`, the side of a created or deleted file, names no
+    path. A path that is not a safe fixture path is refused: these paths are
+    restored and written inside a workspace, and `../` would leave it.
+    """
+    found: set[str] = set()
+    for line in text.splitlines():
+        if not line.startswith(_DIFF_PREFIXES):
+            continue
+        name = line[4:].split("\t", 1)[0].strip()
+        if name == "/dev/null":
+            continue
+        if name.startswith(("a/", "b/")):
+            name = name[2:]
+        validate_fixture_path(name)
+        found.add(name)
+    if not found:
+        raise PreconditionViolated("the diff names no file")
+    return tuple(sorted(found))

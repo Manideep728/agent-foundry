@@ -73,6 +73,34 @@ class CommandSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class Environment:
+    """Where a task's tests run when the default image cannot run them (D39).
+
+    A real repository needs its own interpreter and installed dependencies, so
+    each such task names a validation image built for it. The fixture is
+    mounted at `workdir` because the image's environment was installed from
+    that path, and the tests import the code that is there.
+    """
+
+    image: str
+    workdir: str
+
+    def __post_init__(self) -> None:
+        if not self.image or any(c.isspace() for c in self.image):
+            raise InvalidTaskDefinition(f"environment image {self.image!r} is unusable")
+        if (
+            not self.workdir.startswith("/")
+            or self.workdir == "/"
+            or "," in self.workdir
+            or any(part in ("", ".", "..") for part in self.workdir[1:].split("/"))
+        ):
+            raise InvalidTaskDefinition(
+                f"environment workdir must be an absolute path below /, "
+                f"got {self.workdir!r}"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class TaskDefinition:
     """An immutable, content-pinned benchmark task."""
 
@@ -103,9 +131,28 @@ class TaskDefinition:
     prompt.
     """
 
+    environment: Environment | None = None
+    """The image and mount point validation needs. None for the default image."""
+
+    test_patch: str | None = None
+    """A unified diff applied after the agent finishes and before validation.
+
+    A real-repository task's graded tests are not in the fixture: they arrive
+    with the fix that introduced them. The agent never sees them, and the files
+    the patch touches are restored to the fixture first, so an agent that
+    edited a graded test cannot change what it is graded on (D39).
+    """
+
     def __post_init__(self) -> None:
         if not self.description.strip():
             raise InvalidTaskDefinition(f"{self.task_id} has an empty description")
+        if self.suite is Suite.OSS and self.environment is None:
+            raise InvalidTaskDefinition(
+                f"{self.task_id} is in the oss suite and names no environment; "
+                f"the default image cannot run a real repository's tests"
+            )
+        if self.test_patch is not None and not self.test_patch.strip():
+            raise InvalidTaskDefinition(f"{self.task_id} has an empty test patch")
 
         # The fixture id becomes a directory name, so it carries the same
         # constraints as any other identifier.

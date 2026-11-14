@@ -977,3 +977,42 @@ open-source fixtures only.
 
 **What would change it.** A paid run, which needs a price per model in place of
 `TokenPrice.free`, or a provider whose API differs from chat completions.
+
+
+## D39 — A real-repository task is a fixture taken from its image, plus a test patch
+
+*2026-11-14*
+
+Supersedes the plan in D24.
+
+**Context.** D24 found that a SWE-bench task needs its own image, commands that
+name the image's interpreter, and a test patch applied after the agent. It
+planned to clone the source commit into the fixture position. A clean clone is
+not what the image's environment was installed from: the install step writes
+files into the source tree, such as version files and package metadata, and a
+test run against a clean clone fails on import.
+
+**Decision.** The fixture is the image's own source directory:
+
+- `af fetch` pulls the instance image by digest, copies its `/testbed` out of
+  a created container, and builds the validation image from it with the
+  runner added (`infra/oss/Dockerfile`). The fixture goes to a cache outside
+  the source tree, and the task pins its content hash as for any fixture.
+- The workspace is mounted at the image's source path, so the installed
+  environment imports the agent's edit.
+- After the agent finishes and its patch is captured, the test patch is
+  applied. First, each file the patch touches is restored to the fixture's
+  version, as SWE-bench's own harness does. An agent that edited a graded test
+  cannot change what it is graded on, and a patch that still does not apply
+  makes the run `task_invalid`.
+- The fail-to-pass and pass-to-pass tests become one command each, so a task
+  is resolved only when all of its fail-to-pass tests pass, and regressed when
+  any pass-to-pass test fails.
+
+**Consequence.** Task identity stays a content hash with no schema change, as
+D24 wanted. The fixture is as large as the repository, which is why it is not
+committed. The local runner refuses these tasks, because it has no image.
+Hosted CI does not pull the images, so the real-repository tests run locally.
+
+**What would change it.** An image whose source directory is not its install
+location, or a dataset whose tests are already in the source tree.
