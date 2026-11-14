@@ -52,6 +52,20 @@ def display_name(target: str) -> str:
     return urlunsplit(parts._replace(netloc=f"{user}{host}"))
 
 
+def owner_key(target: str) -> str:
+    """A name for the store that is the same on every start of one process.
+
+    Validation containers carry it as a label, so recovery removes only the
+    containers its own store started. A file is named by its absolute path,
+    because two workers in two directories can both pass `worker.sqlite3`. A
+    server is named without its password, because a label is visible to
+    anyone who can run `docker inspect`.
+    """
+    if is_postgres(target):
+        return display_name(target)
+    return str(Path(target).resolve())
+
+
 @contextmanager
 def open_repository(target: str, *, exclusive: bool) -> Iterator[RunRepository]:
     """The repository at `target`, closed when the block ends.

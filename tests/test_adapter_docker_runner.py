@@ -774,3 +774,104 @@ def test_recovery_of_a_run_with_no_container_left_removes_nothing(
     runner.remove_container(RUN_ID)
 
     assert docker.verbs() == ["ps"]
+
+
+# --- ownership: recovery removes only its own containers -------------------
+
+
+def test_a_container_is_labelled_with_the_store_that_started_it(
+    tmp_path: Path,
+) -> None:
+    config = DockerConfig(owner="/srv/w1/worker.sqlite3")
+    argv = build_argv(_request(tmp_path), config, name=NAME)
+    labels = [argv[i + 1] for i, part in enumerate(argv) if part == "--label"]
+
+    assert labels == [
+        f"agentfoundry.run_id={RUN_ID.value}",
+        "agentfoundry.owner=/srv/w1/worker.sqlite3",
+    ]
+
+
+def test_recovery_lists_only_the_containers_its_own_store_started(
+    tmp_path: Path,
+) -> None:
+    """The listing is where another worker's live attempt is kept out.
+
+    Two workers on one host share a Docker daemon. When the first dies during
+    a validation, Kafka gives the run to the second, which starts its own
+    attempt. A listing by run id alone then includes that live attempt, and
+    the first worker's recovery on restart force-removed it.
+    """
+    docker = FakeDocker(listed=b"")
+    runner = DockerRunner(
+        DockerConfig(user="1000:1000", owner="/srv/w1/worker.sqlite3"),
+        run_process=docker,
+    )
+
+    runner.remove_container(RUN_ID)
+
+    assert docker.calls == [
+        [
+            "docker",
+            "ps",
+            "--all",
+            "--quiet",
+            "--filter",
+            f"label=agentfoundry.run_id={RUN_ID.value}",
+            "--filter",
+            "label=agentfoundry.owner=/srv/w1/worker.sqlite3",
+        ]
+    ]
+
+
+def _create_container(run_id: RunId, owner: str) -> str:
+    created = subprocess.run(
+        [
+            "docker",
+            "create",
+            "--label",
+            f"agentfoundry.run_id={run_id.value}",
+            "--label",
+            f"agentfoundry.owner={owner}",
+            IMAGE,
+            "--version",
+        ],
+        capture_output=True,
+        check=True,
+    )
+    return created.stdout.decode("ascii").strip()
+
+
+def _containers_of(run_id: RunId) -> set[str]:
+    listed = subprocess.run(
+        [
+            "docker",
+            "ps",
+            "--all",
+            "--quiet",
+            "--no-trunc",
+            "--filter",
+            f"label=agentfoundry.run_id={run_id.value}",
+        ],
+        capture_output=True,
+        check=True,
+    )
+    return set(listed.stdout.decode("ascii").split())
+
+
+@requires_image
+def test_recovery_leaves_another_workers_attempt_of_the_same_run(
+    tmp_path: Path,
+) -> None:
+    run_id = RunId(f"run-owner-{os.getpid()}")
+    own = _create_container(run_id, "/srv/w1/worker.sqlite3")
+    other = _create_container(run_id, "/srv/w2/worker.sqlite3")
+    try:
+        DockerRunner(DockerConfig(owner="/srv/w1/worker.sqlite3")).remove_container(
+            run_id
+        )
+
+        assert _containers_of(run_id) == {other}
+        assert own not in _containers_of(run_id)
+    finally:
+        subprocess.run(["docker", "rm", "--force", own, other], capture_output=True)

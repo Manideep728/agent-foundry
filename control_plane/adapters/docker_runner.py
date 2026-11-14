@@ -99,6 +99,11 @@ class DockerConfig:
     drain_after_exit_ms: int = 2_000
     # The host user, so files written to the bind mounts stay owned by it.
     user: str = field(default_factory=_current_user)
+    # The run store whose runs these containers validate. Recovery removes
+    # only containers with this label: two workers on one host share a Docker
+    # daemon, and a redelivered run can have a live attempt from another
+    # worker. None labels nothing and lists by run id alone.
+    owner: str | None = None
 
 
 # Takes the argv and a timeout in seconds. May raise FileNotFoundError when
@@ -154,6 +159,7 @@ def build_argv(
         name,
         "--label",
         f"agentfoundry.run_id={request.run_id.value}",
+        *_owner_label(config),
         # A missing image is an error, never a silent download: the image is
         # the validation environment, and its provenance is `make runner-image`.
         "--pull",
@@ -206,6 +212,12 @@ def build_argv(
     if request.stop_on_failure:
         argv.append("--stop-on-failure")
     return argv
+
+
+def _owner_label(config: DockerConfig) -> list[str]:
+    if config.owner is None:
+        return []
+    return ["--label", f"agentfoundry.owner={config.owner}"]
 
 
 def _bind(source: Path, target: str, *, read_only: bool) -> str:
@@ -404,17 +416,20 @@ class DockerRunner:
         return answer == b"true"
 
     def remove_container(self, run_id: RunId) -> None:
-        """Force-remove every container of the run, from any attempt.
+        """Force-remove every container this store started for the run.
 
         Recovery's call: the attempt that crashed is not known, so the run-id
-        label finds it. A run with no container left is fine.
+        label finds it. The owner label keeps out an attempt of the same run
+        that another worker on this host started after a redelivery, which is
+        live and is not this store's to remove. A run with no container left
+        is fine.
         """
-        label = f"label=agentfoundry.run_id={run_id.value}"
+        argv = ["docker", "ps", "--all", "--quiet"]
+        argv += ["--filter", f"label=agentfoundry.run_id={run_id.value}"]
+        if self._config.owner is not None:
+            argv += ["--filter", f"label=agentfoundry.owner={self._config.owner}"]
         try:
-            listed = self._run_process(
-                ["docker", "ps", "--all", "--quiet", "--filter", label],
-                _DOCKER_CALL_TIMEOUT_S,
-            )
+            listed = self._run_process(argv, _DOCKER_CALL_TIMEOUT_S)
         except (FileNotFoundError, subprocess.TimeoutExpired) as error:
             raise RunnerUnavailable(f"could not list containers of {run_id}") from error
         if listed.returncode != 0:

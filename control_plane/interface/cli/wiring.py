@@ -17,7 +17,7 @@ from control_plane.adapters.prompts import (
     variant,
 )
 from control_plane.adapters.single_shot_agent import SingleShotAgent
-from control_plane.adapters.storage import open_repository
+from control_plane.adapters.storage import open_repository, owner_key
 from control_plane.adapters.system import (
     SystemClock,
     UuidIdGenerator,
@@ -54,7 +54,7 @@ def build_runners(
     than once per task. Eight copies of it in a benchmark is how a warning
     becomes wallpaper.
     """
-    docker = DockerRunner(DockerConfig(image=args.image))
+    docker = DockerRunner(DockerConfig(image=args.image, owner=owner_key(args.db)))
     runner: ValidationRunner = (
         docker if args.runner == RUNNER_DOCKER else LocalRunner(clock)
     )

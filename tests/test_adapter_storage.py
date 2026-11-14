@@ -11,6 +11,7 @@ from control_plane.adapters.storage import (
     database_exists,
     display_name,
     open_repository,
+    owner_key,
 )
 from tests.postgres_support import fresh_schema, requires_postgres
 
@@ -104,3 +105,20 @@ def test_a_server_is_assumed_to_exist_until_connecting_says_otherwise() -> None:
 def test_a_database_is_never_shown_with_its_password(target: str, shown: str) -> None:
     """The name goes to stderr and into report.md; a credential must not."""
     assert display_name(target) == shown
+
+
+def test_a_file_store_is_owned_by_its_absolute_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two workers in two directories both pass `--db worker.sqlite3`."""
+    monkeypatch.chdir(tmp_path)
+
+    assert owner_key("worker.sqlite3") == str(tmp_path / "worker.sqlite3")
+
+
+def test_a_server_store_is_owned_without_its_password() -> None:
+    """The key is a container label, which `docker inspect` shows to anyone."""
+    assert (
+        owner_key("postgresql://af:s3cret@db.internal:5432/af")
+        == "postgresql://af@db.internal:5432/af"
+    )
