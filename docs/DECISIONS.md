@@ -1016,3 +1016,39 @@ Hosted CI does not pull the images, so the real-repository tests run locally.
 
 **What would change it.** An image whose source directory is not its install
 location, or a dataset whose tests are already in the source tree.
+
+
+## D40 — Five SWE-bench Lite instances, chosen by a rule fixed before any run
+
+*2026-11-14*
+
+**Context.** A real-repository suite chosen after looking at results measures
+the choice. The rule that selects its tasks is therefore written down, and
+committed, before any instance is imported or any model is run.
+
+**Decision.** The candidates are the SWE-bench Lite test instances from the
+four repositories whose tests run under plain pytest in a small environment:
+`psf/requests`, `pallets/flask`, `pytest-dev/pytest` and `pylint-dev/pylint`.
+Django, SymPy, scikit-learn, Matplotlib and the others are left out because
+their images are large or their tests need their own runners.
+
+Take the repositories in turn, in that order, and from each take its next
+instance in dataset order that passes the oracle check. Stop at five tasks. An
+instance passes the oracle check when all of these hold:
+
+- With `--agent fake` and the instance's own fix as the solution, 3 of 3 runs
+  are resolved with no regression.
+- With no solution, 3 of 3 runs are measured and none is resolved.
+- No command takes longer than 60 s.
+- All of it holds under `--network none`.
+
+An instance that fails is recorded with the reason it failed, and the next
+instance from the same repository is tried.
+
+**Consequence.** Five tasks are a small sample, and four repositories are not
+SWE-bench Lite's mix. The suite shows that the harness measures real
+repositories, and how a model does on these five. It does not estimate a
+SWE-bench score.
+
+**What would change it.** A machine with the disk and time for the large
+images, which would allow the full candidate list.
