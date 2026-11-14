@@ -2,7 +2,7 @@
 
 Each record states the context, the decision, the consequence, and what would
 change it. Decisions are numbered and dated; superseded records are marked, not
-deleted.
+deleted. A number is never reused, so the sequence has gaps.
 
 ---
 
@@ -567,6 +567,305 @@ name the environment's interpreter rather than `python3`, and the failing tests
 arrive in a separate patch that has to be applied after the agent has finished
 and before validation starts. The harness already captures the patch before
 validation, so the place to apply it is clean; the work around it is not.
+
+## D27 — Kafka fans out the expensive stage, and one collector keeps the database
+
+*2026-09-21*
+
+**Context.** `af bench` is a serial scheduler. It takes the database lock
+(D17) and evaluates one task at a time. Each task spends seconds to minutes on
+the agent and the validation, and milliseconds on writing its record.
+
+**Options.** (a) A thread or process pool inside `af bench`. (b) A Kafka work
+queue with a pool of workers. (c) Leave it serial.
+
+**Decision: (b), as an optional extra.** At eight tasks on one machine, (a) is
+the smaller answer, and it would be the right one if throughput were the only
+goal. (b) was chosen because it puts the measurement behind at-least-once
+delivery, rebalancing and worker loss, which are the failure modes a
+distributed benchmark has to survive, and because the work already has a
+fan-out shape. `af run` and `af bench` stay on the standard library and work
+with no broker.
+
+**Topology.**
+
+- `agentfoundry-task-runs` has six partitions. The partition count is the limit
+  on concurrent workers, so it is chosen, not defaulted. Topic auto-creation is
+  off, because an auto-created topic has one partition, and a fan-out that does
+  not fan out is worse than a missing topic. Messages were keyed by task; D37
+  changed the key to the run.
+- `agentfoundry-run-results` has one partition. One collector writes the
+  database, so the single-writer rule of D17 holds. A second partition gives no
+  parallelism and removes the total order that makes the collector's input
+  replayable.
+
+**The dispatcher sets the run identifier, not the worker.** Kafka delivers at
+least once. A worker that finishes a run and stops before it commits the
+offset gets the same message again, and so does the worker that takes its
+partition. If each worker set its own identifier, a redelivery would store a
+second run and inflate every rate. An identifier set at dispatch is the
+idempotency key.
+
+**The task body does not travel.** A task is pinned by a content hash and its
+fixture is on disk. The message carries the hash that the dispatcher saw, and
+a worker whose checkout hashes differently refuses the message. This applies
+fixture immutability across the network, where the load-time check cannot see
+the failure: both sides are consistent and hold two different versions of the
+task.
+
+**The configuration travels with the work.** The agent, provider, model,
+prompt and image are the grouping key (D20). Without them on the message, a
+pool started with two `--model` values produces one suite that mixes two
+models, and no record says so. D28 changes how a worker uses them.
+
+**Consequence.** A run can be measured twice: once by a worker that was
+evicted or stopped, and again by the worker that took its partition. The
+identifier keeps the counts correct; the cost is a wasted measurement. D29
+measures this.
+
+**What would change it.** A workload where the record write, not the agent or
+the validation, is the slow stage.
+
+## D28 — A worker measures under its own flags and refuses a message it cannot honour
+
+*2026-09-28*
+
+Amends D27, which reads the configuration from the message.
+
+**Context.** A worker cannot build an agent from the message alone. The
+Ollama URL, the solutions directory, the turn budget and the spend ceiling are
+settings of a machine or a pool, not of a run.
+
+**Decision.** A worker builds its agent from its own flags and compares the
+resulting configuration with the message's. A worker that does not match
+refuses the message, so a mixed pool still cannot produce a suite that looks
+uniform.
+
+| Case | Raised | Offset |
+|---|---|---|
+| bytes that no codec can read | `UndecodableMessage` | committed: no worker can read them, and an uncommitted poison message stops its partition permanently |
+| another configuration, a task this checkout does not hold, a different fixture hash | `IncompatibleMessage` | not committed: the worker exits 2, and a worker with the correct configuration takes the message |
+| any other error | not caught | not committed |
+
+**Redelivery is answered from storage.** Each worker keeps its own database
+and holds its lock. A message whose run is already stored in a final state is
+republished, not measured again. This includes a run that startup recovery
+marked interrupted, because an interrupted run is recorded and not retried.
+
+**A newer schema is incompatible, not malformed.** Both codecs raise
+`IncompatibleMessage` for a version above their own. A work message or a
+result from a newer build stays on the topic for a newer consumer. A collector
+that meets one stops with exit 2 until it is upgraded: a stopped collector
+loses nothing, and a collector that committed past the message would lose the
+measurement. An older or invalid version is malformed and is committed past.
+
+**What would change it.** Agent settings that can be part of the message
+without making the configuration specific to one machine.
+
+## D29 — The poll interval stays at fifteen minutes, and an eviction is survivable
+
+*2026-09-28*
+
+Amended by D32.
+
+**Context.** Kafka removes a consumer from its group when it holds one message
+for longer than `max.poll.interval.ms`, and gives its partitions to another
+consumer.
+
+**Measured, by causing one.** A worker held a message for 60 s with the
+interval at 45 s, the lowest value the client accepts. At 51.6 s the worker
+left the group. At 51.7 s a second worker received the same run and measured
+it again. At 66.6 s the first worker finished, published, and had its commit
+refused with `UNKNOWN_MEMBER_ID`. The collector stored the first arrival and
+reported the second as a conflicting duplicate. The identifier from D27 kept
+the counts correct, and the cost was one wasted measurement.
+
+**Handling time, from the stored runs:**
+
+| Final state | Runs | Longest wall time |
+|---|---|---|
+| scored | 29 | 19.3 s |
+| agent_error | 3 | 303.8 s, the 300 s client timeout |
+
+**Decision.** Keep 900 s: three times the longest handling time measured. The
+longest time is set by the model client's timeout, not by the task.
+
+**Consequence.** The configured worst case is longer than the measured one.
+The tool loop allows 12 turns of up to 300 s each, plus the validation
+timeout. A run that used all of it would be evicted and measured twice. That
+cost is bounded: a wasted run, a reported conflict and correct counts. A much
+larger interval would let a hung worker hold six partitions for more than an
+hour, which is worse.
+
+**What would change it.** A longer client timeout, which D32 handles.
+
+## D30 — Every run names its build, and a new message key changes the version
+
+*2026-09-29*
+
+**Decision.** Each run records `harness_version`: the package version, a
+12-character commit, and `.dirty` when tracked files differ from that commit.
+It is empty when the package is not in a git checkout, because the bare
+version names many builds with one string. It is not part of the grouping key,
+so a documentation commit does not split a set of repeats. `af bench` and
+`af report` list the builds that a group covers.
+
+**The message rule was wrong.** The decoders refuse unknown keys, so a new key
+without a version change reached an older collector as a malformed message.
+The collector committed past it, and the measurement was lost. Now any change
+to a message's key set changes the version. An older consumer sees an
+incompatible message and leaves it on the topic (D28). A newer consumer still
+reads version 1, where the default of a missing key is honest. Each message is
+checked against the key set of its own version, and encoding writes exactly
+that set, so a decoded version-1 result encodes to the same bytes.
+
+**Rejected.** A separate version for each message type. It is cleaner, but the
+codecs already share one constant, and version-1 work messages decode
+unchanged.
+
+**What would change it.** A message format with explicit optional fields that
+older consumers can skip.
+
+## D31 — Every model call starts cold
+
+*2026-09-29*
+
+**Context.** Two tool-loop suites with the same model and prompt disagreed on
+two tasks. Ollama reuses the prompt cache of an earlier request, so a reply
+depended on the request and on the work the server had done before it.
+
+**Options.** (a) Accept it, and publish ranges over repeats. (b) Record every
+reply and replay it. (c) Remove the cause: unload the model before and after
+every call, and refuse a reply that reports reused prompt tokens.
+
+**Decision: (c).** It removes the cause instead of measuring around it, it can
+be checked on every call, and it costs one model load per call, about 2.5 s
+for a 7B model. Ranges over repeats are still reported, as a check on this
+decision.
+
+**Consequence.** Recorded agent time includes a model load for each call. A
+second client of the same server can still load the model between the unload
+and the request; the refusal makes that a failed run with its reason, never a
+silent number. Workers that share one Ollama server therefore fail runs, so
+each worker needs its own server. Determinism is shown for one GPU (RTX 4060),
+one Ollama build and two models. Another GPU or build can compute a different
+result, which is why every run records its environment and build.
+
+**What would change it.** A server that can disable prompt-cache reuse per
+request.
+
+## D32 — The poll interval follows the model timeout
+
+*2026-09-30*
+
+Amends D29.
+
+**Context.** D29 kept the poll interval at 900 s and found that the model
+client's timeout sets the longest handling time. `--ollama-timeout` makes that
+timeout a flag. `template-render` needs more than 300 s, and at 900 s one call
+would hold the message for the whole interval.
+
+**Decision.** A worker sets the interval to `max(900 s, 3 × timeout)`: the
+ratio from D29, applied to the value that sets the bound. It never goes below
+900 s, because that value was also measured against validation time, and a
+short model timeout says nothing about validation.
+
+**Consequence.** Unchanged from D29: in the worst case a tool loop can still
+exceed the interval, and the cost stays one wasted measurement, a reported
+duplicate and correct counts.
+
+**What would change it.** A per-turn deadline in the tool loop, which would
+give a tighter bound than the client timeout.
+
+## D33 — PostgreSQL behind a repository port; SQLite stays the default
+
+*2026-09-30*
+
+**Context.** On ECS the collector's task and its instance can both be
+replaced, and a SQLite file on that instance is lost with it. D11 said the
+store could be replaced without touching the services, but the services
+imported the SQLite repository directly, so that had not been tested.
+
+**Options.** (a) PostgreSQL only. (b) An ORM over both stores. (c) A
+repository protocol, a PostgreSQL adapter beside the SQLite one, and one shared
+row mapping.
+
+**Decision: (c).** `services/ports.py` defines the port from the methods the
+services call. `adapters/run_rows.py` holds the column mapping, every
+statement and the rehydration, so the two stores cannot disagree about what a
+row means. Each adapter keeps its own DDL, transactions, schema version and
+lock. `--db` takes a path or a `postgresql://` URL, and
+`adapters/storage.open_repository` is the one place where either is opened and
+locked. An ORM was rejected because it hides the SQL that the schema tests
+read, and it adds a dependency to a core that uses only the standard library.
+
+**Consequence.** Integer columns are `BIGINT`, because a millisecond timestamp
+does not fit in 32 bits. Flags stay `0`/`1`, so one row builder serves both
+stores. The D17 run lock becomes a session advisory lock, which the server
+releases when the connection ends: the same property `flock` was chosen for.
+One contract suite runs every repository test against both stores, and CI
+runs the PostgreSQL half against a real server.
+
+PostgreSQL is not here for concurrency; the collector is the only writer. It
+is here for durability that does not depend on the machine that measured.
+
+**What would change it.** More than one writer, or queries that the shared row
+mapping cannot express.
+
+## D34 — Run artifacts go to S3 before the result is published
+
+*2026-09-30*
+
+**Decision.** `af worker --artifacts s3://BUCKET/PREFIX` uploads a finished
+run's directory, without the fixture copy, to `PREFIX/runs/RUN_ID/`, and then
+publishes the result. The key comes from the run identifier, so no column and
+no message key were added. When the upload fails, the worker does not publish
+or commit, and exits 1. The redelivered message finds the run already stored,
+and the republish path uploads before it publishes.
+
+**Why this order.** "A result in the collector means its files are in S3" is a
+rule a reader can depend on. If the worker published first, a stored result
+could have files that never arrived. The upload is idempotent (the same keys
+and the same bytes), which makes retry by redelivery safe, by the same
+argument D27 makes for the result itself.
+
+**Tested by** an in-process S3 fake (keys, exclusion, failure, idempotence),
+worker tests with a recording store (order, failure, retry), and a real worker
+against a local S3 server: 8 runs of 8 objects each.
+
+**What would change it.** Artifacts too large to upload before the result is
+due, which would need a separate completion marker.
+
+## D35 — ECS on one EC2 instance, Kafka as a task, RDS for results
+
+*2026-09-30*
+
+**Context.** D1 puts the supervisor at PID 1 of its own container, and a
+worker starts that container through the Docker socket. Fargate gives a task
+no socket.
+
+**Decision.** ECS with the EC2 launch type, on one instance, with host
+networking:
+
+- The worker mounts the Docker socket, and mounts the runs directory at the
+  same path as on the instance, because the daemon resolves bind sources on
+  the host. Workers run as an unprivileged user in the socket's group.
+- The broker runs as an ECS task with the configuration of `broker.sh`. It
+  advertises `localhost:9092`, which is correct for every task on the instance,
+  and no listener faces outside. A managed Kafka cluster costs more per hour
+  than everything else together, and is not what is being shown.
+- The collector writes to RDS PostgreSQL (D33). RDS keeps the password in
+  Secrets Manager, and ECS gives it to the task as `PGPASSWORD`, so it is never
+  in Terraform state or a task definition.
+- The default VPC, no NAT gateway, no inbound rules, SSM for a shell, and a
+  budget alarm at $10 a month.
+
+`infra/aws/smoke.sh` runs the whole lifecycle, including `terraform destroy`
+and a check that nothing is left. Nothing in the code is region-specific: the
+AMI comes from an SSM parameter and the region from `AF_REGION`.
+
+**What would change it.** More than one instance, which needs a broker that
+other instances can reach and a runs directory that is not on one host.
 
 ## D36 — The runner counts memory-limit kills
 
