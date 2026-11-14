@@ -421,7 +421,7 @@ def fully_populated(run: EvaluationRun) -> RunRecord:
         total_cost_micros=MicroUsd(48_000),
         agent_ms=1100,
         validation_ms=1234,
-        workspace_path="/home/pendy/runs/run-0001",
+        workspace_path="/srv/agentfoundry/runs/run-0001",
         image_digest="sha256:" + "c" * 64,
         agent_note="3 tool call(s) but no file written",
         **CONFIGURATION,
