@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from collections.abc import Callable
 
@@ -10,6 +11,7 @@ from control_plane.adapters.docker_runner import DockerConfig, DockerRunner
 from control_plane.adapters.fake_agent import FakeAgent
 from control_plane.adapters.local_runner import LocalRunner
 from control_plane.adapters.ollama_client import OllamaClient
+from control_plane.adapters.openai_compat_client import OpenAICompatClient
 from control_plane.adapters.prompts import (
     DEFAULT_SINGLE_SHOT_PROMPT,
     DEFAULT_TOOL_PROMPT,
@@ -26,15 +28,18 @@ from control_plane.adapters.system import (
 from control_plane.adapters.tool_use_agent import ToolUseAgent
 from control_plane.adapters.workspace import WorkspaceFactory
 from control_plane.domain.ids import RunId
+from control_plane.domain.model import ModelClient
 from control_plane.domain.record import RunRecord
 from control_plane.domain.task import TaskDefinition
 from control_plane.interface.cli.common import (
     AGENT_OLLAMA,
+    AGENT_SINGLE_SHOT,
     AGENT_TOOLS,
     PROGRAM,
+    PROVIDER_OPENAI_COMPAT,
     RUNNER_DOCKER,
 )
-from control_plane.interface.cli.flags import ceiling
+from control_plane.interface.cli.flags import ceiling, provider_name
 from control_plane.services.dispatch import RunConfiguration
 from control_plane.services.evaluate import EvaluationService
 from control_plane.services.ports import AgentPort, RunRepository, ValidationRunner
@@ -144,15 +149,15 @@ def build_agent(args: argparse.Namespace, clock: SystemClock) -> AgentPort:
     test suite, CI and any offline clone keep working exactly as before, and
     reaching a model is something a run has to ask for.
     """
-    if args.agent == AGENT_OLLAMA:
+    if args.agent in (AGENT_SINGLE_SHOT, AGENT_OLLAMA):
         return SingleShotAgent(
-            _ollama_client(args),
+            _model_client(args),
             clock,
             prompt=_prompt(args, DEFAULT_SINGLE_SHOT_PROMPT),
         )
     if args.agent == AGENT_TOOLS:
         return ToolUseAgent(
-            _ollama_client(args),
+            _model_client(args),
             clock,
             max_turns=args.max_turns,
             prompt=_prompt(args, DEFAULT_TOOL_PROMPT),
@@ -161,7 +166,18 @@ def build_agent(args: argparse.Namespace, clock: SystemClock) -> AgentPort:
     return FakeAgent(args.solutions, clock)
 
 
-def _ollama_client(args: argparse.Namespace) -> OllamaClient:
+def _model_client(args: argparse.Namespace) -> ModelClient:
+    if args.provider == PROVIDER_OPENAI_COMPAT:
+        # Read here, at the edge, and handed to the client only. It is never
+        # printed, stored on a record, or put into an artifact.
+        api_key = os.environ.get(args.api_key_env) if args.api_key_env else None
+        return OpenAICompatClient(
+            args.model,
+            base_url=args.base_url,
+            api_key=api_key,
+            provider_id=provider_name(args),
+            timeout_s=args.ollama_timeout,
+        )
     return OllamaClient(
         args.model, base_url=args.ollama_url, timeout_s=args.ollama_timeout
     )

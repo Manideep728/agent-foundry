@@ -26,8 +26,13 @@ RUNNER_DOCKER = "docker"
 RUNNER_LOCAL = "local"
 
 AGENT_FAKE = "fake"
+AGENT_SINGLE_SHOT = "single-shot"
 AGENT_OLLAMA = "ollama"
+"""The single-shot agent's name before providers were a flag; still accepted."""
 AGENT_TOOLS = "tools"
+
+PROVIDER_OLLAMA = "ollama"
+PROVIDER_OPENAI_COMPAT = "openai-compat"
 
 DEFAULT_MODEL = "qwen2.5-coder:3b"
 

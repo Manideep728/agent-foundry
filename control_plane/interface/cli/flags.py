@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from control_plane.adapters.kafka_bus import (
     DEFAULT_BOOTSTRAP,
@@ -24,6 +26,7 @@ from control_plane.domain.model import MicroUsd
 from control_plane.interface.cli.common import (
     AGENT_FAKE,
     AGENT_OLLAMA,
+    AGENT_SINGLE_SHOT,
     AGENT_TOOLS,
     DEFAULT_DB,
     DEFAULT_FIXTURES,
@@ -31,6 +34,8 @@ from control_plane.interface.cli.common import (
     DEFAULT_MODEL,
     DEFAULT_RUNS,
     DEFAULT_SOLUTIONS,
+    PROVIDER_OLLAMA,
+    PROVIDER_OPENAI_COMPAT,
     RUNNER_DOCKER,
     RUNNER_LOCAL,
 )
@@ -54,13 +59,44 @@ def add_agent_flags(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--agent",
-        choices=(AGENT_FAKE, AGENT_OLLAMA, AGENT_TOOLS),
+        choices=(AGENT_FAKE, AGENT_SINGLE_SHOT, AGENT_OLLAMA, AGENT_TOOLS),
         default=AGENT_FAKE,
         help=(
             "fake applies a known solution and calls no model, which is what "
-            "CI and offline development use; ollama sends the whole fixture in "
-            "one prompt and applies whatever comes back; tools gives the model "
-            "read and write tools and several turns to use them"
+            "CI and offline development use; single-shot (also: ollama) sends "
+            "the whole fixture in one prompt and applies whatever comes back; "
+            "tools gives the model read and write tools and several turns"
+        ),
+    )
+    parser.add_argument(
+        "--provider",
+        choices=(PROVIDER_OLLAMA, PROVIDER_OPENAI_COMPAT),
+        default=PROVIDER_OLLAMA,
+        help=(
+            "where the model runs: a local ollama server, or any server that "
+            "speaks the OpenAI chat-completions API (needs --base-url)"
+        ),
+    )
+    parser.add_argument(
+        "--base-url",
+        default=None,
+        help="the API root for --provider openai-compat, e.g. https://host/v1",
+    )
+    parser.add_argument(
+        "--provider-name",
+        default=None,
+        help=(
+            "the provider recorded on every run (default: the --base-url host). "
+            "Part of the grouping key, so two tiers are two rows"
+        ),
+    )
+    parser.add_argument(
+        "--api-key-env",
+        default=None,
+        metavar="NAME",
+        help=(
+            "the environment variable that holds the API key. The key itself "
+            "is never a flag, because a command line is visible to other users"
         ),
     )
     parser.add_argument(
@@ -111,9 +147,9 @@ def add_agent_flags(parser: argparse.ArgumentParser) -> None:
         metavar="SECONDS",
         help=(
             f"how long one model call may take before the run fails as an agent "
-            f"error (default {int(DEFAULT_TIMEOUT_S)}). A setting of this "
-            f"machine, like --ollama-url, so it is not part of what a run is "
-            f"grouped on"
+            f"error, for either provider (default {int(DEFAULT_TIMEOUT_S)}). A "
+            f"setting of this machine, like --ollama-url, so it is not part of "
+            f"what a run is grouped on"
         ),
     )
 
@@ -235,6 +271,10 @@ def agent_flag_problem(args: argparse.Namespace) -> str | None:
     except DomainError as error:
         return str(error)
 
+    problem = provider_problem(args)
+    if problem is not None:
+        return problem
+
     if args.prompt is None:
         return None
     if args.agent == AGENT_FAKE:
@@ -246,6 +286,42 @@ def agent_flag_problem(args: argparse.Namespace) -> str | None:
     except DomainError as error:
         return str(error)
     return None
+
+
+def provider_problem(args: argparse.Namespace) -> str | None:
+    """Why the provider flags cannot be honoured, before any run exists."""
+    if args.provider == PROVIDER_OLLAMA:
+        for flag, value in (
+            ("--base-url", args.base_url),
+            ("--provider-name", args.provider_name),
+            ("--api-key-env", args.api_key_env),
+        ):
+            if value is not None:
+                return f"{flag} applies to --provider {PROVIDER_OPENAI_COMPAT} only"
+        return None
+
+    if args.agent == AGENT_FAKE:
+        return f"--agent {AGENT_FAKE} calls no model, so --provider cannot apply"
+    if args.base_url is None:
+        return f"--provider {PROVIDER_OPENAI_COMPAT} needs --base-url"
+    parts = urlsplit(args.base_url)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return f"--base-url must be an http(s) URL, got {args.base_url!r}"
+    if args.model == DEFAULT_MODEL:
+        # The default names a local Ollama model. Sent to a hosted API it
+        # fails on the first call, after a run row exists.
+        return f"--provider {PROVIDER_OPENAI_COMPAT} needs --model naming its model"
+    if args.api_key_env is not None and not os.environ.get(args.api_key_env):
+        return f"--api-key-env {args.api_key_env}: that variable is unset or empty"
+    return None
+
+
+def provider_name(args: argparse.Namespace) -> str:
+    """The provider a run records: the flag, or the host it called."""
+    if args.provider_name:
+        return str(args.provider_name)
+    base_url = str(args.base_url)
+    return urlsplit(base_url).hostname or base_url
 
 
 def idle_exit_ms(args: argparse.Namespace) -> int | None:
