@@ -28,6 +28,7 @@ from control_plane.domain.summary import (
     Configuration,
     Durations,
     SuiteSummary,
+    TokenUse,
     configuration_of,
     summarise,
 )
@@ -81,6 +82,17 @@ def _range(durations: Durations | None) -> str:
     if durations is None:
         return "--"
     return f"{durations.fastest_ms} / {durations.median_ms} / {durations.slowest_ms}"
+
+
+def _token_rows(tokens: TokenUse | None) -> list[str]:
+    if tokens is None:
+        return ["| tokens | none: no measured run called a model |"]
+    return [
+        f"| prompt tokens, total | {tokens.prompt_tokens} |",
+        f"| output tokens, total | {tokens.output_tokens} |",
+        f"| tokens per run, min/median/max | {tokens.fewest_per_run} / "
+        f"{tokens.median_per_run} / {tokens.most_per_run} |",
+    ]
 
 
 def _runs_for(records: Sequence[RunRecord], summary: SuiteSummary) -> list[RunRecord]:
@@ -200,6 +212,7 @@ def _section(summary: SuiteSummary, records: Sequence[RunRecord]) -> list[str]:
     lines.extend(
         [
             f"| cost, micro-USD | {int(summary.measured_cost_micros)} |",
+            *_token_rows(summary.tokens),
             f"| agent ms, min/median/max | {_range(summary.agent_ms)} |",
             f"| validation ms, min/median/max | {_range(summary.validation_ms)} |",
         ]

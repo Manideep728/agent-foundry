@@ -51,6 +51,24 @@ class Durations:
 
 
 @dataclass(frozen=True, slots=True)
+class TokenUse:
+    """The tokens a set of measured runs consumed.
+
+    Totals, and the range one run covered, for the reason `Durations` is a
+    range: every per-run figure here is one some run actually used. Prompt
+    tokens include any the provider served from a cache, because the model
+    read them either way.
+    """
+
+    prompt_tokens: int
+    output_tokens: int
+    fewest_per_run: int
+    median_per_run: int
+    most_per_run: int
+    runs: int
+
+
+@dataclass(frozen=True, slots=True)
 class Configuration:
     """Which agent, provider and model a set of runs was measuring.
 
@@ -172,6 +190,10 @@ class SuiteSummary:
     agent_ms: Durations | None
     validation_ms: Durations | None
 
+    tokens: TokenUse | None
+    """None when no measured run called a model, which is a different
+    statement from a model call that used no tokens."""
+
     image_digests: tuple[str, ...]
 
     harness_versions: tuple[str, ...]
@@ -234,6 +256,41 @@ def spread(values: Iterable[int]) -> Durations | None:
         median_ms=ordered[len(ordered) // 2],
         slowest_ms=ordered[-1],
         counted=len(ordered),
+    )
+
+
+def _prompt_tokens(record: RunRecord) -> int:
+    return sum(
+        call.usage.input_tokens
+        + call.usage.cache_read_tokens
+        + call.usage.cache_write_tokens
+        for call in record.invocations
+    )
+
+
+def _output_tokens(record: RunRecord) -> int:
+    return sum(call.usage.output_tokens for call in record.invocations)
+
+
+def token_use(scored: Iterable[RunRecord]) -> TokenUse | None:
+    """What the measured runs that called a model consumed, or None.
+
+    A run that made no call is left out rather than counted as zero: the fake
+    agent asks no model anything, and a median pulled toward zero by it would
+    describe no model.
+    """
+    calling = [record for record in scored if record.invocations]
+    if not calling:
+        return None
+    per_run = sorted(_prompt_tokens(r) + _output_tokens(r) for r in calling)
+    return TokenUse(
+        prompt_tokens=sum(_prompt_tokens(r) for r in calling),
+        output_tokens=sum(_output_tokens(r) for r in calling),
+        fewest_per_run=per_run[0],
+        # The upper middle value, by the rule `spread` uses.
+        median_per_run=per_run[len(per_run) // 2],
+        most_per_run=per_run[-1],
+        runs=len(per_run),
     )
 
 
@@ -410,6 +467,7 @@ def _summarise_one(
         validation_ms=spread(
             r.validation_ms for r in scored if r.validation_ms is not None
         ),
+        tokens=token_use(scored),
         image_digests=_distinct(r.image_digest for r in records),
         harness_versions=_distinct(r.harness_version for r in records),
         tasks=_spread_tasks(records),

@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 
 from control_plane.domain.record import RunRecord
-from control_plane.domain.summary import Durations, SuiteSummary
+from control_plane.domain.summary import Durations, SuiteSummary, TokenUse
 from control_plane.interface.cli.common import PROGRAM
 from control_plane.interface.report import describe
 from control_plane.services.collect import Collected, Collection
@@ -170,8 +170,23 @@ def print_summary(summary: SuiteSummary, *, planned: int) -> None:
             f"  {'':<13} {int(summary.unmeasured_cost_micros)} micro-USD spent by "
             f"{summary.unmeasured_runs_that_spent} run(s) that measured nothing"
         )
+    _print_tokens(summary.tokens)
     _print_durations("agent", summary.agent_ms)
     _print_durations("validation", summary.validation_ms)
+
+
+def _print_tokens(tokens: TokenUse | None) -> None:
+    if tokens is None:
+        print(f"  {'tokens':<13} none: no measured run called a model")
+        return
+    print(
+        f"  {'tokens':<13} {tokens.prompt_tokens} prompt, "
+        f"{tokens.output_tokens} output over {tokens.runs} run(s)"
+    )
+    print(
+        f"  {'':<13} per run min {tokens.fewest_per_run}  "
+        f"median {tokens.median_per_run}  max {tokens.most_per_run}"
+    )
 
 
 def print_eviction(delivery: RawDelivery, committed: bool) -> None:

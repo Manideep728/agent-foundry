@@ -114,6 +114,8 @@ def test_the_report_names_successes_failures_regressions_cost_and_latency(
     assert "| tests_still_failing | 0 |" in text  # failures, by name
     assert "| regressed | 0/2 |" in text  # regressions
     assert "| cost, micro-USD | 0 |" in text  # cost
+    assert "| prompt tokens, total |" in text  # tokens
+    assert "| tokens per run, min/median/max |" in text
     assert "| agent ms, min/median/max |" in text  # latency
     assert "| validation ms, min/median/max |" in text
 

@@ -522,3 +522,86 @@ def test_a_failed_run_adds_no_agent_time_to_its_task() -> None:
     agent = summary.tasks[0].agent_ms
     assert agent is not None
     assert (agent.fastest_ms, agent.slowest_ms, agent.counted) == (100, 100, 1)
+
+
+# --- tokens ------------------------------------------------------------------
+
+
+def _calling(run_id: str, *calls: ModelUsage) -> RunRecord:
+    record = scored(run_id)
+    return dataclasses.replace(
+        record,
+        invocations=tuple(
+            dataclasses.replace(an_invocation(), usage=usage) for usage in calls
+        ),
+    )
+
+
+def test_tokens_are_summed_over_every_call_and_ranged_per_run() -> None:
+    runs = [
+        _calling("run-1", ModelUsage(input_tokens=100, output_tokens=10)),
+        _calling(
+            "run-2",
+            ModelUsage(input_tokens=300, output_tokens=20),
+            ModelUsage(input_tokens=400, output_tokens=30),
+        ),
+        _calling("run-3", ModelUsage(input_tokens=200, output_tokens=20)),
+    ]
+
+    (summary,) = summarise(runs)
+
+    tokens = summary.tokens
+    assert tokens is not None
+    assert (tokens.prompt_tokens, tokens.output_tokens) == (1_000, 80)
+    # Per run: 110, 750, 220. The median is the middle one, not the mean.
+    assert (tokens.fewest_per_run, tokens.median_per_run, tokens.most_per_run) == (
+        110,
+        220,
+        750,
+    )
+    assert tokens.runs == 3
+
+
+def test_cached_prompt_tokens_are_prompt_tokens() -> None:
+    """The model read them; a cache changes what they cost, not that they exist."""
+    run = _calling(
+        "run-1",
+        ModelUsage(
+            input_tokens=10,
+            output_tokens=5,
+            cache_read_tokens=70,
+            cache_write_tokens=20,
+        ),
+    )
+
+    (summary,) = summarise([run])
+
+    assert summary.tokens is not None
+    assert summary.tokens.prompt_tokens == 100
+
+
+def test_a_failed_run_contributes_no_tokens() -> None:
+    """By the rule cost follows: a run that measured nothing is not in a figure."""
+    (summary,) = summarise([scored("run-1"), failed("run-2")])
+
+    assert summary.tokens is not None
+    assert (summary.tokens.prompt_tokens, summary.tokens.runs) == (10, 1)
+
+
+def test_runs_that_called_no_model_have_no_token_figure() -> None:
+    """None, not zero: the fake agent asks no model anything."""
+    silent = dataclasses.replace(scored("run-1"), invocations=())
+
+    (summary,) = summarise([silent])
+
+    assert summary.tokens is None
+
+
+def test_a_run_that_called_no_model_does_not_drag_the_median() -> None:
+    silent = dataclasses.replace(scored("run-1"), invocations=())
+    calling = _calling("run-2", ModelUsage(input_tokens=90, output_tokens=10))
+
+    (summary,) = summarise([silent, calling])
+
+    assert summary.tokens is not None
+    assert (summary.tokens.median_per_run, summary.tokens.runs) == (100, 1)

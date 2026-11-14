@@ -256,6 +256,13 @@ class SpendingAgent:
         )
 
 
+class SilentAgent(SpendingAgent):
+    """Changes nothing and calls no model at all."""
+
+    def edit(self, workspace: Path, task: object) -> AgentResult:
+        return AgentResult(())
+
+
 def test_a_benchmark_stops_before_the_task_that_would_break_the_ceiling(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -350,3 +357,29 @@ def test_repeats_below_one_is_a_usage_error(
 
     assert main([*bench_args(tmp_path, directory), "--repeats", "0"]) == 2
     assert "--repeats must be at least 1" in capsys.readouterr().err
+
+
+def test_the_summary_reports_the_tokens_the_model_used(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(bench, "build_agent", lambda args, clock: SpendingAgent())
+    directory = suite_of(tmp_path, "csv-quoted-fields", "interval-merge")
+
+    main(bench_args(tmp_path, directory))
+
+    out = capsys.readouterr().out
+    assert "tokens        2000 prompt, 0 output over 2 run(s)" in out
+    assert "per run min 1000  median 1000  max 1000" in out
+
+
+def test_a_suite_that_called_no_model_says_so_instead_of_zero_tokens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(bench, "build_agent", lambda args, clock: SilentAgent())
+    directory = suite_of(tmp_path, "interval-merge")
+
+    main(bench_args(tmp_path, directory))
+
+    assert "tokens        none: no measured run called a model" in (
+        capsys.readouterr().out
+    )
