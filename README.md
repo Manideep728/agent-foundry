@@ -10,6 +10,18 @@ ones broke, how long the agent took, and how many tokens it used.
 ![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 
+## Harness numbers
+
+| | |
+|---|---|
+| **No lost work** | 10 trials, 12 workers killed with `SIGKILL` mid-validation: **640 of 640** runs stored, each exactly once |
+| **Scales out** | **2.5x** throughput with 4 workers (104 to 255 runs per minute) |
+| **Cheap isolation** | The C++ supervisor as PID 1 adds **3 ms or less**; the container adds about 400 ms |
+| **Reproducible** | **34 of 34** local task configurations gave the same outcome, patch and per-call token counts in all 3 repeats |
+| **Fair tasks** | **12 of 17** candidate SWE-bench tasks rejected before any model ran, because no agent could pass them here |
+| **Deployed** | ECS, RDS and S3 on AWS with Terraform: deploy, measure 16 runs and destroy in **11 minutes** |
+| **Tested** | **1,156** Python tests and **146** C++ tests, in 4 CI jobs with real Docker, Kafka and PostgreSQL |
+
 ## Results
 
 <picture>
@@ -56,18 +68,6 @@ database these runs were stored in.
   and only 3 of its 8 tasks gave the same patch every time. The other 5 gave 2
   or 3 different patches, and every one of them passed. The outcome repeated
   and the output did not.
-
-## Harness numbers
-
-| | |
-|---|---|
-| **No lost work** | 10 trials, 12 workers killed with `SIGKILL` mid-validation: **640 of 640** runs stored, each exactly once |
-| **Scales out** | **2.5x** throughput with 4 workers (104 to 255 runs per minute) |
-| **Cheap isolation** | The C++ supervisor as PID 1 adds **3 ms or less**; the container adds about 400 ms |
-| **Reproducible** | **34 of 34** local task configurations gave the same outcome, patch and per-call token counts in all 3 repeats |
-| **Fair tasks** | **12 of 17** candidate SWE-bench tasks rejected before any model ran, because no agent could pass them here |
-| **Deployed** | ECS, RDS and S3 on AWS with Terraform: deploy, measure 16 runs and destroy in **11 minutes** |
-| **Tested** | **1,156** Python tests and **146** C++ tests, in 4 CI jobs with real Docker, Kafka and PostgreSQL |
 
 ## How it works
 
