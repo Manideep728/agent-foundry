@@ -32,7 +32,9 @@ from control_plane.domain.errors import DomainError
 from control_plane.domain.model import ToolSpec
 
 LIST_FILES = "list_files"
+LIST_DIRECTORY = "list_directory"
 READ_FILE = "read_file"
+SEARCH = "search"
 WRITE_FILE = "write_file"
 
 TOOLS = (
@@ -80,6 +82,65 @@ TOOLS = (
         },
     ),
 )
+
+
+_PATH = {"type": "string", "description": "Path relative to the repository root."}
+
+REPOSITORY_TOOLS = (
+    ToolSpec(
+        name=LIST_DIRECTORY,
+        description=(
+            "List one directory: its files, and its subdirectories ending in /. "
+            "Give no path for the repository root."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {"path": _PATH},
+            "required": [],
+        },
+    ),
+    ToolSpec(
+        name=SEARCH,
+        description=(
+            "Find a piece of text in the files under a directory. Answers with "
+            "path:line: text for each match, up to a limit. The text is matched "
+            "exactly, not as a regular expression."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "The text to find."},
+                "path": {
+                    "type": "string",
+                    "description": "A directory to search in; the root if omitted.",
+                },
+            },
+            "required": ["text"],
+        },
+    ),
+    ToolSpec(
+        name=READ_FILE,
+        description=(
+            "Read one file, or only the lines from start_line to end_line, "
+            "counted from 1. Each line comes back with its number."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": _PATH,
+                "start_line": {"type": "integer"},
+                "end_line": {"type": "integer"},
+            },
+            "required": ["path"],
+        },
+    ),
+    TOOLS[2],
+)
+"""Tools for a repository too large to list or read whole (D39).
+
+`write_file` is the one `TOOLS` has, unchanged, so a patch is produced the
+same way under every variant.
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +217,33 @@ something -- would be gone. And the tool descriptions are byte-identical to
 text and nothing else.
 """
 
+TOOLS_V3 = PromptVariant(
+    prompt_id="tools-v3",
+    system="""You repair a real software repository. You must end by calling write_file.
+
+The repository is too large to read whole. Find the code the problem is about,
+read only what you need, and correct it.
+
+Do this:
+1. Use search with a name or message from the problem to find the code.
+2. Use list_directory and read_file, with line ranges, to read around it.
+3. Call write_file with the entire corrected file.
+
+Never answer in prose before write_file has succeeded. A wrong patch is a
+result; no patch is not.
+
+read_file shows line numbers; write_file must not include them. write_file
+takes the whole file: never a diff, never a fragment, never "..." for lines
+you did not repeat. Do not edit the tests.""",
+    tools=REPOSITORY_TOOLS,
+)
+"""The tool loop for the real-repository suite.
+
+The same shape as `tools-v2`, for the reason that variant documents, with the
+tools a whole repository needs. Chosen before any real-repository run, not
+tuned on one.
+"""
+
 SINGLE_SHOT_V1 = PromptVariant(
     prompt_id="single-shot-v1",
     system="""You repair a small software repository.
@@ -179,7 +267,10 @@ Rules:
 """The single-shot agent sends no tools, so its variant declares none."""
 
 VARIANTS = MappingProxyType(
-    {variant.prompt_id: variant for variant in (TOOLS_V1, TOOLS_V2, SINGLE_SHOT_V1)}
+    {
+        variant.prompt_id: variant
+        for variant in (TOOLS_V1, TOOLS_V2, TOOLS_V3, SINGLE_SHOT_V1)
+    }
 )
 
 DEFAULT_TOOL_PROMPT = TOOLS_V2.prompt_id

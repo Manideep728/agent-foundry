@@ -31,8 +31,11 @@ from pathlib import Path
 
 from control_plane.adapters.prompts import (
     DEFAULT_TOOL_PROMPT,
+    LIST_DIRECTORY,
     LIST_FILES,
     READ_FILE,
+    REPOSITORY_TOOLS,
+    SEARCH,
     TOOLS,
     WRITE_FILE,
     PromptVariant,
@@ -78,8 +81,24 @@ Enough for any fixture file, and small enough that a model asking for something
 enormous cannot fill its own context with one call.
 """
 
+MAX_LISTED = 300
+"""Entries one directory listing returns. A real repository's test directory
+can hold more files than are worth a turn's worth of context."""
+
+MAX_MATCHES = 100
+MAX_SEARCHED_BYTES = 1_000_000
+"""Files larger than this are skipped by search: generated data, not source."""
+
 DEFAULT_PROMPT = variant(DEFAULT_TOOL_PROMPT)
 """What the loop uses when the caller names no prompt."""
+
+
+def _line_number(value: object, *, default: int) -> int:
+    if value is None:
+        return default
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ToolError(f"a line number must be a whole number from 1, got {value!r}")
+    return value
 
 
 class ToolError(Exception):
@@ -150,6 +169,77 @@ class _Workspace:
         except UnicodeDecodeError as error:
             raise ToolError(f"{path} is not UTF-8 text") from error
 
+    def read_lines(self, path: object, start: object, end: object) -> str:
+        """Lines `start` to `end`, counted from 1, each with its number.
+
+        Read whole and then sliced, rather than capped like `read`: a real
+        source file is often larger than the cap, and the range is how the
+        model reaches its end. The slice is what is capped.
+        """
+        if isinstance(path, str) and path in self.hidden:
+            raise ToolError(f"{path} is not available for this task")
+        target = self.resolve(path)
+        if not target.is_file():
+            raise ToolError(f"{path} is not a file in this repository")
+        try:
+            lines = target.read_text(encoding="utf-8").splitlines()
+        except UnicodeDecodeError as error:
+            raise ToolError(f"{path} is not UTF-8 text") from error
+        first = _line_number(start, default=1)
+        last = _line_number(end, default=len(lines))
+        if first > last:
+            raise ToolError(f"start_line {first} is after end_line {last}")
+        numbered = "\n".join(
+            f"{number}: {lines[number - 1]}"
+            for number in range(first, min(last, len(lines)) + 1)
+        )
+        if len(numbered) > MAX_READ_BYTES:
+            numbered = numbered[:MAX_READ_BYTES] + "\n[cut: ask for fewer lines]"
+        return numbered or f"{path} has {len(lines)} line(s); none in that range"
+
+    def list_directory(self, path: object) -> str:
+        directory = self.root if path in (None, "", ".") else self.resolve(path)
+        if not directory.is_dir():
+            raise ToolError(f"{path} is not a directory in this repository")
+        entries = []
+        for entry in sorted(directory.iterdir()):
+            relative = entry.relative_to(self.root).as_posix()
+            if is_excluded(entry.name) or relative in self.hidden:
+                continue
+            entries.append(f"{relative}/" if entry.is_dir() else relative)
+        if len(entries) > MAX_LISTED:
+            kept = entries[:MAX_LISTED]
+            return "\n".join([*kept, f"[{len(entries) - MAX_LISTED} more not shown]"])
+        return "\n".join(entries) or "(empty)"
+
+    def search(self, text: object, path: object) -> str:
+        if not isinstance(text, str) or not text:
+            raise ToolError("text must be a non-empty string")
+        directory = self.root if path in (None, "", ".") else self.resolve(path)
+        if not directory.is_dir():
+            raise ToolError(f"{path} is not a directory in this repository")
+        matches: list[str] = []
+        for file in sorted(directory.rglob("*")):
+            relative = file.relative_to(self.root)
+            if (
+                not file.is_file()
+                or any(is_excluded(part) for part in relative.parts)
+                or relative.as_posix() in self.hidden
+                or file.stat().st_size > MAX_SEARCHED_BYTES
+            ):
+                continue
+            try:
+                content = file.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+            for number, line in enumerate(content.splitlines(), start=1):
+                if text in line:
+                    matches.append(f"{relative.as_posix()}:{number}: {line.strip()}")
+                    if len(matches) == MAX_MATCHES:
+                        matches.append(f"[stopped at {MAX_MATCHES} matches]")
+                        return "\n".join(matches)
+        return "\n".join(matches) or f"no match for {text!r}"
+
     def write(self, path: object, content: object) -> str:
         if not isinstance(content, str):
             raise ToolError(f"content must be a string, got {type(content).__name__}")
@@ -184,6 +274,12 @@ class ToolUseAgent:
         self._prompt = prompt or DEFAULT_PROMPT
         self._max_turns = max_turns
         self._run_ceiling = run_ceiling
+        # A variant offering list_directory is one written for a whole
+        # repository. Its opening shows the top level and its reads are
+        # numbered; every other variant behaves exactly as it was frozen.
+        self._repository_mode = any(
+            tool.name == LIST_DIRECTORY for tool in self._prompt.tools
+        )
 
     @property
     def agent_id(self) -> str:
@@ -311,6 +407,9 @@ class ToolUseAgent:
         )
 
     def _opening(self, space: _Workspace, task: TaskDefinition) -> str:
+        if self._repository_mode:
+            top = space.list_directory(None)
+            return f"{task.description.strip()}\n\nThe repository's top level:\n{top}"
         listing = "\n".join(space.visible_files())
         return f"{task.description.strip()}\n\nFiles you may read:\n{listing}"
 
@@ -333,11 +432,30 @@ class ToolUseAgent:
         it from the benchmark, which would quietly delete exactly the runs
         where a model handles tools badly.
         """
+        arguments = call.arguments
+        known = ", ".join(tool.name for tool in self._prompt.tools)
+        if call.name not in {tool.name for tool in self._prompt.tools}:
+            # Only what the variant offered runs. Under tools-v3 a remembered
+            # list_files would dump a whole repository into the context, and
+            # the measurement would be of a tool the prompt never described.
+            return f"error: no tool named {call.name}. Available: {known}", False
         try:
             if call.name == LIST_FILES:
                 return "\n".join(space.visible_files()), False
+            if call.name == LIST_DIRECTORY:
+                return space.list_directory(arguments.get("path")), False
+            if call.name == SEARCH:
+                found = space.search(arguments.get("text"), arguments.get("path"))
+                return found, False
+            if call.name == READ_FILE and self._repository_mode:
+                lines = space.read_lines(
+                    arguments.get("path"),
+                    arguments.get("start_line"),
+                    arguments.get("end_line"),
+                )
+                return lines, False
             if call.name == READ_FILE:
-                return space.read(call.arguments.get("path")), False
+                return space.read(arguments.get("path")), False
             if call.name == WRITE_FILE:
                 answer = space.write(
                     call.arguments.get("path"), call.arguments.get("content")
@@ -348,11 +466,10 @@ class ToolUseAgent:
         except OSError as error:
             raise AgentError(f"{call.name} failed on the workspace: {error}") from error
 
-        known = ", ".join(tool.name for tool in TOOLS)
-        return f"error: no tool named {call.name}. Available: {known}", False
+        raise AssertionError(f"{call.name} is offered but has no implementation")
 
 
-_TOOL_NAMES = frozenset(tool.name for tool in TOOLS)
+_TOOL_NAMES = frozenset(tool.name for tool in (*TOOLS, *REPOSITORY_TOOLS))
 
 
 def _note(

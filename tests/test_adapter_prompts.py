@@ -28,6 +28,7 @@ from control_plane.domain.errors import DomainError
 DIGESTS = {
     "tools-v1": "30344fe6d15bec46be4f1ae33be704669e9d8c13fb36d85b66e550f37af39584",
     "tools-v2": "62874a8db6d1c2e8fd486931f4926433fdfe9f1b9f61ca777b49a8b0722b8014",
+    "tools-v3": "e42adb634a13db155908b3e733a351b205bea76c3ada682c6e36e904ba52cfdd",
     "single-shot-v1": (
         "6a5fc06d2e694c2421276b8659df6bf4059dd61402d7ecba1f9c9e7d0155ff5e"
     ),
