@@ -17,6 +17,7 @@ from control_plane.adapters.swebench import (
     image_for,
     pytest_command,
     render_task,
+    runnable,
 )
 from control_plane.adapters.task_toml import base_image, load_task
 from control_plane.domain.task import CommandRole, Suite
@@ -52,6 +53,42 @@ def test_a_parametrised_test_id_survives_the_shell() -> None:
 
     assert shlex.split(command)[-2:] == ["t.py::test[a b]", "t.py::other"]
     assert command.startswith("HOME=/tmp /opt/miniconda3/envs/testbed/bin/python ")
+
+
+def test_an_id_the_dataset_cut_at_a_space_widens_to_its_function() -> None:
+    """Regression: pytest-11143's pass-to-pass command failed on these.
+
+    The dataset stores `test_exprs[multi-line string]` as `test_exprs[multi-line`,
+    pytest reports it "not found", and the whole command failed, so the
+    instance's own fix scored as a regression.
+    """
+    ids = [
+        "t.py::test_exprs[multi-line",
+        "t.py::test_exprs[backslash",
+        "t.py::test_exprs[complete]",
+        "t.py::test_other",
+    ]
+
+    assert runnable(ids) == (
+        "t.py::test_exprs",
+        "t.py::test_exprs[complete]",
+        "t.py::test_other",
+    )
+
+
+def test_a_rendered_command_never_names_a_cut_id() -> None:
+    row = ROW | {"PASS_TO_PASS": json.dumps(["t.py::test_exprs[multi-line"])}
+
+    text = render_task(
+        row,
+        fixture_sha256="d" * 64,
+        base_image="img@sha256:" + "c" * 64,
+        test_patch_file="p.patch",
+        test_patch_sha256="e" * 64,
+    )
+
+    assert "test_exprs[multi-line" not in text
+    assert "t.py::test_exprs" in text
 
 
 def test_a_test_list_must_be_a_list_of_ids() -> None:
