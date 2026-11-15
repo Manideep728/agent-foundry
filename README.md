@@ -47,7 +47,7 @@ from the database these runs were stored in.
 
 | | |
 |---|---|
-| **No lost work** | A worker killed with `SIGKILL` mid-suite: **64 of 64** runs stored, each exactly once |
+| **No lost work** | 10 trials, 12 workers killed with `SIGKILL` mid-validation: **640 of 640** runs stored, each exactly once |
 | **Scales out** | **2.5x** throughput with 4 workers (104 to 255 runs per minute) |
 | **Cheap isolation** | The C++ supervisor as PID 1 adds **3 ms or less**; the container adds about 400 ms |
 | **Reproducible** | **34 of 34** task configurations gave the same outcome, patch and per-call token counts in all 3 repeats |
@@ -338,9 +338,26 @@ partitions, four workers measured 274 runs per minute (2.6x). The rest of the
 gap to 4x is dispatch and start-up inside each trial, and the one Docker daemon
 every worker shares.
 
-In one trial a worker was killed with `SIGKILL` after five runs. Kafka moved
-its partitions to the other worker after the 45 s session timeout, and the
-collector stored 64 of 64 runs, each once.
+Worker loss was tested in 10 trials of 64 runs each, with 2, 3 or 4 workers.
+Each trial killed one worker, or two at once, with `SIGKILL` while its
+validation container was running, after 1 to 25 of its runs. In five trials
+the killed workers were restarted on their own databases.
+
+| Measure | Result |
+|---|---|
+| Runs dispatched | 640 |
+| Stored exactly once | 640; none missing, extra or duplicated |
+| Conflicting copies at the collector | 0 |
+| Measured | 637 |
+| Recorded as interrupted | 3 |
+| Containers left behind | none after a restart; one per killed worker otherwise |
+
+The 3 interrupted runs are deliberate. A worker restarted before Kafka's 45 s
+session timeout gets its own unfinished run back. Its startup recovery has
+already marked that run interrupted, and recovery never retries a run, because
+a retry can hide a crash loop or pay for the same model calls twice. When the
+run moves to another worker instead, that worker measures it, which is what
+happened to the other 7 interrupted validations.
 
 `infra/aws/` deploys the same layout with Terraform: ECS on one EC2 instance
 for the broker, the collector and two workers, RDS PostgreSQL for the results,
