@@ -26,6 +26,8 @@ workspaces/
 report.md
 *.report.md
 reports/
+# The exception: the published results, which the README cites.
+!examples/report.md
 
 # Databases. SQLite is the MVP source of truth for completed runs, but the
 # file itself is local state, not source.
