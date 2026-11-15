@@ -1,42 +1,63 @@
 # AgentFoundry
 
-**A test harness for AI coding agents.** AgentFoundry gives an agent a real
-repository task, runs the agent's patch against the repository's own tests in a
-locked-down container, and records the result: what passed, what broke, how
-long it took, and what it cost.
+**A test harness for AI coding agents.** AgentFoundry gives an agent a coding
+task, runs the agent's patch against the repository's own tests inside a
+locked-down container, and records what happened: which tests now pass, which
+ones broke, how long the agent took, and how many tokens it used.
 
 [![CI](https://github.com/Manideep728/agent-foundry/actions/workflows/ci.yml/badge.svg)](https://github.com/Manideep728/agent-foundry/actions/workflows/ci.yml)
 ![Python 3.12](https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white)
 ![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus&logoColor=white)
-![Docker](https://img.shields.io/badge/Docker-sandboxed-2496ED?logo=docker&logoColor=white)
-![Kafka](https://img.shields.io/badge/Kafka-distributed-231F20?logo=apachekafka&logoColor=white)
-![AWS](https://img.shields.io/badge/AWS-ECS%20%C2%B7%20RDS%20%C2%B7%20S3-FF9900?logo=amazonwebservices&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 
-> A demo of an AI agent shows one patch that worked once. AgentFoundry turns
-> that demo into a measurement: the same task, run the same way, gives a record
-> that you can compare with the next run.
+## Results
 
-## Headline numbers
+Five configurations, three repeats each, on one machine: an RTX 4060 with
+8 GiB under WSL2, with every model served locally by Ollama. The per-run tables
+are in [examples/report.md](examples/report.md), which `af report` generated
+from the database these runs were stored in.
 
-Every figure comes from a run of this repository, on the machine named in its
-section below.
+| Agent | Model | Suite | Resolved | Broke a passing test | Median agent time | Median tokens per run | Cost |
+|---|---|---|---|---|---|---|---|
+| Reference fix | none | synthetic, 8 tasks | 24/24 | 0/24 | | | $0 |
+| Single-shot | qwen2.5-coder:7b | synthetic | **15/24** | 3/24 | 6.8 s | 1,177 | $0 (local) |
+| Tool loop | llama3.2:3b | synthetic | **0/24** | 15/24 | 26.1 s | 6,829 | $0 (local) |
+| Reference fix | none | real repositories, 5 tasks | 15/15 | 0/15 | | | $0 |
+| Tool loop | llama3.2:3b | real repositories | **0/12** | 0/12 | 57.8 s | 23,623 | $0 (local) |
+
+- **The reference fix is not an agent.** It applies each task's known-correct
+  fix, and the harness then validates that patch like any other. A full score
+  shows that every task can be solved inside the harness, so a model that
+  scores zero failed on its own.
+- **qwen2.5-coder:7b**, given the whole small repository in one prompt, solves
+  5 of the 8 synthetic tasks, and the same 5 in every repeat.
+- **llama3.2:3b with tools** writes patches on the synthetic suite, and every
+  one breaks a test that passed before. On the real repositories it reads files
+  and never writes a fix. Three more runs, all of `pallets-flask-5063`, have no
+  measurement: one model call ran past the 900 s limit each time. The report
+  lists them with that reason instead of counting them as failures.
+- **Repeats agree.** At temperature 0, every task in all five configurations
+  gave the same outcome, the same patch, and the same token count on every
+  model call, in all three repeats.
+- **No hosted model is in the table.** The OpenAI-compatible client works with
+  any chat-completions server, but it has only been run against a local one.
+
+## Harness numbers
 
 | | |
 |---|---|
-| **No lost work** | One worker killed with `SIGKILL` during a suite: **64 of 64 runs** stored, each one time |
+| **No lost work** | A worker killed with `SIGKILL` mid-suite: **64 of 64** runs stored, each exactly once |
 | **Scales out** | **2.5x** throughput with 4 workers (104 to 255 runs per minute) |
-| **Cheap isolation** | The C++ supervisor as PID 1 adds **no measurable time** (3 ms or less); the container adds about 400 ms |
-| **Deployed** | ECS, RDS and S3 on AWS with Terraform: deploy, measure 16 runs, destroy in **11 minutes** |
-| **Reproducible** | 3 repeated suites agree on **8 of 8 tasks**, down to the patch hash and the token count of each call |
-| **Tested** | **1,049** Python tests and **146** C++ tests, in 4 CI jobs with real Docker, Kafka and PostgreSQL |
+| **Cheap isolation** | The C++ supervisor as PID 1 adds **3 ms or less**; the container adds about 400 ms |
+| **Deployed** | ECS, RDS and S3 on AWS with Terraform: deploy, measure 16 runs and destroy in **11 minutes** |
+| **Tested** | **1,155** Python tests and **146** C++ tests, in 4 CI jobs with real Docker, Kafka and PostgreSQL |
 
 ## How it works
 
 ```mermaid
 flowchart LR
     T["Task<br/>fixture + pinned hash<br/>+ test commands"] --> W["Isolated copy<br/>of the repository"]
-    W --> A["Agent<br/>fake · Ollama · tool loop"]
+    W --> A["Agent<br/>reference fix · single-shot · tool loop"]
     A --> P["Patch"]
     P --> V["Validation container<br/>afrunner as PID 1<br/>no network · no capabilities<br/>memory, CPU and pid limits"]
     V --> S["Score<br/>fail→pass · pass→pass<br/>regressions"]
@@ -44,36 +65,218 @@ flowchart LR
     D --> R["Markdown report"]
 ```
 
-1. **Load the task.** The harness checks the fixture against its pinned content
-   hash and refuses a fixture that changed.
-2. **Run the agent** against a copy of the repository, never the fixture
-   itself, and capture its patch.
+1. **Load the task.** The fixture is checked against the content hash the task
+   pins, and a fixture that changed is refused.
+2. **Run the agent** on a copy of the repository, never the fixture itself, and
+   capture its patch.
 3. **Validate the patch.** `afrunner`, a C++20 supervisor, runs the
    repository's own tests as PID 1 of a container with no network.
-4. **Score and store.** A task is resolved when its failing tests pass and no
-   passing test breaks. Each run records its tokens, cost, durations, image
+4. **Score and store.** A task is resolved when its failing tests now pass and
+   no passing test broke. Each run records its tokens, cost, durations, image
    digest and harness build.
 
 ## Quick start
 
-Needs Linux (or WSL2), Docker and [uv](https://docs.astral.sh/uv/).
+Needs Linux or WSL2, Docker and [uv](https://docs.astral.sh/uv/).
+
+The default agent calls no model: it applies the task's known fix, so this runs
+offline and shows the pipeline working end to end.
 
 ```
-$ make runner-image                       # build the validation image
+$ make runner-image
 $ uv run af run tasks/csv-quoted-fields.toml
-run 20260917-030423-1d5f524b  csv-quoted-fields  [synthetic]
+run 20261115-111315-bc3b1a90  csv-quoted-fields  [synthetic]
   state       scored
   outcome     clean_patch
   resolved    yes         regressed   no
   fail->pass  1/1          pass->pass  1/1
-  duration    agent 1ms   validation 1227ms
-  ...
-$ uv run af bench                         # every task, one summary per suite
-$ uv run af report --out report.md        # Markdown over everything stored
+  duration    agent 1ms   validation 755ms
+  cost        0 micro-USD  (fake/scripted)
+  patch       1391 bytes
+  runner      afrunner in docker image afrunner:local  pid1=True arch=x86_64
+  image       sha256:bd18b244cf5e2c29f9d4eeeb834c4953aecf0b857f8c1347eecf0f52758a38dc
+  workspace   runs/20261115-111315-bc3b1a90
 ```
 
-The default agent is a scripted fake, so this runs offline. Use
-`--agent ollama --model qwen2.5-coder:7b` for a real local model.
+The same task with a real model, served by a local Ollama:
+
+```
+$ uv run af run tasks/interval-merge.toml --agent single-shot --model qwen2.5-coder:7b
+run 20261115-111316-037fea04  interval-merge  [synthetic]
+  state       scored
+  outcome     clean_patch
+  resolved    yes         regressed   no
+  fail->pass  1/1          pass->pass  1/1
+  duration    agent 10646ms   validation 1941ms
+  cost        0 micro-USD  (ollama/qwen2.5-coder:7b)
+  patch       354 bytes
+  runner      afrunner in docker image afrunner:local  pid1=True arch=x86_64
+  image       sha256:bd18b244cf5e2c29f9d4eeeb834c4953aecf0b857f8c1347eecf0f52758a38dc
+  workspace   runs/20261115-111316-037fea04
+```
+
+`af bench` runs every task in a directory and prints one summary per suite;
+`--repeats N` runs the suite N times and checks that the repeats agree.
+`af report --out report.md` writes the Markdown report over every stored run.
+`af list` and `af show <run-id>` reprint stored runs.
+
+The exit code tells a script whether a measurement exists, so nothing has to
+parse the output:
+
+| Code | Meaning |
+|---|---|
+| 0 | a measurement exists, whatever it says about the agent |
+| 1 | the harness failed, so there is no measurement |
+| 2 | usage error |
+| 130 | interrupted |
+
+## Tasks
+
+**Synthetic suite.** Eight small Python repositories in `tasks/fixtures/`, each
+with one bug or missing behaviour. A task file pins its fixture by content hash
+and names the commands that grade it:
+
+```toml
+[task]
+id = "csv-quoted-fields"
+suite = "synthetic"
+...
+[fixture]
+id = "csv-quoted-fields"
+sha256 = "96265f3e1e6ff2e3346ec618820b5f787b3d39052116d496703c953e6b0cc245"
+...
+hidden_paths = ["tests/test_quoting.py"]
+...
+[[commands]]
+role = "fail_to_pass"
+command = "python3 -m unittest tests.test_quoting"
+
+[[commands]]
+role = "pass_to_pass"
+command = "python3 -m unittest tests.test_basic"
+```
+
+`hidden_paths` keeps the grading test out of the agent's prompt and tools. It
+is still copied and still run.
+
+**Real-repository suite.** Five [SWE-bench Lite](https://www.swebench.com/)
+instances. Each task runs in the instance's own published image, mounted where
+that image expects its source. The agent works on the repository at the
+issue's commit, and the tests that grade it are added only after it finishes,
+the same way SWE-bench's own harness does it.
+
+```toml
+[task]
+id = "pallets-flask-4045"
+suite = "oss"
+...
+[environment]
+base_image = "swebench/sweb.eval.x86_64.pallets_1776_flask-4045@sha256:1425b0801ddf4b2607e552e56516cce3d389bab0a3ce06f58e6fa6a7835c703c"
+image = "afrunner-oss:pallets-flask-4045"
+workdir = "/testbed"
+```
+
+The five were picked by
+[a rule committed before any instance was checked](docs/DECISIONS.md#d40--five-swe-bench-lite-instances-chosen-by-a-rule-fixed-before-any-run):
+take requests, flask, pytest and pylint in turn, and from each, its next
+instance that passes an oracle check. The reference fix must resolve 3 of 3
+runs, the untouched repository must resolve 0 of 3, and every command must
+finish in under 60 s with no network. Every requests instance failed, because
+its tests need the network. Every pylint instance failed, because its source
+tree has a file name the fixture manifest does not accept. That leaves three
+flask tasks and two pytest tasks.
+
+The fixtures are not in the repository. `af fetch` pulls each image by digest,
+copies its source tree out, checks it against the pin, and builds the
+validation image. That needs the network and several GB per task:
+
+```
+$ uv run af fetch tasks/oss
+$ uv run af run tasks/oss/pallets-flask-4045.toml
+run 20261115-111353-eb5540d8  pallets-flask-4045  [oss]
+  state       scored
+  outcome     clean_patch
+  resolved    yes         regressed   no
+  fail->pass  1/1          pass->pass  1/1
+  duration    agent 2ms   validation 1013ms
+  cost        0 micro-USD  (fake/scripted)
+  patch       1354 bytes
+  runner      afrunner in docker image afrunner-oss:pallets-flask-4045  pid1=True arch=x86_64
+  image       sha256:019c80e2ec574ac590b886eaf4291251480adcb6b3e249ed41f99eaff4eedb86
+  workspace   runs/20261115-111353-eb5540d8
+```
+
+`af import-swebench <instance-id>` writes the task file, test patch and
+reference fix for another instance, from a downloaded SWE-bench Lite JSONL file.
+
+## Agents and models
+
+- `--agent fake`, the default, applies the known fix from `tasks/solutions/`
+  and calls no model.
+- `--agent single-shot` sends the task and every visible file in one prompt,
+  and applies the files the model sends back.
+- `--agent tools` gives the model tools and a budget of turns (`--max-turns`).
+  The `tools-v2` prompt offers list, read and write. `tools-v3`, for real
+  repositories, adds a directory listing, a text search and line-range reads.
+
+`--provider ollama` is the default. `--provider openai-compat --base-url URL
+--api-key-env NAME` reaches any server with the OpenAI chat-completions API.
+The key is read from the named environment variable, never from the command
+line, and a test checks that it appears nowhere in the database or in a run's
+files. When a server rate-limits, the client waits as it is told, a bounded
+number of times, and the wait is recorded apart from the model's own time.
+
+Every run records the agent, provider, model and prompt, and every model call
+records its tokens and latency. Calls run at temperature 0 with a fixed seed.
+With Ollama, each call also starts from an unloaded model, because a reply can
+otherwise depend on what an earlier request left in the server's cache; the
+recorded time includes that load. A prompt is a named, frozen variant: changing
+its text fails a test, so a new prompt gets a new name and its own row in a
+report. A reply that cannot be read as an edit is scored `malformed_output`,
+because failing the output format is something a model does, and it is
+measured like everything else it does.
+
+## What makes the numbers trustworthy
+
+- **A supervisor, not a shell script.** `afrunner` runs as PID 1 inside the
+  container. It runs each test command in its own process group with its own
+  deadline and a total deadline, escalates from `SIGTERM` to `SIGKILL`, and
+  reaps orphaned processes. A command killed by the memory limit is reported as
+  a harness failure, never as a failing test.
+- **Structured results, not log scraping.** The runner writes a `result.json`
+  with each command's exit code, signal, duration and capped output, and the
+  control plane reads that file, never the container's output. A conformance
+  test runs the real binary and reads its output through the Python types.
+- **Pinned inputs and a recorded environment.** A fixture whose hash changed is
+  refused, and runs only ever touch a copy. Each run records the image digest,
+  the architecture, whether the supervisor was PID 1, and the harness build.
+
+`make doctor` checks that this machine's Docker enforces the limits the harness
+asks for:
+
+```
+$ make doctor
+uv run af doctor --image afrunner:local
+PASS  runtime     server 29.1.3, cgroups v2, x86_64
+PASS  image       afrunner:local: afrunner 0.1.0
+PASS  pid1        pid1=True, shell /usr/bin/dash
+PASS  network     1.1.1.1:53 blocked
+PASS  memory      512 MiB under a 67108864-byte limit: kill detected
+PASS  pids        --pids-limit 1: fork: Resource temporarily unavailable
+INFO  bind        200 small files written to /work in 2 ms
+```
+
+What the isolation costs, over 40 runs of each arm for the two commands of
+`semver-compare`:
+
+| Arm | p50 | p95 |
+|---|---|---|
+| Container, supervisor as PID 1 | 461 ms | 482 ms |
+| Container, `/bin/sh` as PID 1 | 464 ms | 481 ms |
+| Host, no container | 60 ms | 62 ms |
+
+The supervisor adds no time this measurement can find: the difference is 3 ms
+or less and its sign changes. The container adds about 400 ms per validation.
 
 ## Distributed and on AWS
 
@@ -89,435 +292,34 @@ flowchart LR
     K2 --> CO["af collect"] --> DB[("PostgreSQL<br/>RDS")]
 ```
 
-Workers take runs from Kafka and validate each run in its own container. A
-collector stores the results in one database. A worker that dies does not
-acknowledge its run, so Kafka gives that run to another worker. `infra/aws/`
-deploys the same layout to ECS, RDS and S3 with Terraform, and
-`infra/aws/smoke.sh` proves it end to end and then destroys it.
-
-## Tech stack
-
-| Layer | Technology |
-|---|---|
-| Execution supervisor | C++20, POSIX process groups, `SIGTERM` to `SIGKILL` escalation, cgroup v2 OOM count |
-| Control plane and CLI | Python 3.12, strict mypy, ruff, pytest |
-| Isolation | Docker: `--network none`, `--cap-drop=ALL`, memory, CPU and pid limits |
-| Storage | SQLite or PostgreSQL behind one contract test suite |
-| Distribution | Kafka (KRaft): idempotent workers and collector |
-| Cloud | AWS ECS on EC2, RDS PostgreSQL, S3, ECR, Terraform |
-| Models | Ollama (local), cold calls at temperature 0 |
-
-The code follows four layers with dependencies that point inward: domain,
-services, adapters and interface. A test reads the imports of `domain/` and
-fails when that code reaches files, the clock, Docker or a model API.
-
-## Contents
-
-- [Build and test](#build-and-test)
-- [Run a task](#run-a-task) · [Run a suite](#run-a-suite) · [Write a report](#write-a-report)
-- [Run distributed](#run-distributed) · [Store runs in PostgreSQL](#store-runs-in-postgresql) · [Run on AWS](#run-on-aws)
-- [Throughput, worker loss and isolation cost](#throughput-worker-loss-and-isolation-cost)
-- [Agents](#agents) · [Benchmark results](#benchmark-results)
-- [Planned scope](#planned-scope) · [Limitations](#limitations)
-- Design: [docs/DECISIONS.md](docs/DECISIONS.md), each decision with its options and its reason, and the supervisor interface, [docs/RUNNER_CONTRACT.md](docs/RUNNER_CONTRACT.md)
-
-## What exists
-
-`afrunner` reads a command file and runs each line under `/bin/sh -c` in its
-own process group. It captures both streams to capped log files and enforces a
-deadline per command and in total. After a grace period it escalates from
-`SIGTERM` to `SIGKILL`, it reaps orphaned descendants, and it writes a
-`result.json`. A conformance test runs the real binary and reads its output
-through the Python types, so the two languages cannot drift apart silently.
-
-A container suite checks the behaviour that exists only when `afrunner` is
-PID 1. It reaps orphans that left the command's process group. It records a
-fork that `--pids-limit` refuses as `spawn_failed`. It writes a partial result
-and exits 7 on `docker stop`. It reports a command that the memory limit
-killed as a harness failure, not as a failed test. The suite also runs under
-`docker run --init`.
-
-`--runner local` runs the commands on the host, with no isolation and no
-limits, for development only. Every run it produces records `pid1=false`, so
-those rows are identifiable in the data.
-
-Every run records the environment that validated it: the architecture,
-whether the supervisor was PID 1, and the image digest. It also records the
-harness build, for example `0.1.0+62540b902356`, with `.dirty` when tracked
-files differed from that commit. The database carries a schema version and
-upgrades itself in place. It refuses a database from a newer build, because a
-field can change meaning, and a guess gives plausible wrong data.
-
-## Build and test
-
-Requires [uv](https://docs.astral.sh/uv/). The Python toolchain is pinned to
-3.12 by `.python-version`; uv fetches it if absent.
+Workers take runs from Kafka, validate each in its own container, and publish
+the result. A collector stores every result in one SQLite or PostgreSQL
+database. Kafka can deliver a run twice, so the dispatcher sets each run's ID:
+a worker that receives a run it already stored republishes the stored record
+instead of measuring again, and the collector keeps the first copy. A worker
+that dies never acknowledges its run, so Kafka hands it to another worker. Each
+container is labelled with its run and with the database that started it, so a
+restarted worker removes only its own leftovers, never another worker's live
+container. Kafka is an optional extra; `af run` and `af bench` do not need it.
 
 ```
-make sync     # create the virtualenv from pyproject.toml
-make check    # lint, typecheck, tests
-make test     # tests only
+make kafka-up
+uv sync --extra kafka
+uv run af dispatch --agent fake
+uv run af worker --agent fake --worker-id w1 --db worker.sqlite3 --idle-exit-s 10
+uv run af collect --db pool.sqlite3 --idle-exit-s 5
+uv run af report --db pool.sqlite3 --out -
 ```
 
-Without Docker and the image, the tests that start containers are skipped and
-say so. CI runs four jobs:
+`make fanout-check` measures the suite once with `af bench` and once through
+two workers and a collector, and passes only when the per-task results are
+identical. CI runs it with a SQLite and with a PostgreSQL collector. `--db`
+takes a `postgresql://` URL in every command; give the password in
+`PGPASSWORD`.
 
-- `control plane` runs the lint, the type check and the tests.
-- `runner` builds the supervisor and the image, and runs the tests with the
-  container tests active. It runs the container tests again under
-  `docker run --init`, and then runs `make doctor`.
-- `kafka` starts a broker and runs the tests with it. Then it runs
-  `make fanout-check` with local workers, with containerised workers, and with
-  a PostgreSQL collector.
-- `postgres` runs the PostgreSQL tests against a real server.
-
-One test skips in every job: the `ollama` marker asks a real local model to
-answer, and the hosted runners have neither the server nor the pulled weights.
-
-`make help` lists the documented targets. Nothing in the project requires
-make; every target is a plain `uv`, `cmake` or `docker` command.
-
-The C++ supervisor needs Linux, CMake 3.20+ and a C++20 compiler. The image
-needs Docker.
-
-```
-make runner-test   # build afrunner and run its native test suite
-make runner-image  # build the validation image, afrunner:local
-```
-
-The image's entrypoint is `afrunner`, so it runs as PID 1 in the container:
-
-```
-$ docker run --rm afrunner:local --version
-afrunner 0.1.0
-```
-
-`make doctor` runs real validation containers and checks that this machine's
-Docker enforces the limits the harness asks for. It exits 1 if any check fails.
-On WSL2 with Docker Engine 29.1.3:
-
-```
-$ make doctor
-PASS  runtime     server 29.1.3, cgroups v2, x86_64
-PASS  image       afrunner:local: afrunner 0.1.0
-PASS  pid1        pid1=True, shell /usr/bin/dash
-PASS  network     1.1.1.1:53 blocked
-PASS  memory      512 MiB under a 67108864-byte limit: kill detected
-PASS  pids        --pids-limit 1: fork: Resource temporarily unavailable
-INFO  bind        200 small files written to /work in 2 ms
-```
-
-## Run a task
-
-Build the image first (`make runner-image`).
-
-```
-$ uv run af run tasks/csv-quoted-fields.toml
-run 20260917-030423-1d5f524b  csv-quoted-fields  [synthetic]
-  state       scored
-  outcome     clean_patch
-  resolved    yes         regressed   no
-  fail->pass  1/1          pass->pass  1/1
-  duration    agent 1ms   validation 1227ms
-  cost        0 micro-USD  (fake/scripted)
-  patch       1391 bytes
-  runner      afrunner in docker image afrunner:local  pid1=True arch=x86_64
-  image       sha256:fe2c76d56069c2a6ae482dca7c5da29dd2d77331a29389f31916d0c4e5c9824e
-  workspace   runs/20260920-085144-004f6725
-```
-
-`--image` selects a different validation image. `--runner local` skips Docker
-and prints a warning on every run. If Docker or the image is missing, the run
-is recorded as `infrastructure_failed` and `af` exits 1.
-
-One `af run` at a time uses a database. A second one started beside it exits 1
-at once, because each run starts by recovering the runs it finds unfinished.
-
-`af list` and `af show <run-id>` reprint stored runs. `af fixture-hash <dir>`
-prints the digest a task file should pin.
-
-Exit codes separate the two kinds of failure, so a script never parses this
-output:
-
-| Code | Meaning |
-|---|---|
-| 0 | a measurement exists, whatever it says about the agent |
-| 1 | the harness failed; there is no measurement |
-| 2 | usage error |
-| 130 | aborted |
-
-A run whose agent produced a patch that fails every test exits 0. The harness
-did its job; the agent did not.
-
-## Run a suite
-
-`af bench` evaluates every task in a directory, defaulting to `tasks/`, and
-summarises each suite separately.
-
-```
-$ uv run af bench
-af: [1/8] cache-eviction
-...
-20260920-085212-1c350a5e  csv-quoted-fields        clean_patch
-...
-
-suite synthetic  8 task(s)  8 measured of 8 attempted
-  config        fake/fake/scripted
-  image         sha256:fe2c76d56069c2a6ae482dca7c5da29dd2d77331a29389f31916d0c4e5c9824e
-  resolved      8/8
-  regressed     0/8
-                clean_patch              8
-                patch_with_regressions   0
-                tests_still_failing      0
-                validation_timeout       0
-                no_patch_produced        0
-                malformed_output         0
-  cost          0 micro-USD over 8 measured run(s)
-  agent         min 0ms  median 0ms  max 1ms
-  validation    min 856ms  median 914ms  max 1047ms
-```
-
-`config` names all three of the agent, the provider and the model, because a
-summary covers exactly one of those and two of them do not identify it: the
-single-shot agent and the tool loop drive the same model through the same
-provider.
-
-The whole suite holds one database lock, so nothing else may evaluate against
-that database while it runs. It exits `0` only when **every** task produced a
-measurement — a suite where the harness broke on one task exits `1`, so a
-script never has to read the text to find out. What the agent scored does not
-affect the exit code: eight runs that all produced no patch are eight
-measurements.
-
-Counts are printed as `passed/total` rather than percentages, and durations as
-the range the runs covered rather than a mean — over eight tasks a mean is one
-slow run away from meaningless, and every figure printed here is a duration
-some run actually had.
-
-Suites are summarised separately and never averaged together, and the model
-that produced the runs is named. Runs that produced no measurement are listed
-with the reason, and money spent by them is reported on its own line rather
-than folded into the total: a failed run's cost is real, but it is not part of
-what the benchmark cost to measure.
-
-Interrupting a suite prints the summary for the tasks that finished and exits
-`130`. The run that was in flight is recorded as aborted, which is kept
-separate from a harness failure so that cancelling a suite does not look like
-unreliability.
-
-## Write a report
-
-`af report` summarises every run in a database as Markdown, one section per
-suite and configuration.
-
-```
-$ uv run af report --out report.md
-wrote report.md
-```
-
-`--out -` writes to stdout instead. The report reads only and takes no run
-lock, so one can be taken while a suite is running.
-
-Each section names the configuration that produced it, then the counts, the
-cost, the latency ranges, the environment that validated the runs, and a row
-per task. A run that produced no measurement is listed with the task, the
-failure and the reason, because a harness-failure count nobody can trace to a
-cause cannot be acted on. Money spent by those runs is reported on its own line
-and is not added to the measured total.
-
-A run that had not finished when the report was written is named and excluded
-from every figure, rather than quietly shrinking the denominator. The next
-`af run` recovers it.
-
-Two reports over the same database differ only where the measurements differ,
-so a change between two benchmarks is a diff.
-
-## Run distributed
-
-A pool of workers can also measure a suite, over Kafka. `af dispatch`
-publishes one message for each run, keyed by the run identifier, so the runs
-spread over the partitions of the work topic (D37). Each `af worker` measures
-the messages it receives and publishes each record. `af collect` stores the
-records in one database. Kafka is an optional extra: `af run` and `af bench`
-do not need it.
-
-```
-$ make kafka-up
-sh infra/kafka/broker.sh
-broker: started existing af-kafka
-sh infra/kafka/topics.sh
-...
-$ uv sync --extra kafka
-$ uv run af dispatch --agent fake
-af: dispatched 8 run(s) for 8 task(s) to agentfoundry-task-runs at localhost:9092
-20260929-044240-300587d1	cache-eviction
-20260929-044240-c8d9cf11	csv-quoted-fields
-...
-$ uv run af worker --agent fake --worker-id w1 --db worker.sqlite3 --idle-exit-s 10
-af: w1 waiting for work on agentfoundry-task-runs at localhost:9092
-af: w1 handled 8 message(s)
-20260929-044240-c8d9cf11  csv-quoted-fields        clean_patch
-...
-$ uv run af collect --db pool.sqlite3 --idle-exit-s 5
-af: collecting from agentfoundry-run-results at localhost:9092 into pool.sqlite3
-af: collected 8 stored, 0 duplicate, 0 conflicting-duplicate, 0 undecodable, 0 unfinished
-...
-$ uv run af report --db pool.sqlite3 --out -
-```
-
-Each process uses its own database. A worker keeps a local database for its
-own recovery, and holds its lock, so two workers on one machine need two
-`--db` paths. The collector database is the one that holds the results, and
-`af report` reads it.
-
-The dispatcher sets the run identifier. Kafka can deliver a message more than
-once: for example, when a worker stops after it publishes a result and before
-it commits the offset. The worker then republishes the stored record and does
-not measure the task again. The collector stores the first arrival of each run
-and reports a later arrival with different content.
-
-A worker that stops during a validation does not acknowledge the message, so
-Kafka gives the run to another worker after the session timeout. Each
-validation container has a name for one attempt at a run. The container of the
-stopped attempt can therefore stay on the host, and the next attempt still
-starts. Recovery finds every attempt of a run by its `agentfoundry.run_id`
-label.
-
-A worker measures with its own flags. A message for a different agent, model,
-prompt or image, or for a task this checkout does not hold, stops the worker
-with exit `2`. The worker does not acknowledge the message, so a worker with
-the correct configuration receives it. A message that cannot be decoded is
-logged and acknowledged, because no worker can read it.
-
-`make fanout-check` measures the suite two times with the fake agent: once with
-`af bench`, and once with two workers in parallel and a collector. It exits
-`0` only when the per-task results are identical and the collected runs are
-exactly the dispatched runs. `AF_COLLECT_DB` sets the collector's database, and
-CI runs the check once with SQLite and once with PostgreSQL.
-
-`make control-plane-image` packages `af` as an image, built from the committed
-tree, with the version of that commit recorded on every run it measures. A
-worker in the image does not validate inside its own container. It starts the
-runner image next to itself through the host's Docker socket, so the runner is
-still PID 1 of its own container. The worker's runs directory must be mounted
-at the same path as on the host, because the Docker daemon resolves the
-runner's bind mounts on the host. `AF_WORKER_IMAGE=af-control-plane:local make
-fanout-check` runs the two workers that way.
-
-`af worker --artifacts s3://BUCKET/PREFIX` also stores each run's files in S3
-under `PREFIX/runs/RUN_ID/`: the patch, the command file, `result.json`, the
-logs and the fixture manifest. The workspace copy is left out, because the
-fixture and the patch reproduce it. The worker uploads before it publishes the
-result, so every result the collector stores has its files in the bucket. When
-an upload fails, the worker stops without acknowledging the message. The next
-worker that receives it finds the run already stored, uploads the files, and
-publishes the result. The run is not measured again. The S3 client is the
-`aws` extra.
-
-## Store runs in PostgreSQL
-
-`--db` takes a `postgresql://` URL in place of a file path, in every command.
-SQLite stays the default. A collector that runs on a machine that can be
-replaced needs a database that outlives that machine, and PostgreSQL is that
-database. The driver is an optional extra.
-
-```
-$ make pg-up
-sh infra/postgres/server.sh
-postgres: created af-postgres
-$ uv sync --extra postgres
-$ uv run af bench tasks --db postgresql://agentfoundry@localhost:5432/agentfoundry
-...
-  resolved      8/8
-  regressed     0/8
-$ uv run af list --db postgresql://agentfoundry@localhost:5432/agentfoundry --limit 3
-20261001-041056-1e886212  template-render          synthetic  clean_patch
-20261001-041055-08ce5c57  semver-compare           synthetic  clean_patch
-20261001-041054-fe8553ac  retry-backoff            synthetic  clean_patch
-```
-
-The two stores write the same rows with the same statements, and read them back
-through the same code. One test suite holds both to one contract. The
-differences are the ones a server needs:
-
-- Every integer column is `BIGINT`, because a millisecond timestamp does not
-  fit in 32 bits.
-- The schema version is kept in a table, and the schema is created under an
-  advisory lock, so two processes that open an empty database do not both
-  create it.
-- The run lock is a session advisory lock instead of a file lock, so it also
-  holds between machines. The server releases it when the connection ends.
-
-Give the password in `PGPASSWORD`, not in the URL. Output and reports show a
-URL without its password, but a command line can still be seen by other
-processes.
-
-## Run on AWS
-
-`infra/aws/` deploys the distributed path to one AWS account with Terraform:
-
-- ECS on one EC2 container instance runs the broker, the collector and two
-  workers. A worker starts the runner through the instance's Docker socket,
-  and Fargate does not give a task that socket.
-- RDS PostgreSQL holds the results. RDS keeps the password in Secrets Manager,
-  and ECS gives it to the tasks as `PGPASSWORD`.
-- S3 holds the run artifacts. ECR holds the two images.
-- A budget sends an email at 50% of $10 a month.
-
-`infra/aws/smoke.sh` builds the images from `HEAD`, deploys, dispatches the
-suite two times with the fake agent, and stops one worker. Then it checks that
-every dispatched run is in RDS exactly once and has its files in S3. At the
-end it destroys the deployment and checks that nothing is left. It destroys
-the deployment on a failure too, after it prints the task logs and the
-instance's boot messages. Each wait has a time limit.
-
-```
-$ AF_REGION=us-east-2 AF_ALERT_EMAIL=you@example.com sh infra/aws/smoke.sh
-...
-== dispatch: every task x 2 (23:09:22Z)
-af: dispatched 16 run(s) for 8 task(s) to agentfoundry-task-runs at localhost:9092
-...
-== waiting until all 16 runs are in RDS (23:09:43Z)
-stored 16 of 16
-every dispatched run is stored exactly once
-
-== the report, read from RDS (23:09:58Z)
-# AgentFoundry benchmark report
-...
-16 run(s) recorded, 16 of them measured, across 1 configuration(s).
-...
-| resolved | 16/16 |
-| regressed | 0/16 |
-...
-- Architecture: x86_64
-- Supervisor was PID 1: True
-...
-== artifacts in S3 (23:10:13Z)
-artifacts for all 16 runs
-...
-== destroy (23:10:14Z)
-Destroy complete! Resources: 36 destroyed.
-
-== nothing left (23:13:29Z)
-nothing left
-smoke: exit 0
-```
-
-This run took 11 minutes: 5 for the deployment and 3 for the destroy. The fake
-agent and one-second validations most likely finished the suite before the
-worker stopped. Thus this run does not show redelivery after a worker stops.
-The local measurement in the next section shows it.
-
-The default instance type is `m7i-flex.large`, because an account on the AWS
-free plan can start only free-tier-eligible types. Set
-`TF_VAR_instance_type` to change it.
-
-## Throughput, worker loss and isolation cost
-
-These figures come from one machine: 24 CPUs, WSL2, a local broker, the fake
-agent, and real validation in Docker. Each trial measures 64 runs (8 tasks, 8
-repeats) from the dispatch to the last stored result. The table shows the
-median of three trials.
+On one machine (24 CPUs, WSL2, a local broker, the reference fix, real Docker
+validation), each trial measured 64 runs; the table shows the median of three
+trials:
 
 | Workers | Runs per minute | Speedup |
 |---|---|---|
@@ -525,206 +327,61 @@ median of three trials.
 | 2 | 170 | 1.6x |
 | 4 | 255 | 2.5x |
 
-Four workers cannot share the six partitions of the work topic equally. With
-twelve partitions, four workers measured 274 runs per minute (2.6x). The rest
-of the difference from 4x is the dispatch and start time inside each trial,
-and the one Docker daemon that every worker uses.
+In one trial a worker was killed with `SIGKILL` after five runs. Kafka moved
+its partitions to the other worker after the 45 s session timeout, and the
+collector stored 64 of 64 runs, each once.
 
-One trial stops a worker with `SIGKILL` after it has measured five runs. Kafka
-gives the stopped worker's partitions to the other worker after the 45 s
-session timeout. The other worker measures the remaining 59 runs, including
-the run that the stopped worker was validating. The collector stores 64 of 64
-runs, each one time.
+`infra/aws/` deploys the same layout with Terraform: ECS on one EC2 instance
+for the broker, the collector and two workers, RDS PostgreSQL for the results,
+S3 for each run's files, ECR for the images, and a budget alarm. Workers start
+the runner through the instance's Docker socket, which Fargate does not offer.
+`infra/aws/smoke.sh` builds from `HEAD`, deploys, dispatches the suite twice,
+stops a worker, checks that every run is in RDS exactly once with its files in
+S3, then destroys everything and checks that nothing is left. One run took 11
+minutes and stored 16 of 16. Its suite most likely finished before the worker
+stopped, so it does not show redelivery; the local trial above does.
 
-Isolation cost, from 40 runs of each arm in turn, for the two commands of
-`semver-compare`:
-
-| Arm | p50 | p95 |
-|---|---|---|
-| Container, supervisor as PID 1 | 461 ms | 482 ms |
-| Container, `/bin/sh` as PID 1 | 464 ms | 481 ms |
-| Host, no container | 60 ms | 62 ms |
-
-The supervisor adds no time that this measurement can find: the difference is
-3 ms or less, and its sign changes. The container adds about 400 ms per
-validation. For the command `true`, the container adds 195 ms, which is the
-start and stop of the container alone.
-
-## Agents
-
-Three agents exist behind one interface, so they are comparable on the same
-suite rather than each having its own.
-
-Every run records which agent, provider and model produced it, and a summary
-groups on all three. Two of them are not enough: the single-shot agent and the
-tool loop drive the same model through the same provider, so a report keyed on
-the provider and the model alone would merge the one comparison worth making
-into a rate describing neither.
-
-`--agent fake` is the default. It applies a known solution from
-`tasks/solutions/` and calls no model, so the pipeline runs offline and in CI.
-
-`--agent ollama` sends the task and the visible files to a local model in one
-prompt and applies the files it sends back. It runs at temperature 0 with a
-fixed seed. Token counts are recorded and the cost is zero, which is the honest
-figure for a model that cost nothing to call.
-
-Every model call starts from an unloaded model. At temperature 0 a reply still
-depends on how much of its prompt the server can reuse from an earlier request,
-so the client unloads the model before and after each call. A reply that
-reports reused prompt tokens anyway fails the run, because nothing could
-reproduce it. Each call therefore includes a model load, about 2.5 s for a 7B
-model, and the recorded agent time includes it.
-
-Three suites of the tool loop, run back to back with `llama3.2:3b` and
-`tools-v2`, agree on every task: the same outcome, the same patch hash, and the
-same token counts on every turn. Each suite started after another client had
-left the model loaded. Before the client started every call cold, two suites
-under the same conditions disagreed on two tasks.
-
-`af bench --repeats N` runs the whole suite N times in order. When any task ran
-more than once, the summary and `af report` compare each task's runs: the
-result, the patch, and the token count of every model call. A task agrees only
-when all three match.
+## Build and test
 
 ```
-$ uv run af bench tasks --agent tools --model llama3.2:3b --prompt tools-v2 --repeats 3
+make sync          # create the virtualenv
+make check         # lint, type check, tests
+make runner-test   # build afrunner and run its C++ tests
+make runner-image  # build the validation image, afrunner:local
 ```
 
-`--agent tools` gives the model three tools -- list the files, read one, write
-one -- and a budget of turns, set by `--max-turns`. Each turn is recorded as
-its own invocation, so the loop's cost is the sum of its calls rather than its
-last one. It is not a replacement for the single-shot agent: the two answer the
-same tasks through different amounts of context, and which is worth the tokens
-is a measurement, not a preference.
-
-The tests that decide a task's score can be listed as `hidden_paths` and are
-then kept out of the agent's prompt, and out of what the tools will list or
-read. They are still copied and still run; an agent shown the tests that grade
-it is being handed the answer.
-
-A reply the harness cannot read as an edit is scored `malformed_output` rather
-than treated as an error. Failing to follow the output format is something a
-model does, so it is measured like anything else it does. The reply is kept
-next to the patch, with one line saying what was wrong with it, because a
-malformed-output rate nobody can inspect cannot be acted on.
-
-The system prompt is a named variant, chosen with `--prompt` and recorded on
-every run. `tools-v1` is the prompt the first tool-loop measurements were taken
-under; `tools-v2` is the default and is the one that produces patches. A
-summary groups on the prompt, so a comparison between two of them is two rows
-rather than one blended figure. A named variant is frozen: changing its text
-fails a test, and the fix is a new name.
-
-```
-af run tasks/csv-quoted-fields.toml --agent ollama --model qwen2.5-coder:3b
-af run tasks/template-render.toml --agent tools --max-turns 8
-af bench --agent tools --model llama3.2:3b --prompt tools-v1
-```
-
-## Benchmark results
-
-These figures come from one machine: an RTX 4060 with 8 GiB, under WSL2, with
-Ollama. Every model call starts cold. Each figure counts runs, and the
-durations are ranges. Eight tasks are a small sample; see
-[Limitations](#limitations).
-
-The single-shot agent with `qwen2.5-coder:7b` resolves five of the eight tasks:
-
-```
-$ uv run af bench tasks --agent ollama --model qwen2.5-coder:7b
-...
-suite synthetic  8 task(s)  8 measured of 8 attempted
-  config        single-shot/ollama/qwen2.5-coder:7b [single-shot-v1]
-  image         sha256:41485236f78ec596568ee3a1f07fe144b3a8d1a31e92400f68e8b556dcc4ea6a
-  harness       0.1.0+5b301d6d6bd9
-  resolved      5/8
-  regressed     1/8
-                clean_patch              5
-                patch_with_regressions   1
-                tests_still_failing      2
-...
-  agent         min 4836ms  median 6732ms  max 13737ms
-  validation    min 538ms  median 587ms  max 1708ms
-```
-
-The tool loop with `llama3.2:3b` writes patches, and each one breaks a test
-that passed before. `template-render`, run three times with a 900 s client
-timeout, gives the same result each time. The directory `template-only` holds
-only a copy of `tasks/template-render.toml`:
-
-```
-$ uv run af bench template-only --agent tools --model llama3.2:3b \
-    --prompt tools-v2 --ollama-timeout 900 --repeats 3
-...
-suite synthetic  1 task(s)  3 measured of 3 attempted
-  config        tools/ollama/llama3.2:3b [tools-v2]
-  image         sha256:41485236f78ec596568ee3a1f07fe144b3a8d1a31e92400f68e8b556dcc4ea6a
-  harness       0.1.0+5b301d6d6bd9
-  resolved      0/3
-  regressed     3/3
-  tasks agree   1/1
-...
-  agent         min 467981ms  median 469171ms  max 476688ms
-```
-
-## Planned scope
-
-The C++ supervisor, the Python control plane and CLI, Docker-isolated
-validation, test-based scoring, SQLite storage with in-place schema upgrades,
-PostgreSQL storage, eight benchmark tasks, three agents and Markdown report
-generation exist. The first release also needs a hosted-provider adapter.
-
-Distributed execution over Kafka exists on one machine, and on AWS ECS with RDS
-and S3. Automatic pull requests and a web interface are outside the scope of
-the project.
+Tests that need Docker, Kafka or PostgreSQL skip and say so when those are
+missing. CI runs four jobs: the control plane; the runner and its container
+tests, also under `docker run --init`; Kafka with `make fanout-check`; and
+PostgreSQL. Tests that call a real model are skipped in CI, which has no model
+server.
 
 ## Limitations
 
-- **Safety against hostile code.** Docker reduces accidental host access. It is
-  not a hardened boundary against a deliberately malicious workload.
-- **Statistical significance.** Eight tasks are a small sample. A result that
-  repeats exactly on eight tasks still says little about a ninth task.
-- **Portability.** The supervisor depends on POSIX process semantics and is
-  Linux-only by design.
-- **`--runner local` is not a sandbox.** Point it only at fixtures whose
-  contents are already trusted.
-- **`--agent tools` writes patches, and none of them is correct yet.** Under
-  the prompt `tools-v2` and `llama3.2:3b`, four of seven measured tasks produce
-  a patch and all four break a test that passed before. `template-render`,
-  measured on its own, also breaks a test in three of three runs. `resolved` is
-  zero in every run. The prompt fixed the mechanism, not the repair.
-- **Reproducibility is shown on one machine.** The repeated suites ran on one
-  GPU with one Ollama build. Another GPU or build can compute a different
-  result, which is why every run records its environment and harness build.
-  Two workers that share one Ollama server can load the model for each other,
-  so their runs fail with that reason. Give each worker its own server.
-- **The prompt is a measured variable, and it was tuned on this suite.** Every
-  run records the named prompt it used, and a summary groups on it, so two
-  prompts are two rows. The same eight tasks chose the prompt and then scored
-  it, so the figure is an upper bound on an unseen task.
-- **One task needs a long client timeout.** `template-render` asks the model
-  for a whole file. Under the default 300 s it did not answer in six attempts,
-  and each one was reported as `agent_error`, which produces no measurement.
-  With `--ollama-timeout 900`, each of three runs finished in 468 to 477 s. A
-  worker's Kafka poll interval rises with the timeout, so a long call is not
-  mistaken for a dead worker.
-- **A stopped worker's container stays on the host.** The next attempt of the
-  run starts beside it, but nothing removes the stopped container. When no
-  worker is running, remove all of them with
-  `docker container prune --filter label=agentfoundry.run_id`.
-- **Tool calls do not always arrive on the tool channel.** `llama3.2:3b` uses
-  the documented `tool_calls` field; both `qwen2.5-coder` models write the call
-  into the message body instead, and the 3B one sends several JSON objects
-  separated by newlines. The harness reads one JSON value written as text and
-  refuses anything else, so those runs under-report what the model asked for.
-  Guessing at a malformed call produces a plausible patch from a misread reply,
-  which is worse than refusing it.
+- **Not a sandbox for hostile code.** Docker reduces accidental access to the
+  host. It is not a hardened boundary against a workload written to escape it.
+- **Small samples.** Eight synthetic tasks and five real ones, from two
+  repositories. The prompts were tuned on the synthetic suite, so its figures
+  are an upper bound for unseen tasks.
+- **Linux only.** The supervisor depends on POSIX process semantics.
+- **Reproducible here, with local models.** Repeats agree on one GPU with one
+  Ollama build. Another GPU or build can compute different results, and a
+  hosted model cannot be held to this at all, which is why every run records
+  its environment.
 
-Each measured figure in this file names the machine that produced it, and
-durations are ranges across runs. Results from different model providers are
-never averaged together.
+Operational notes, such as long model calls, tool calls written as text, rate
+limits and leftover containers, are in
+[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
-## Licence
+## Documentation
+
+- [docs/DECISIONS.md](docs/DECISIONS.md): each design decision, the options,
+  and why.
+- [docs/RUNNER_CONTRACT.md](docs/RUNNER_CONTRACT.md): the supervisor's
+  interface.
+- [examples/report.md](examples/report.md): the full results behind the table
+  above.
+
+## License
 
 MIT. See [LICENSE](LICENSE).
