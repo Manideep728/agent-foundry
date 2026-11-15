@@ -1045,10 +1045,44 @@ instance passes the oracle check when all of these hold:
 An instance that fails is recorded with the reason it failed, and the next
 instance from the same repository is tried.
 
-**Consequence.** Five tasks are a small sample, and four repositories are not
-SWE-bench Lite's mix. The suite shows that the harness measures real
+**Result.** The rule selected five tasks. In each, the instance's own fix
+resolved 3 of 3 runs, and with no fix the fail-to-pass tests failed and the
+pass-to-pass tests passed, 3 of 3. The slowest command took 3.6 s.
+
+| Turn | Repository | Instance | Result |
+|---|---|---|---|
+| 1 | requests | all six | rejected, see below |
+| 1 | flask | `pallets__flask-4045` | selected |
+| 1 | pytest | `pytest-dev__pytest-11143` | selected |
+| 1 | pylint | all six | rejected, see below |
+| 2 | flask | `pallets__flask-4992` | selected |
+| 2 | pytest | `pytest-dev__pytest-11148` | selected |
+| 3 | flask | `pallets__flask-5063` | selected |
+
+- All six `psf/requests` instances (1963, 2148, 2317, 2674, 3362, 863) fail
+  their pass-to-pass tests with no fix applied. These tests connect to
+  `httpbin.org`, or, in 3362, to a routable address that must not answer.
+  Under `--network none` the connection fails at once.
+- All six `pylint-dev/pylint` instances (5859, 6506, 7080, 7114, 7228, 7993)
+  contain the file `tests/functional/n/non_ascii_name/non_ascii_name_loł.py`.
+  The fixture manifest accepts printable ASCII paths only, so the import stops
+  before any run.
+
+The first pytest-11143 check failed because of an importer defect: the dataset
+cuts some test identifiers at a space, and pytest did not find them. The
+importer now widens such an identifier to its test function, and the second
+check passed. The check also ran `pytest-dev__pytest-5103` out of turn. That
+instance comes after 11148 in dataset order, the rule did not reach it, and it
+is not in the suite.
+
+The five tasks come from two repositories, three from flask and two from
+pytest.
+
+**Consequence.** Five tasks from two repositories are a small sample, and they
+are not SWE-bench Lite's mix. The suite shows that the harness measures real
 repositories, and how a model does on these five. It does not estimate a
 SWE-bench score.
 
 **What would change it.** A machine with the disk and time for the large
-images, which would allow the full candidate list.
+images, which would allow the full candidate list. A fixture manifest that
+accepts any UTF-8 path would admit the pylint instances.

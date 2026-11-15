@@ -1,0 +1,30 @@
+# SWE-bench Lite instance pallets__flask-5063, written by af import-swebench.
+schema_version = 1
+
+[task]
+id = "pallets-flask-5063"
+suite = "oss"
+description = "Flask routes to return domain/sub-domains information\nCurrently when checking **flask routes** it provides all routes but **it is no way to see which routes are assigned to which subdomain**.\r\n\r\n**Default server name:**\r\nSERVER_NAME: 'test.local'\r\n\r\n**Domains (sub-domains):**\r\ntest.test.local\r\nadmin.test.local\r\ntest.local\r\n\r\n**Adding blueprints:**\r\napp.register_blueprint(admin_blueprint,url_prefix='',subdomain='admin')\r\napp.register_blueprint(test_subdomain_blueprint,url_prefix='',subdomain='test')\r\n\r\n\r\n```\r\n$ flask routes\r\n * Tip: There are .env or .flaskenv files present. Do \"pip install python-dotenv\" to use them.\r\nEndpoint                                                 Methods    Rule\r\n-------------------------------------------------------  ---------  ------------------------------------------------\r\nadmin_blueprint.home                                      GET        /home\r\ntest_subdomain_blueprint.home                             GET        /home\r\nstatic                                                    GET        /static/<path:filename>\r\n...\r\n```\r\n\r\n\r\n**Feature request**\r\nIt will be good to see something like below (that will make more clear which route for which subdomain, because now need to go and check configuration).\r\n**If it is not possible to fix routes**, can you add or tell which method(s) should be used to get below information from flask? \r\n\r\n```\r\n$ flask routes\r\n * Tip: There are .env or .flaskenv files present. Do \"pip install python-dotenv\" to use them.\r\nDomain                Endpoint                                             Methods    Rule\r\n-----------------   ----------------------------------------------------  ----------  ------------------------------------------------\r\nadmin.test.local     admin_blueprint.home                                  GET        /home\r\ntest.test.local      test_subdomain_blueprint.home                         GET        /home\r\ntest.local           static                                                GET        /static/<path:filename>\r\n...\r\n```"
+
+[fixture]
+id = "pallets-flask-5063"
+sha256 = "0fe059e8c3eb0349c209f376f711abda07c5ee42003c5b8f8afcddd43c2a34f6"
+test_patch = "patches/pallets-flask-5063.test.patch"
+test_patch_sha256 = "e5b1124e11d391cc01f7d9d03ada6ccd629a817a3334d5980884ed276237bf96"
+
+[environment]
+base_image = "swebench/sweb.eval.x86_64.pallets_1776_flask-5063@sha256:05369549db34553599f6f96d65ee9c75173c02d9285d283422f6b6e49f0b8df2"
+image = "afrunner-oss:pallets-flask-5063"
+workdir = "/testbed"
+
+[timeouts]
+per_command_ms = 300000
+total_ms = 900000
+
+[[commands]]
+role = "fail_to_pass"
+command = "HOME=/tmp /opt/miniconda3/envs/testbed/bin/python -m pytest -rA -p no:cacheprovider tests/test_cli.py::TestRoutes::test_subdomain tests/test_cli.py::TestRoutes::test_host"
+
+[[commands]]
+role = "pass_to_pass"
+command = "HOME=/tmp /opt/miniconda3/envs/testbed/bin/python -m pytest -rA -p no:cacheprovider tests/test_cli.py::test_cli_name tests/test_cli.py::test_find_best_app 'tests/test_cli.py::test_prepare_import[test-path0-test]' 'tests/test_cli.py::test_prepare_import[test.py-path1-test]' 'tests/test_cli.py::test_prepare_import[a/test-path2-test]' 'tests/test_cli.py::test_prepare_import[test/__init__.py-path3-test]' 'tests/test_cli.py::test_prepare_import[test/__init__-path4-test]' 'tests/test_cli.py::test_prepare_import[value5-path5-cliapp.inner1]' 'tests/test_cli.py::test_prepare_import[value6-path6-cliapp.inner1.inner2]' 'tests/test_cli.py::test_prepare_import[test.a.b-path7-test.a.b]' 'tests/test_cli.py::test_prepare_import[value8-path8-cliapp.app]' 'tests/test_cli.py::test_prepare_import[value9-path9-cliapp.message.txt]' 'tests/test_cli.py::test_locate_app[cliapp.app-None-testapp]' 'tests/test_cli.py::test_locate_app[cliapp.app-testapp-testapp]' 'tests/test_cli.py::test_locate_app[cliapp.factory-None-app]' 'tests/test_cli.py::test_locate_app[cliapp.factory-create_app-app]' 'tests/test_cli.py::test_locate_app[cliapp.factory-create_app()-app]' tests/test_cli.py::test_locate_app 'tests/test_cli.py::test_locate_app_raises[notanapp.py-None]' 'tests/test_cli.py::test_locate_app_raises[cliapp/app-None]' 'tests/test_cli.py::test_locate_app_raises[cliapp.app-notanapp]' 'tests/test_cli.py::test_locate_app_raises[cliapp.factory-create_app2(\"foo\")]' 'tests/test_cli.py::test_locate_app_raises[cliapp.factory-create_app(]' 'tests/test_cli.py::test_locate_app_raises[cliapp.factory-no_app]' 'tests/test_cli.py::test_locate_app_raises[cliapp.importerrorapp-None]' 'tests/test_cli.py::test_locate_app_raises[cliapp.message.txt-None]' tests/test_cli.py::test_locate_app_suppress_raise tests/test_cli.py::test_get_version tests/test_cli.py::test_scriptinfo tests/test_cli.py::test_app_cli_has_app_context tests/test_cli.py::test_with_appcontext tests/test_cli.py::test_appgroup_app_context tests/test_cli.py::test_flaskgroup_app_context 'tests/test_cli.py::test_flaskgroup_debug[True]' 'tests/test_cli.py::test_flaskgroup_debug[False]' tests/test_cli.py::test_flaskgroup_nested tests/test_cli.py::test_no_command_echo_loading_error tests/test_cli.py::test_help_echo_loading_error tests/test_cli.py::test_help_echo_exception tests/test_cli.py::TestRoutes::test_simple tests/test_cli.py::TestRoutes::test_sort tests/test_cli.py::TestRoutes::test_all_methods tests/test_cli.py::TestRoutes::test_no_routes tests/test_cli.py::test_load_dotenv tests/test_cli.py::test_dotenv_path tests/test_cli.py::test_dotenv_optional tests/test_cli.py::test_disable_dotenv_from_env tests/test_cli.py::test_run_cert_path tests/test_cli.py::test_run_cert_adhoc tests/test_cli.py::test_run_cert_import tests/test_cli.py::test_run_cert_no_ssl tests/test_cli.py::test_cli_blueprints tests/test_cli.py::test_cli_empty"
