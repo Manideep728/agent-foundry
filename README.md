@@ -12,14 +12,21 @@ ones broke, how long the agent took, and how many tokens it used.
 
 ## Results
 
-Five configurations, three repeats each, on one machine: an RTX 4060 with
-8 GiB under WSL2, with every model served locally by Ollama. The per-run tables
-are in [examples/report.md](examples/report.md), which `af report` generated
-from the database these runs were stored in.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/results-dark.svg">
+  <img alt="Share of runs resolved. Synthetic suite: reference fix 24/24, gpt-oss-120b 24/24, qwen2.5-coder:7b 15/24, llama3.2:3b 0/24. Real repositories: reference fix 15/15, llama3.2:3b 0/12." src="docs/images/results-light.svg">
+</picture>
+
+Six configurations, three repeats each. Validation ran on one machine (an
+RTX 4060 with 8 GiB, under WSL2). The local models ran there under Ollama, and
+gpt-oss-120b ran on Groq's free tier. The per-run tables are in
+[examples/report.md](examples/report.md), which `af report` generated from the
+database these runs were stored in.
 
 | Agent | Model | Suite | Resolved | Broke a passing test | Median agent time | Median tokens per run | Cost |
 |---|---|---|---|---|---|---|---|
 | Reference fix | none | synthetic, 8 tasks | 24/24 | 0/24 | | | $0 |
+| Single-shot | gpt-oss-120b | synthetic | **24/24** | 0/24 | 1.8 s model, 10.2 s with waits | 1,706 | $0 (free tier) |
 | Single-shot | qwen2.5-coder:7b | synthetic | **15/24** | 3/24 | 6.8 s | 1,177 | $0 (local) |
 | Tool loop | llama3.2:3b | synthetic | **0/24** | 15/24 | 26.1 s | 6,829 | $0 (local) |
 | Reference fix | none | real repositories, 5 tasks | 15/15 | 0/15 | | | $0 |
@@ -29,6 +36,11 @@ from the database these runs were stored in.
   fix, and the harness then validates that patch like any other. A full score
   shows that every task can be solved inside the harness, so a model that
   scores zero failed on its own.
+- **gpt-oss-120b**, a 120B open-weight model on Groq's free tier, solves all 8
+  synthetic tasks in every repeat, with the same single-shot prompt the 7B model
+  gets. A model call took 1.8 s at the median. The free tier allows 8,000 tokens
+  a minute, so 18 of the 24 runs first waited 4 to 17 s for the limit to reset.
+  The client records that wait apart from the model's time.
 - **qwen2.5-coder:7b**, given the whole small repository in one prompt, solves
   5 of the 8 synthetic tasks, and the same 5 in every repeat. That is about
   1,960 tokens per resolved task (29,358 tokens over 15 resolved runs).
@@ -37,11 +49,13 @@ from the database these runs were stored in.
   and never writes a fix. Three more runs, all of `pallets-flask-5063`, have no
   measurement: one model call ran past the 900 s limit each time. The report
   lists them with that reason instead of counting them as failures.
-- **Repeats agree.** At temperature 0, all 34 task configurations (8 tasks in
-  three configurations, 5 in two) gave the same outcome, the same patch, and
-  the same token count on every model call, in all three repeats.
-- **No hosted model is in the table.** The OpenAI-compatible client works with
-  any chat-completions server, but it has only been run against a local one.
+- **Local repeats agree; hosted repeats do not.** At temperature 0, all 34
+  task configurations with a local model or the reference fix (8 tasks in three
+  configurations, 5 in two) gave the same outcome, patch and per-call token
+  counts in all three repeats. gpt-oss-120b got the same temperature and seed,
+  and only 3 of its 8 tasks gave the same patch every time. The other 5 gave 2
+  or 3 different patches, and every one of them passed. The outcome repeated
+  and the output did not.
 
 ## Harness numbers
 
@@ -50,10 +64,10 @@ from the database these runs were stored in.
 | **No lost work** | 10 trials, 12 workers killed with `SIGKILL` mid-validation: **640 of 640** runs stored, each exactly once |
 | **Scales out** | **2.5x** throughput with 4 workers (104 to 255 runs per minute) |
 | **Cheap isolation** | The C++ supervisor as PID 1 adds **3 ms or less**; the container adds about 400 ms |
-| **Reproducible** | **34 of 34** task configurations gave the same outcome, patch and per-call token counts in all 3 repeats |
+| **Reproducible** | **34 of 34** local task configurations gave the same outcome, patch and per-call token counts in all 3 repeats |
 | **Fair tasks** | **12 of 17** candidate SWE-bench tasks rejected before any model ran, because no agent could pass them here |
 | **Deployed** | ECS, RDS and S3 on AWS with Terraform: deploy, measure 16 runs and destroy in **11 minutes** |
-| **Tested** | **1,155** Python tests and **146** C++ tests, in 4 CI jobs with real Docker, Kafka and PostgreSQL |
+| **Tested** | **1,156** Python tests and **146** C++ tests, in 4 CI jobs with real Docker, Kafka and PostgreSQL |
 
 ## How it works
 
@@ -225,6 +239,15 @@ reference fix for another instance, from a downloaded SWE-bench Lite JSONL file.
 
 `--provider ollama` is the default. `--provider openai-compat --base-url URL
 --api-key-env NAME` reaches any server with the OpenAI chat-completions API.
+The hosted row above came from this command:
+
+```
+$ export GROQ_API_KEY=...
+$ uv run af bench tasks --agent single-shot --provider openai-compat \
+    --base-url https://api.groq.com/openai/v1 --provider-name groq-free \
+    --api-key-env GROQ_API_KEY --model openai/gpt-oss-120b --repeats 3
+```
+
 The key is read from the named environment variable, never from the command
 line, and a test checks that it appears nowhere in the database or in a run's
 files. When a server rate-limits, the client waits as it is told, a bounded
@@ -393,9 +416,11 @@ server.
   are an upper bound for unseen tasks.
 - **Linux only.** The supervisor depends on POSIX process semantics.
 - **Reproducible here, with local models.** Repeats agree on one GPU with one
-  Ollama build. Another GPU or build can compute different results, and a
-  hosted model cannot be held to this at all, which is why every run records
-  its environment.
+  Ollama build. Another GPU or build can compute different results. A hosted
+  model is not deterministic even under a fixed seed: gpt-oss-120b's patches
+  varied in 5 of 8 tasks. That is why every run records its environment.
+- **One hosted model, one agent.** The tool loop was not run on gpt-oss-120b.
+  Many turns per task under an 8,000-token-a-minute limit would take hours.
 
 Operational notes, such as long model calls, tool calls written as text, rate
 limits and leftover containers, are in

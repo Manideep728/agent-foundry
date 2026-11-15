@@ -975,6 +975,15 @@ so repeats measure that rather than assume it. The prompts may be retained by
 the provider under its free-tier terms, which is acceptable for synthetic and
 open-source fixtures only.
 
+**Observed (2026-11-15).** The first hosted run, gpt-oss-120b on Groq's free
+tier, resolved 24 of 24 synthetic runs. The tier's limit of 8,000 tokens a
+minute made 18 of the 24 runs wait 4 to 17 s. Each wait went into the run's
+note and stayed out of the call latency (median 1.8 s), as designed above.
+Only 3 of 8 tasks repeated their patch, which confirms that repeats must
+measure determinism and not assume it. The first attempt failed on every
+request: Cloudflare in front of the API refused urllib's default User-Agent
+with 403. The client now names itself on every request.
+
 **What would change it.** A paid run, which needs a price per model in place of
 `TokenPrice.free`, or a provider whose API differs from chat completions.
 

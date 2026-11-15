@@ -1,8 +1,8 @@
 # AgentFoundry benchmark report
 
-Generated 2026-11-15T10:17:17Z from `results.sqlite3`.
+Generated 2026-11-15T20:49:01Z from `results.sqlite3`.
 
-102 run(s) recorded, 99 of them measured, across 5 configuration(s).
+126 run(s) recorded, 123 of them measured, across 6 configuration(s).
 
 Suites and configurations are reported separately and never averaged together. Counts are `passed/total` and durations are ranges, because every figure here is one some run actually had.
 
@@ -71,6 +71,72 @@ Suites and configurations are reported separately and never averaged together. C
 | retry-backoff | 3 | 3/3 | clean_patch | 1 | 1 | 0 / 0 / 1 | yes |
 | semver-compare | 3 | 3/3 | clean_patch | 1 | 1 | 0 / 1 / 1 | yes |
 | template-render | 3 | 3/3 | clean_patch | 1 | 1 | 0 / 0 / 0 | yes |
+
+## synthetic -- single-shot/groq-free/openai/gpt-oss-120b [single-shot-v1]
+
+24 measured of 24 attempted.
+
+| measure | value |
+|---|---|
+| resolved | 24/24 |
+| regressed | 0/24 |
+| clean_patch | 24 |
+| patch_with_regressions | 0 |
+| tests_still_failing | 0 |
+| validation_timeout | 0 |
+| no_patch_produced | 0 |
+| malformed_output | 0 |
+| cost, micro-USD | 0 |
+| prompt tokens, total | 25374 |
+| output tokens, total | 14812 |
+| tokens per run, min/median/max | 1176 / 1706 / 2523 |
+| agent ms, min/median/max | 1101 / 10239 / 18939 |
+| validation ms, min/median/max | 516 / 544 / 2017 |
+
+- Architecture: x86_64
+- Supervisor was PID 1: True
+- Image: `sha256:bd18b244cf5e2c29f9d4eeeb834c4953aecf0b857f8c1347eecf0f52758a38dc`
+- Harness: `0.2.0+eac0fbbdfd7d`
+
+| task | outcome | resolved | regressed | fail->pass | pass->pass | agent ms | validation ms | cost |
+|---|---|---|---|---|---|---|---|---|
+| cache-eviction | clean_patch | yes | no | 1/1 | 1/1 | 1331 | 558 | 0 |
+| cache-eviction | clean_patch | yes | no | 1/1 | 1/1 | 18939 | 550 | 0 |
+| cache-eviction | clean_patch | yes | no | 1/1 | 1/1 | 15573 | 2017 | 0 |
+| csv-quoted-fields | clean_patch | yes | no | 1/1 | 1/1 | 1718 | 528 | 0 |
+| csv-quoted-fields | clean_patch | yes | no | 1/1 | 1/1 | 1694 | 524 | 0 |
+| csv-quoted-fields | clean_patch | yes | no | 1/1 | 1/1 | 5950 | 562 | 0 |
+| interval-merge | clean_patch | yes | no | 1/1 | 1/1 | 1927 | 553 | 0 |
+| interval-merge | clean_patch | yes | no | 1/1 | 1/1 | 7921 | 563 | 0 |
+| interval-merge | clean_patch | yes | no | 1/1 | 1/1 | 13236 | 551 | 0 |
+| pagination-last-page | clean_patch | yes | no | 1/1 | 1/1 | 1101 | 532 | 0 |
+| pagination-last-page | clean_patch | yes | no | 1/1 | 1/1 | 10239 | 542 | 0 |
+| pagination-last-page | clean_patch | yes | no | 1/1 | 1/1 | 9361 | 531 | 0 |
+| path-normalise | clean_patch | yes | no | 1/1 | 1/1 | 1512 | 542 | 0 |
+| path-normalise | clean_patch | yes | no | 1/1 | 1/1 | 7548 | 516 | 0 |
+| path-normalise | clean_patch | yes | no | 1/1 | 1/1 | 9455 | 556 | 0 |
+| retry-backoff | clean_patch | yes | no | 1/1 | 1/1 | 1358 | 553 | 0 |
+| retry-backoff | clean_patch | yes | no | 1/1 | 1/1 | 11789 | 550 | 0 |
+| retry-backoff | clean_patch | yes | no | 1/1 | 1/1 | 12520 | 542 | 0 |
+| semver-compare | clean_patch | yes | no | 1/1 | 1/1 | 12191 | 544 | 0 |
+| semver-compare | clean_patch | yes | no | 1/1 | 1/1 | 15029 | 535 | 0 |
+| semver-compare | clean_patch | yes | no | 1/1 | 1/1 | 12212 | 558 | 0 |
+| template-render | clean_patch | yes | no | 1/1 | 1/1 | 14162 | 537 | 0 |
+| template-render | clean_patch | yes | no | 1/1 | 1/1 | 16046 | 542 | 0 |
+| template-render | clean_patch | yes | no | 1/1 | 1/1 | 16067 | 535 | 0 |
+
+3 of 8 task(s) agree across their repeats on result, patch and per-call tokens.
+
+| task | runs | resolved | results | patches | token traces | agent ms, min/median/max | agrees |
+|---|---|---|---|---|---|---|---|
+| cache-eviction | 3 | 3/3 | clean_patch | 2 | 2 | 1331 / 15573 / 18939 | no |
+| csv-quoted-fields | 3 | 3/3 | clean_patch | 1 | 1 | 1694 / 1718 / 5950 | yes |
+| interval-merge | 3 | 3/3 | clean_patch | 1 | 2 | 1927 / 7921 / 13236 | no |
+| pagination-last-page | 3 | 3/3 | clean_patch | 1 | 1 | 1101 / 9361 / 10239 | yes |
+| path-normalise | 3 | 3/3 | clean_patch | 3 | 3 | 1512 / 7548 / 9455 | no |
+| retry-backoff | 3 | 3/3 | clean_patch | 2 | 2 | 1358 / 11789 / 12520 | no |
+| semver-compare | 3 | 3/3 | clean_patch | 1 | 1 | 12191 / 12212 / 15029 | yes |
+| template-render | 3 | 3/3 | clean_patch | 2 | 2 | 14162 / 16046 / 16067 | no |
 
 ## synthetic -- single-shot/ollama/qwen2.5-coder:7b [single-shot-v1]
 
