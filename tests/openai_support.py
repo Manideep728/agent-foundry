@@ -54,6 +54,7 @@ def fake_openai_server() -> Iterator[FakeServer]:
                 {
                     "path": self.path,
                     "authorization": self.headers.get("Authorization"),
+                    "user_agent": self.headers.get("User-Agent"),
                     "body": json.loads(self.rfile.read(length)),
                 }
             )

@@ -21,6 +21,7 @@ from collections.abc import Callable
 from email.utils import parsedate_to_datetime
 from typing import Any
 
+from control_plane import __version__
 from control_plane.domain.model import (
     Message,
     MessageRole,
@@ -35,6 +36,10 @@ DEFAULT_TIMEOUT_S = 300.0
 DEFAULT_RATE_LIMIT_ATTEMPTS = 6
 DEFAULT_MAX_WAIT_S = 60.0
 """The longest one wait may be. A provider that asks for an hour is refused."""
+
+USER_AGENT = f"agentfoundry/{__version__}"
+"""Sent on every request. Cloudflare, in front of Groq, refuses urllib's default
+`Python-urllib/3.x` with 403 "error code: 1010" before the API sees the key."""
 
 _FALLBACK_WAIT_S = 5.0
 """The first wait when a 429 names no Retry-After; doubled on each attempt."""
@@ -139,7 +144,7 @@ class OpenAICompatClient:
         raise AssertionError("unreachable: the last attempt returns or raises")
 
     def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
-        headers = {"Content-Type": "application/json"}
+        headers = {"Content-Type": "application/json", "User-Agent": USER_AGENT}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
         request = urllib.request.Request(

@@ -92,6 +92,17 @@ def test_the_request_is_a_chat_completion_with_the_key_as_a_bearer_token(
     ]
 
 
+def test_the_request_names_agentfoundry_as_its_user_agent(server: FakeServer) -> None:
+    """urllib's default User-Agent is refused by Cloudflare in front of Groq."""
+    server.replies.append(Reply(body=completion()))
+
+    client(server).complete((Message(MessageRole.USER, "hi"),))
+
+    user_agent = server.received[0]["user_agent"]
+    assert user_agent.startswith("agentfoundry/")
+    assert "Python-urllib" not in user_agent
+
+
 def test_no_tools_key_is_sent_when_none_are_offered(server: FakeServer) -> None:
     server.replies.append(Reply(body=completion()))
 
