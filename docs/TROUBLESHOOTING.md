@@ -41,6 +41,19 @@ agent note (`af show <run-id>`). A run that ran out of attempts is
 `agent_error`. Run fewer tasks at a time, or a smaller suite, under the tier's
 limit.
 
+## A hosted provider answers 403 or 404 before any model runs
+
+A 403 with `error code: 1010` comes from Cloudflare, not from the API: it
+refused the client's signature. The client sends `User-Agent:
+agentfoundry/<version>` for this reason, so a build older than that fix fails
+here. A 404 that names the model usually means the provider no longer serves
+it. Free tiers often remove models. List the models of the provider before a
+run:
+
+```
+curl -s -H "Authorization: Bearer $GROQ_API_KEY" https://api.groq.com/openai/v1/models
+```
+
 ## A stopped worker's container is still on the host
 
 Each container carries the database that started it as a label, and recovery
