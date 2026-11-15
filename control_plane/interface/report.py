@@ -117,10 +117,15 @@ def _environment(records: Sequence[RunRecord]) -> list[str]:
 
     A benchmark figure nobody can attribute to a machine is not reproducible,
     which is the reason these columns exist at all.
+
+    Only a run that reached validation has a runner to describe. One that
+    failed earlier still holds the placeholder fields it was created with,
+    and counting those reports an `unknown` machine that never ran anything.
     """
-    architectures = sorted({r.arch for r in records})
+    validated = [r for r in records if r.report is not None]
+    architectures = sorted({r.arch for r in validated}) or ["none recorded"]
+    isolated = sorted({str(r.pid1) for r in validated}) or ["none recorded"]
     digests = sorted({r.image_digest for r in records if r.image_digest})
-    isolated = sorted({str(r.pid1) for r in records})
     lines = [
         f"- Architecture: {', '.join(architectures)}",
         f"- Supervisor was PID 1: {', '.join(isolated)}",

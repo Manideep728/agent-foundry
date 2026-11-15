@@ -148,6 +148,41 @@ def test_the_report_names_the_environment_that_validated_the_runs(
     assert f"- Harness: `{harness_version()}`" in text
 
 
+def test_a_run_that_never_reached_validation_names_no_environment(
+    tmp_path: Path,
+) -> None:
+    """Regression: a run that timed out in the agent showed as `unknown`.
+
+    Three real-repository runs whose model call timed out were stored with
+    the placeholder runner fields a run carries until something validates it,
+    and the report printed `Architecture: unknown, x86_64` and `Supervisor was
+    PID 1: False, True` for a suite that every validated run ran as PID 1.
+    """
+    bench(tmp_path, "pagination-last-page")
+    with SqliteRunRepository(tmp_path / "af.sqlite3") as repository:
+        validated = repository.list_runs()[0]
+        opened = a_created_run("run-agent-failed", "interval-merge")
+        repository.create(opened)
+        repository.finish(
+            replace(
+                opened,
+                run=opened.run.fail(
+                    FailureCategory.INFRASTRUCTURE_FAILED,
+                    1_700_000_001_000,
+                    "ollama did not answer within 900s",
+                ),
+            ),
+            expected=RunState.CREATED,
+        )
+
+    report(tmp_path, "--out", str(tmp_path / "report.md"))
+
+    text = read_report(tmp_path)
+    assert f"- Architecture: {validated.arch}\n" in text
+    assert f"- Supervisor was PID 1: {validated.pid1}\n" in text
+    assert "unknown" not in text
+
+
 # --- the rules the report must not break -------------------------------------
 
 
@@ -188,6 +223,8 @@ def test_two_configurations_are_reported_in_separate_sections(
     # Each section counts only its own runs. Blended, this was 1/2.
     assert "| resolved | 1/1 |" in text
     assert "### Produced no measurement (1)" in text
+    # The tools section's one run failed before any runner saw it.
+    assert "- Architecture: none recorded" in text
 
 
 def test_a_run_still_in_flight_is_named_and_left_out_of_every_figure(
