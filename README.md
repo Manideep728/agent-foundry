@@ -30,15 +30,16 @@ from the database these runs were stored in.
   shows that every task can be solved inside the harness, so a model that
   scores zero failed on its own.
 - **qwen2.5-coder:7b**, given the whole small repository in one prompt, solves
-  5 of the 8 synthetic tasks, and the same 5 in every repeat.
+  5 of the 8 synthetic tasks, and the same 5 in every repeat. That is about
+  1,960 tokens per resolved task (29,358 tokens over 15 resolved runs).
 - **llama3.2:3b with tools** writes patches on the synthetic suite, and every
   one breaks a test that passed before. On the real repositories it reads files
   and never writes a fix. Three more runs, all of `pallets-flask-5063`, have no
   measurement: one model call ran past the 900 s limit each time. The report
   lists them with that reason instead of counting them as failures.
-- **Repeats agree.** At temperature 0, every task in all five configurations
-  gave the same outcome, the same patch, and the same token count on every
-  model call, in all three repeats.
+- **Repeats agree.** At temperature 0, all 34 task configurations (8 tasks in
+  three configurations, 5 in two) gave the same outcome, the same patch, and
+  the same token count on every model call, in all three repeats.
 - **No hosted model is in the table.** The OpenAI-compatible client works with
   any chat-completions server, but it has only been run against a local one.
 
@@ -49,6 +50,8 @@ from the database these runs were stored in.
 | **No lost work** | A worker killed with `SIGKILL` mid-suite: **64 of 64** runs stored, each exactly once |
 | **Scales out** | **2.5x** throughput with 4 workers (104 to 255 runs per minute) |
 | **Cheap isolation** | The C++ supervisor as PID 1 adds **3 ms or less**; the container adds about 400 ms |
+| **Reproducible** | **34 of 34** task configurations gave the same outcome, patch and per-call token counts in all 3 repeats |
+| **Fair tasks** | **12 of 17** candidate SWE-bench tasks rejected before any model ran, because no agent could pass them here |
 | **Deployed** | ECS, RDS and S3 on AWS with Terraform: deploy, measure 16 runs and destroy in **11 minutes** |
 | **Tested** | **1,155** Python tests and **146** C++ tests, in 4 CI jobs with real Docker, Kafka and PostgreSQL |
 
@@ -183,8 +186,9 @@ instance that passes an oracle check. The reference fix must resolve 3 of 3
 runs, the untouched repository must resolve 0 of 3, and every command must
 finish in under 60 s with no network. Every requests instance failed, because
 its tests need the network. Every pylint instance failed, because its source
-tree has a file name the fixture manifest does not accept. That leaves three
-flask tasks and two pytest tasks.
+tree has a file name the fixture manifest does not accept. Of the 17 instances
+the rule checked, 12 were rejected, which leaves three flask tasks and two
+pytest tasks.
 
 The fixtures are not in the repository. `af fetch` pulls each image by digest,
 copies its source tree out, checks it against the pin, and builds the
@@ -277,6 +281,8 @@ What the isolation costs, over 40 runs of each arm for the two commands of
 
 The supervisor adds no time this measurement can find: the difference is 3 ms
 or less and its sign changes. The container adds about 400 ms per validation.
+For the command `true`, it adds 195 ms, which is the container's own start and
+stop.
 
 ## Distributed and on AWS
 
@@ -326,6 +332,11 @@ trials:
 | 1 | 104 | 1.0x |
 | 2 | 170 | 1.6x |
 | 4 | 255 | 2.5x |
+
+Four workers cannot share the work topic's six partitions equally; with twelve
+partitions, four workers measured 274 runs per minute (2.6x). The rest of the
+gap to 4x is dispatch and start-up inside each trial, and the one Docker daemon
+every worker shares.
 
 In one trial a worker was killed with `SIGKILL` after five runs. Kafka moved
 its partitions to the other worker after the 45 s session timeout, and the
